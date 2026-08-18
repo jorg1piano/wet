@@ -1,0 +1,180 @@
+# .wet.example.yaml — the full `.wet.yaml` schema, annotated.
+#
+# Copy to `.wet.yaml` at your repo root and delete what you don't need.
+# Everything below is optional except `project_name`. wet itself contains no
+# project-specific knowledge; this file is the entire contract.
+#
+# `wet setup` applies it to whichever checkout you are in: the main repo at
+# slot 0 (the declared base ports), a worktree at slot N.
+#
+# Validate a config without touching a worktree:
+#   wet env populate <template> --dry-run
+
+# ---------------------------------------------------------------------------
+# Identity (required)
+# ---------------------------------------------------------------------------
+
+# Must match [a-z0-9][a-z0-9_-]* — it embeds into COMPOSE_PROJECT_NAME, so it
+# has to satisfy Docker Compose's naming rules.
+project_name: myapp
+
+# ---------------------------------------------------------------------------
+# Files copied into each new worktree
+# ---------------------------------------------------------------------------
+#
+# Paths are relative to the repo root. Missing files are skipped silently so
+# an optional file doesn't break the flow.
+#
+# Prefer `env populate` (below) over copying generated env files: a copy
+# snapshots one machine's values and then drifts, while a template re-renders
+# with this worktree's own ports every time.
+
+copy:
+  files:
+    - .claude/settings.json
+    - .claude/settings.local.json
+  dirs:
+    - .vscode
+
+# ---------------------------------------------------------------------------
+# Ports
+# ---------------------------------------------------------------------------
+#
+# Worktree N gets `base + N*stride` for each declared port, so several stacks
+# run side by side. Slots are reused lowest-first as worktrees are popped.
+#
+# Names must match [A-Z_][A-Z0-9_]* and must not collide with the reserved
+# template fields (ProjectName, Branch, BranchSafe, Slot, Pools).
+
+port_stride: 10 # default stride; optional, defaults to 10
+
+ports:
+  - { name: APP_PORT, base: 4000 }
+  - { name: DB_PORT, base: 5432 }
+  - { name: GRPC_PORT, base: 50051 }
+  - name: DEBUG_PORT
+    base: 40000
+    stride: 5 # per-port override of port_stride
+
+# ---------------------------------------------------------------------------
+# Pools — exclusive resources, one item per worktree
+# ---------------------------------------------------------------------------
+#
+# Anything that can't be shared and can't be computed from a slot number:
+# emulator IDs, test-fixture snapshots, licence seats. Each `wet worktree
+# create` claims the lowest unclaimed item; claims release when the worktree
+# is popped. Allocation happens BEFORE `git worktree add`, so an exhausted
+# pool aborts with nothing left on disk.
+#
+# Pool names must match [a-z_][a-z0-9_]*. Reachable as {{.Pools.devices}} in
+# templates and $POOL_DEVICES in hooks.
+
+pools:
+  devices:
+    - emulator-5554
+    - emulator-5556
+    - emulator-5558
+  fixtures:
+    - snap-alpha
+    - snap-beta
+
+# Optional: how to grow a pool when every item is claimed, instead of failing.
+# pool_grow:
+#   devices: ./scripts/create-emulator.sh
+
+# ---------------------------------------------------------------------------
+# env: — the derivation layer
+# ---------------------------------------------------------------------------
+#
+# Values are Go text/template strings. Available fields: ProjectName, Branch,
+# BranchSafe (branch with slashes flattened — safe for Docker names), Slot,
+# every declared port, and .Pools.<name>.
+#
+# Entries may reference each other in any order — they resolve to a fixed
+# point, not in sorted order. That is what makes this the single source of
+# truth for a monorepo: derive a URL from a port ONCE here, and every
+# package's template consumes the result instead of re-deriving it. A
+# reference cycle or a typo is reported by key name.
+#
+# Anything here can be overridden per machine by a gitignored `.env.local` at
+# the repo root (KEY=value lines) — so the entries below act as defaults. Put
+# a LAN IP for physical-device testing there, not in this file.
+
+env:
+  DEV_HOST: "localhost" # override in .env.local for a physical device
+  APP_URL: "http://{{.DEV_HOST}}:{{.APP_PORT}}"
+  CALLBACK_URL: "{{.APP_URL}}/auth/callback" # derived from a derived value
+  COMPOSE_PROJECT_NAME: "{{.ProjectName}}-{{.BranchSafe}}"
+  FLUTTER_DEVICE: "{{.Pools.devices}}"
+
+# ---------------------------------------------------------------------------
+# render: — template → output pairs
+# ---------------------------------------------------------------------------
+#
+# One entry per env file the repo needs. A monorepo lists one per package;
+# each carries its own secret sources, because a backend needs the vault and a
+# mobile app usually needs nothing.
+#
+# Rendered by `wet setup` (before hooks, so a hook that boots the stack finds
+# the files already written) and by `wet env populate --all`. Add --dry-run to
+# see every file that would be written for this slot without touching disk.
+#
+# Each target renders against its own copy of the data, so one target's
+# secrets can never leak into another's output — a template that references a
+# key it wasn't given fails rather than silently picking up a sibling's.
+#
+# secrets_from: takes files, or "-" for stdin (at most one target may use
+# stdin per run). Later sources win on a key collision.
+
+render:
+  - template: .env.example.tpl
+    out: .env
+  # - template: web/.env.tpl
+  #   out: web/.env.dev
+  #   secrets_from: [/tmp/vault.json]
+  # - template: mobile/.env.tpl
+  #   out: mobile/.env
+
+# ---------------------------------------------------------------------------
+# Hooks
+# ---------------------------------------------------------------------------
+#
+# Each command is rendered as a template, then run through `sh -c` with cwd at
+# the worktree — so pipes, &&, and globs all work. Every value above is also
+# available as a real environment variable ($APP_PORT, $POOL_DEVICES, $SLOT,
+# $BRANCH_SAFE), which is what non-templatable scripts should read.
+#
+# A nonzero exit aborts the operation and prints the failing command.
+
+hooks:
+  post_create:
+    # `render:` above already covers env files — hooks are for actions.
+    - echo "slot {{.Slot}} ready at {{.APP_URL}}"
+
+    # Same command, with secrets supplied. wet never talks to a secret store
+    # itself — any command emitting a flat JSON object works. The source is
+    # always explicit (`--secrets-from -`, or a path); wet never sniffs stdin,
+    # because a hook inherits its parent's and a wrong guess would hang:
+    #   op item get myapp --format json | jq '...' | wet env populate ...
+    #   az keyvault secret list ...     | jq '...' | wet env populate ...
+    # Piped keys override env: entries above, but may not override a declared
+    # port (that would defeat slot allocation, and is an error).
+    # - op item get myapp --format json | jq 'from_entries' | wet env populate .env.example.tpl -o .env --secrets-from -
+
+  pre_remove:
+    - docker compose down -v
+    # - ./scripts/release-device.sh "$POOL_DEVICES"
+
+# ---------------------------------------------------------------------------
+# Pull requests — `wet pr create`
+# ---------------------------------------------------------------------------
+#
+# base resolves: --base flag → pr.base → "main".
+# Without body_template, the body lists slot, ports, and pool items.
+
+pr:
+  base: main
+  # body_template: |
+  #   ## Summary
+  #
+  #   Worktree slot {{.Slot}}, ports: {{range $k, $v := .Ports}}{{$k}}={{$v}} {{end}}
