@@ -125,6 +125,11 @@ var ErrConfigMissing = errors.New(".wet.yaml not found at repo root")
 
 const wetConfigFileName = ".wet.yaml"
 
+// exampleConfigFileName is the annotated schema shipped in the binary and
+// written beside the installed skill. Named once so the installer, the
+// scaffolder, and the docs pointer cannot disagree about it.
+const exampleConfigFileName = "wet.example.yaml"
+
 // wetLocalConfigFileName is an optional, gitignored overlay sitting beside
 // `.wet.yaml`. It exists because some of the config is a fact about a
 // workstation rather than about the repo — a `pools:` list of device IDs is

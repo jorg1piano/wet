@@ -63,7 +63,7 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	case "skill", "wet-skill":
 		if err := installSkillFiles("wet", []skillFile{
 			{name: "SKILL.md", content: wetSkillTemplate},
-			{name: "wet.example.yaml", content: wetExampleConfig},
+			{name: exampleConfigFileName, content: wetExampleConfig},
 		}); err != nil {
 			return err
 		}
