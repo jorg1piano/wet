@@ -3,7 +3,9 @@ package cmd
 import (
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,6 +22,15 @@ import (
 //
 //go:embed install-wet-template.md
 var wetSkillTemplate string
+
+// wetExampleConfig is the annotated `.wet.yaml` schema, shipped beside the
+// skill so SKILL.md can link to a sibling file instead of restating the
+// schema inline — one authored copy, no splicing, no drift. It lives in this
+// package for the same `//go:embed` reason as the template above; there is
+// deliberately no copy at the repo root.
+//
+//go:embed wet.example.yaml
+var wetExampleConfig string
 
 var installForce bool
 
@@ -50,7 +61,10 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	target := args[0]
 	switch target {
 	case "skill", "wet-skill":
-		if err := installSkillFile("wet", wetSkillTemplate); err != nil {
+		if err := installSkillFiles("wet", []skillFile{
+			{name: "SKILL.md", content: wetSkillTemplate},
+			{name: "wet.example.yaml", content: wetExampleConfig},
+		}); err != nil {
 			return err
 		}
 		if err := ensureGitignoreEntries(); err != nil {
@@ -62,9 +76,6 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	}
 }
 
-// installSkillFile writes an embedded skill template to
-// <repoRoot>/.claude/skills/<name>/SKILL.md. Refuses to overwrite an
-// existing file unless --force was passed.
 // ensureGitignoreEntries appends wet-specific entries to the repo's .gitignore
 // if they're not already present.
 func ensureGitignoreEntries() error {
@@ -74,7 +85,10 @@ func ensureGitignoreEntries() error {
 	}
 	gitignorePath := filepath.Join(repoRoot, ".gitignore")
 
-	entries := []string{".wet-worktrees.json", ".env.worktree"}
+	// The lock file is listed separately from the state file rather than as a
+	// .wet-worktrees.* glob so the substring check below stays exact: a repo
+	// installed before the lock existed gets just the missing entry appended.
+	entries := []string{".wet-worktrees.json", ".wet-worktrees.lock", ".env.worktree"}
 
 	existing, _ := os.ReadFile(gitignorePath)
 	content := string(existing)
@@ -155,44 +169,117 @@ func ensureClaudeSettings() error {
 	return nil
 }
 
-func installSkillFile(name, content string) error {
+// skillFile is one embedded file to drop into a skill directory.
+type skillFile struct {
+	name    string
+	content string
+}
+
+// installSkillFiles writes embedded files into
+// <repoRoot>/.claude/skills/<name>/. Each file is handled independently: one
+// already matching the bundled copy is left alone and reported as up to date,
+// and one that exists but differs is only overwritten with --force or an
+// explicit yes. Per-file prompting (rather than one prompt for the set) keeps
+// the answer meaningful — declining to clobber a hand-edited SKILL.md should
+// not also withhold a schema file the user has never touched.
+//
+// The trailing "restart Claude Code" advice prints once, after the set, and
+// only if something actually changed.
+func installSkillFiles(name string, files []skillFile) error {
 	repoRoot, err := getRepoRoot()
 	if err != nil {
 		return err
 	}
 	targetDir := filepath.Join(repoRoot, ".claude", "skills", name)
-	targetPath := filepath.Join(targetDir, "SKILL.md")
-
-	if existing, err := os.ReadFile(targetPath); err == nil {
-		if string(existing) == content {
-			fmt.Printf("  %s is already up to date.\n", targetPath)
-			return nil
-		}
-		if !installForce {
-			fmt.Printf("  %s exists and differs from the bundled version.\n", targetPath)
-			fmt.Print("  Overwrite? [y/N] ")
-			var answer string
-			fmt.Scanln(&answer)
-			answer = strings.ToLower(strings.TrimSpace(answer))
-			if answer != "y" && answer != "yes" {
-				fmt.Println("  Skipped.")
-				return nil
-			}
-		}
-	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("stat %s: %w", targetPath, err)
-	}
-
 	if err := os.MkdirAll(targetDir, 0o755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", targetDir, err)
 	}
-	data := []byte(content)
-	if err := os.WriteFile(targetPath, data, 0o644); err != nil {
-		return fmt.Errorf("write %s: %w", targetPath, err)
+
+	wrote := false
+	for _, f := range files {
+		targetPath := filepath.Join(targetDir, f.name)
+		if existing, err := os.ReadFile(targetPath); err == nil {
+			if string(existing) == f.content {
+				fmt.Printf("  %s is already up to date.\n", targetPath)
+				continue
+			}
+			if !installForce {
+				ok, err := confirmOverwrite(targetPath)
+				if err != nil {
+					return err
+				}
+				if !ok {
+					fmt.Printf("  Skipped: %s\n", targetPath)
+					continue
+				}
+			}
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("stat %s: %w", targetPath, err)
+		}
+
+		data := []byte(f.content)
+		if err := os.WriteFile(targetPath, data, 0o644); err != nil {
+			return fmt.Errorf("write %s: %w", targetPath, err)
+		}
+		fmt.Printf("  Installed: %s (%d bytes)\n", targetPath, len(data))
+		wrote = true
 	}
 
-	fmt.Printf("  Installed: %s (%d bytes)\n", targetPath, len(data))
-	fmt.Println("  Claude Code will load this skill on next session start.")
-	fmt.Println("  Restart Claude Code or run /reload if you want it active immediately.")
+	if wrote {
+		fmt.Println("  Claude Code will load this skill on next session start.")
+		fmt.Println("  Restart Claude Code or run /reload if you want it active immediately.")
+	}
 	return nil
+}
+
+// confirmOverwrite asks before clobbering a file that differs from the
+// bundled copy — the user may have edited it on purpose.
+//
+// Returns an error when there is nobody to ask: with stdin closed, redirected
+// from /dev/null, or piped from a CI step, "no answer" is not a decision. The
+// old code discarded Scanln's error, so EOF was indistinguishable from a typed
+// "n" and `wet install wet-skill </dev/null` exited 0 having installed
+// nothing — a green CI step that silently did no work. Ambiguity is now loud,
+// and the message names the flag that resolves it.
+func confirmOverwrite(targetPath string) (bool, error) {
+	notInteractive := func() error {
+		return fmt.Errorf(
+			"%s exists and differs from the bundled version, but stdin is not interactive so there is nobody to ask; re-run with --force to overwrite it (or delete the file first)",
+			targetPath,
+		)
+	}
+
+	if !stdinIsTerminal() {
+		return false, notInteractive()
+	}
+
+	fmt.Printf("  %s exists and differs from the bundled version.\n", targetPath)
+	fmt.Print("  Overwrite? [y/N] ")
+	var answer string
+	if _, err := fmt.Scanln(&answer); err != nil {
+		// A bare Enter yields "unexpected newline" — a deliberate "no", and
+		// the documented default. Only an exhausted input means no answer
+		// was ever possible.
+		if errors.Is(err, io.EOF) {
+			// The prompt was already printed (stdin looked like a terminal:
+			// /dev/null is a character device too), so close the line before
+			// the error lands.
+			fmt.Println()
+			return false, notInteractive()
+		}
+	}
+	answer = strings.ToLower(strings.TrimSpace(answer))
+	return answer == "y" || answer == "yes", nil
+}
+
+// stdinIsTerminal reports whether stdin is a terminal a human could answer a
+// prompt on. A redirect from a file or a pipe is not; note that /dev/null IS
+// a character device and passes this check, which is why confirmOverwrite
+// also treats EOF as "nobody to ask".
+func stdinIsTerminal() bool {
+	info, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeCharDevice != 0
 }
