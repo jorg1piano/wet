@@ -112,8 +112,23 @@ func runSetupCore(repoRoot, worktreePath, branchName string, headless, isMain bo
 		// baked into a CLI that claims to have none, and it silently produces
 		// a worktree with no ports allocated — which fails later, somewhere
 		// else, as a port collision nobody traces back to here.
-		return fmt.Errorf("no %s found in %s or %s — write one (see `wet install wet-skill`) before running setup",
-			wetConfigFileName, worktreePath, repoRoot)
+		//
+		// Writing a starter config is the one safe exception: it is the file
+		// the user was told to go and write, it declares nothing about the
+		// project beyond a name derived from the directory, and setup still
+		// stops so they can fill it in before anything is allocated.
+		searched := worktreePath
+		if repoRoot != worktreePath {
+			searched = fmt.Sprintf("%s or %s", worktreePath, repoRoot)
+		}
+		path, writeErr := scaffoldStarterConfig(repoRoot)
+		if writeErr != nil {
+			return fmt.Errorf("no %s found in %s, and writing a starter one failed: %w",
+				wetConfigFileName, searched, writeErr)
+		}
+		fmt.Printf("  No %s found in %s.\n", wetConfigFileName, searched)
+		fmt.Printf("  Wrote a starter one: %s\n", path)
+		return fmt.Errorf("edit %s (project_name, and ports: if your project listens on any), then re-run setup — for help writing it, see `wet install wet-skill`", path)
 	} else if cfgErr != nil {
 		return cfgErr
 	}
