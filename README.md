@@ -10,7 +10,9 @@ Core commands:
 ```
 wet setup                       # configure this checkout — main repo OR worktree
 wet worktree create [branch]    # minimal: `git worktree add` + copy .env + open tmux window
+wet worktree mount <branch>     # same, for a branch that already exists (local or on origin)
 wet worktree setup              # worktree-only form of `wet setup`
+wet worktree list               # interactive list — pick one to open in tmux or VS Code (alias: ls)
 wet worktree pop                # remove the current worktree (run pre_remove hooks, tear down)
 wet env populate <tpl> -o <out> # render a template with this checkout's values
 wet pr create                   # push branch + open a GitHub PR (via gh)
@@ -19,16 +21,24 @@ wet install wet-skill           # install the Claude Code helper skill
 
 `create` is intentionally minimal — it only forks the worktree and copies
 `.env` (if present). Everything else (`.wet.yaml` parsing, port allocation,
-`.env.worktree` rendering, hooks, state-file bookkeeping) happens in
-`setup`, which you run from inside the new worktree. This split lets you
-`cd` into the fresh worktree (or let tmux open it for you) and run setup
-there — which is almost always what you want, because the hooks in
-`.wet.yaml` typically assume they're running in the worktree's shell.
+`.env.worktree` rendering, hooks, state-file bookkeeping) happens in `setup`,
+which you run from inside the new worktree, because the hooks in `.wet.yaml`
+typically assume they're running in the worktree's shell.
+
+`mount` is `create` for a branch that already exists: it never creates a
+branch, and if only `origin/<branch>` is there it fetches and sets up a local
+tracking branch first. Everything after the checkout is identical — copy
+`.env`, open a tmux window, then `wet worktree setup` inside. Both take
+`--no-tmux` when something else is managing sessions.
 
 ## Quick start
 
-A fully annotated config lives at [`.wet.example.yaml`](.wet.example.yaml) —
-copy it and delete what you don't need. The short version:
+A fully annotated config lives at
+[`cmd/wet.example.yaml`](cmd/wet.example.yaml) in this repo — and
+`wet install wet-skill` drops the same file into *your* repo at
+`.claude/skills/wet/wet.example.yaml`, which is the copy to reach for once wet
+is installed. Copy it to `.wet.yaml` at your repo root and delete what you
+don't need. The short version:
 
 ```yaml
 project_name: myapp
@@ -57,17 +67,13 @@ wet worktree setup
 ```
 
 `create` forks `../worktree-feature/new-thing/` and copies `.env` into it.
-`setup` then reads `.wet.yaml`, picks the lowest free port slot (1 on a
-fresh install), copies the configured files and dirs (e.g. `.vscode/`),
-and writes a `.env.worktree` file with:
-
-```
-APP_PORT=8090
-COMPOSE_PROJECT_NAME=myapp-feature-new-thing
-```
-
-`setup` is idempotent — re-running it on a worktree that's already
-tracked updates the entry in place rather than appending a duplicate.
+`setup` then reads `.wet.yaml`, picks the lowest free port slot (1 on a fresh
+install), copies the configured files and dirs, and writes a `.env.worktree`
+holding `APP_PORT=8090` — slot N gets `base + N*port_stride`, so slot 1 of a
+`base: 8080` port with `port_stride: 10` is 8090 — and
+`COMPOSE_PROJECT_NAME=myapp-feature-new-thing`. It is idempotent — re-running it
+on a tracked worktree updates the entry in place rather than appending a
+duplicate.
 
 To clean up, `cd` into the worktree and run `wet worktree pop`.
 
@@ -80,88 +86,42 @@ help writing or debugging `.wet.yaml`, install the bundled skill:
 wet install wet-skill
 ```
 
-That writes an embedded Claude Code skill to
-`.claude/skills/wet/SKILL.md` at your repo root. The skill teaches Claude
-how to probe your project (for env files, Docker Compose services, ports,
-lifecycle needs) and produce a `.wet.yaml` that matches it. It also covers
-the schema, template fields, common hook patterns, and the validation
-rules, so Claude can answer schema questions and debug hook failures
-without leaving the editor.
+It writes an embedded Claude Code skill to `.claude/skills/wet/SKILL.md` at your
+repo root, which teaches Claude how to probe your project (env files, Docker
+Compose services, ports, lifecycle needs) and produce a `.wet.yaml` that matches
+it, and lets it answer schema questions and debug hook failures without leaving
+the editor. Re-run with `--force` to overwrite. Both files behave the same in
+every worktree and every clone, so they're worth checking into git.
 
-Re-run with `--force` to overwrite an existing install. The skill file is
-committed-source-worthy — it behaves the same in every worktree and every
-clone — so feel free to check it into git.
+It touches three more things in your repo, so it's worth knowing before you run
+it:
 
-The canonical source of the skill body lives at
-`cli/cmd/install-wet-template.md` in the `wet` repo and is embedded into
-the binary at build time via `//go:embed`.
+- `.claude/skills/wet/wet.example.yaml` — the annotated schema, alongside the
+  skill, so Claude (and you) have it locally.
+- `.gitignore` — appends `.wet-worktrees.json`, `.wet-worktrees.lock` and
+  `.env.worktree` if they aren't already mentioned, and prints what it added.
+  An existing file is appended to, never rewritten.
+- `.claude/settings.json` — sets `env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`,
+  merging into the existing settings and leaving every other key alone. Already
+  set is a no-op.
+
+The skill's source lives at `cmd/install-wet-template.md` in the `wet` repo and
+is embedded into the binary via `//go:embed`.
 
 ## Schema reference
 
-`.wet.yaml` is loaded from the checkout being configured, falling back to the
-main repo root. A missing config is an error — see
-[No config, no setup](#no-config-no-setup).
+The single annotated schema is [`cmd/wet.example.yaml`](cmd/wet.example.yaml) —
+every key, with its defaults and validation rules, in one file. In your own repo
+it's the copy `wet install wet-skill` leaves at
+`.claude/skills/wet/wet.example.yaml`. Two things it
+can't tell you, because they're about how the file is found rather than what's
+in it:
 
-```yaml
-project_name: myapp         # required; must match [a-z0-9][a-z0-9_-]*
-                            # embeds into COMPOSE_PROJECT_NAME, so it has to
-                            # satisfy Docker Compose's naming rules.
-
-main_branch: development    # optional; defaults to "main". The trunk: what
-                            # new worktrees branch off (origin/<branch> when
-                            # it exists, so a stale main checkout can't leak
-                            # its state into one), what `wet pr create`
-                            # targets, and the branch it refuses to PR from.
-
-copy:                       # optional
-  files:                    # exact files copied into each new worktree,
-    - .env                  # relative to the repo root. Missing files are
-    - config/local.toml     # silently skipped so optional files don't break
-                            # the flow.
-  dirs:                     # directories recursively copied.
-    - .vscode
-
-port_stride: 10             # default stride for ports (see `ports` below).
-                            # Worktree N gets port = base + N*stride.
-                            # Optional; defaults to 10.
-
-ports:                      # any number of named port declarations.
-  - name: APP_PORT          # must match [A-Z_][A-Z0-9_]*. Must not collide
-    base: 8080              # with the reserved template fields
-                            # (ProjectName, Branch, BranchSafe, Slot).
-  - name: DB_PORT
-    base: 5432
-  - name: DEBUG_PORT        # per-port stride override — this port advances
-    base: 40000             # by 5 per worktree instead of the default 10.
-    stride: 5
-
-env:                        # KEY=value entries written to `.env.worktree`.
-  COMPOSE_PROJECT_NAME: "{{.ProjectName}}-{{.BranchSafe}}"
-  LITERAL: "hello"          # Values are Go text/template strings with
-                            # missingkey=error, so typos fail at load time.
-
-pools:                      # optional; named pools of opaque strings that
-  devices:                  # get round-robin allocated across worktrees.
-    - emulator-5554         # Pool names must match [a-z_][a-z0-9_]* and must
-    - emulator-5556         # not collide with reserved template fields
-  fixtures:                 # (ProjectName, Branch, BranchSafe, Slot, Pools).
-    - fresh-snapshot-a      # Each worktree claims the lowest-indexed item
-    - fresh-snapshot-b      # not already held by another worktree.
-
-pr:                         # optional; configures `wet pr create` behavior.
-  base: main                # base branch for PRs (default: `main_branch`)
-  body_template: |          # Go text/template for the PR body. Available
-    ## Summary              # fields: ProjectName, Branch, BranchSafe, Slot,
-                            # Ports (map), Pools (map). If omitted, wet
-    Worktree slot {{.Slot}} # generates a default body with worktree context.
-
-hooks:                      # optional shell commands run around lifecycle
-  post_create:              # events. Each entry is a single string passed
-    - echo "created {{.Branch}} at slot {{.Slot}}"
-    - ./scripts/setup.sh    # to `sh -c` from the worktree root.
-  pre_remove:
-    - docker compose -p {{.ProjectName}}-{{.BranchSafe}} down
-```
+- `.wet.yaml` is loaded from **the checkout being configured**, falling back to
+  the main repo root. That's what makes a `.wet.yaml` change testable in the
+  worktree where it's written.
+- A missing config is a hard error, not a default — see
+  [No config, no setup](#no-config-no-setup).
 
 ### Template fields
 
@@ -178,7 +138,8 @@ following keys are injected automatically for every render:
 | `{{.Pools.devices}}`, `{{.Pools.fixtures}}`, … | Allocated item per declared pool | `emulator:pixel-a` |
 | `{{.Handles.devices}}`, … | The address that item answers to *now* | `emulator-5554` |
 
-Branch sanitization follows
+Templates run with `missingkey=error`, so a typo fails at render rather than
+producing an empty value. Branch sanitization follows
 [Docker Compose's project-name rules](https://docs.docker.com/compose/how-tos/project-name/):
 lowercased, non-`[a-z0-9_-]` replaced with `-`, collapsed dashes, trimmed.
 Empty result falls back to `branch`.
@@ -200,7 +161,7 @@ Hook commands run via `sh -c` with:
 | `APP_PORT`, `DB_PORT`, … | One per declared port |
 | `POOL_DEVICES`, `POOL_FIXTURES`, … | One per declared pool (`POOL_<NAME>` in upper snake case) |
 | `POOL_HANDLE_DEVICES`, … | The resolved handle for each pool |
-| `COMPOSE_PROJECT_NAME`, … | One per `env:` entry, rendered |
+| `COMPOSE_PROJECT_NAME`, … | One per `env:` entry, rendered, with `.env.local` overrides applied |
 
 So hook commands can use either template interpolation (expanded before `sh`
 runs) or shell interpolation (expanded by `sh`):
@@ -218,49 +179,49 @@ A nonzero exit aborts the current operation — subsequent hooks do **not**
 run, and the caller bails out with the failing command printed. Pre-remove
 hook failures abort the pop entirely (the worktree stays on disk).
 
-That abort is only as good as the exit code the hook hands back, so `wet`
-warns when a `post_create` hook contains `||`, a pipe, or a trailing
-`; true` — each turns a failing command into exit 0, and a half-configured
-worktree then goes on to boot as if nothing happened. If a hook needs a
-fallback, put it in a script or recipe that tests the one condition it means
-to recover from and lets every other failure propagate; don't write
-`a || b`, which recovers from all of them indiscriminately. The warning is
-advisory (`a || exit 1` is a legitimate guard and does propagate) and
-`pre_remove` is exempt, since teardown is best-effort by design.
+Because that abort depends on the hook's exit code, `wet` warns when a
+`post_create` hook contains `||`, a pipe, or a trailing `; true` — all three can
+turn a failure into exit 0. The warning is advisory, and `pre_remove` is exempt;
+see [Why hooks may not swallow a failure](docs/design.md#why-hooks-may-not-swallow-a-failure).
 
 ### Pools
 
-`pools:` declares named lists of opaque strings that `wet` round-robins
-across live worktrees. Use pools for any scarce, one-per-worktree resource
-where the item identity matters but the mapping to worktrees doesn't — for
-example, physical/emulated device IDs, preloaded database snapshots, or
-test-fixture directories that must not be shared.
+`pools:` declares named lists of opaque strings that `wet` round-robins across
+live worktrees. Use pools for any scarce, one-per-worktree resource where the
+item identity matters but the mapping to worktrees doesn't — device IDs,
+preloaded database snapshots, test-fixture directories that must not be shared.
+
+**Allocation rule.** Pools are claimed in `wet setup`, not in `wet worktree
+create` — like ports and slots, and under the same lock. Each declared pool
+picks the lowest-indexed item not currently claimed by another worktree, so
+released items are reclaimed before trailing ones. Claims release implicitly
+when the owning worktree is popped; there is no explicit release step.
+
+Because allocation happens in `setup`, the worktree and its branch are already
+on disk when a pool comes up empty — an exhausted pool fails the setup, not the
+checkout, and no state entry is recorded for the tree. Recover by freeing an
+item (`wet worktree pop` another worktree) or adding one, then re-run `wet
+worktree setup`; or `wet worktree pop` the new tree itself.
+
+**Exhaustion.** When every item is claimed, `wet setup` fails with a message
+listing each claim by branch and item. Grow the pool in `.wet.yaml` (or
+`.wet.local.yaml`), or configure `pool_grow:` if wet can create the resource
+itself.
+
+**`pool_grow:`** maps a pool name to a strategy wet runs instead of failing on
+exhaustion. `android-emulator` is the only strategy — it creates a new AVD,
+boots it, records it as `emulator:<AVD_NAME>` in `.wet.local.yaml`, and hands it
+back as the claim. Any other value is not a strategy wet knows, and the pool
+just reports as exhausted.
 
 ```yaml
-pools:
-  devices:
-    - emulator-5554
-    - emulator-5556
-    - emulator-5558
-  fixtures:
-    - snap-alpha
-    - snap-beta
+pool_grow:
+  devices: android-emulator
 ```
 
-**Allocation rule.** On `wet worktree create`, each declared pool picks the
-lowest-indexed item not currently claimed by another worktree. Released
-slots are reclaimed before trailing items: if worktrees hold `item-a` and
-`item-c`, the next create picks `item-b`, not `item-d`. Allocation happens
-**before** `git worktree add`, so an exhausted pool aborts cleanly with no
-leftover worktree on disk. Claims release implicitly when the owning
-worktree is popped — there is no explicit release step.
-
-**Exhaustion.** When every item in a pool is claimed, `wet worktree create`
-fails with a message listing each claim by branch and item, and suggests
-popping a worktree to free one. Grow the pool in `.wet.yaml` if the
-natural state of the project is to need more.
-
-**Template access.** Pool picks are exposed as `{{.Pools.<name>}}`:
+**Template and hook access.** Pool picks are exposed as `{{.Pools.<name>}}`,
+and as `POOL_<NAME>` in upper snake case (`devices` → `POOL_DEVICES`,
+`test_fixtures` → `POOL_TEST_FIXTURES`) for shell hooks:
 
 ```yaml
 env:
@@ -268,21 +229,13 @@ env:
 hooks:
   post_create:
     - ./scripts/restore-snapshot.sh {{.Pools.fixtures}}
-```
-
-**Hook env.** Each pool pick is also exported as `POOL_<NAME>` in upper
-snake case (`devices` → `POOL_DEVICES`, `test_fixtures` → `POOL_TEST_FIXTURES`),
-so shell hooks can reference them without template interpolation:
-
-```yaml
-hooks:
   pre_remove:
     - ./scripts/release-device.sh "$POOL_DEVICES"
 ```
 
 **Name rules.** Pool names must match `[a-z_][a-z0-9_]*` and must not
 collide with reserved template fields (`ProjectName`, `Branch`,
-`BranchSafe`, `Slot`, `Pools`). Items within a single pool must be
+`BranchSafe`, `Slot`, `Pools`, `Handles`). Items within a single pool must be
 non-empty and unique; items may repeat across pools.
 
 ## One bootstrap — `wet setup`
@@ -295,19 +248,15 @@ wet worktree create feature/x
 cd ../worktree-feature/x && wet setup  # worktree → slot 1, 2, …
 ```
 
-Everything a worktree wants, the main checkout wants too — rendered env files,
-a claimed device, a recorded slot — because it is a working checkout as well.
-An emulator that got deleted should be re-claimable there by re-running setup,
-not hand-fixed. So main runs the same pipeline, differing only where a
-difference is forced:
+Main runs the same pipeline as a worktree — it is a working checkout too
+([why](docs/design.md#why-the-main-checkout-runs-the-same-pipeline)) — differing
+only where a difference is forced:
 
-- **Slot is pinned to 0.** `NextFreeSlot` already reserves it, so main gets the
-  declared `base:` ports (`4000`, not `4010`) and no worktree can be handed
-  them.
+- **Slot is pinned to 0**, so main gets the declared `base:` ports (`4000`, not
+  `4010`) and no worktree can be handed them.
 - **`copy:` is skipped** — source and destination are the same directory.
-- **Pools are claimed normally.** Main holds an item and keeps it, which is the
-  honest accounting: that device really is in use. The pool-exhausted message
-  names main as a claimant like any other.
+- **Pools are claimed normally.** Main holds an item and keeps it, and the
+  pool-exhausted message names it as a claimant like any other.
 - **Destructive lifecycle stays worktree-only.** `pre_remove` hooks and
   `wet worktree pop` never run against main.
 
@@ -316,10 +265,9 @@ points you at `wet setup`.
 
 ## Env templates — `wet env populate`
 
-Copying a generated `.env` into each worktree is the weak link in the flow: the
-copy snapshots one machine's values, then drifts from the checked-in shape and
-carries the *previous* worktree's ports. `wet env populate` replaces it with a
-checked-in template that re-renders per worktree.
+`wet env populate` replaces the copied-`.env` habit with a checked-in template
+that re-renders per worktree
+([why](docs/design.md#why-templates-beat-copying-a-generated-env)).
 
 ```
 wet env populate config/.env.tpl -o config/.env
@@ -348,39 +296,24 @@ op item get myapp --format json | jq 'from_entries' \
 wet env populate config/.env.tpl -o config/.env --secrets-from ./secrets.json
 ```
 
-### Prefer a pipe over a file on disk
+Prefer the pipe form: a `secrets_from:` path leaves a plaintext copy of every
+secret on disk, where `--secrets-from -` keeps them in one process's stdin. Wrap
+it in `set -o pipefail` — see
+[Prefer a pipe over a file on disk](docs/design.md#prefer-a-pipe-over-a-file-on-disk).
 
-A `secrets_from:` path means a plaintext copy of every secret sits in the
-filesystem. Piping a store's output into `--secrets-from -` keeps them in one
-process's stdin instead, so the only materialized copy is the env file the app
-needs:
+`--secrets-from` is repeatable and **later sources win** on a key collision, so
+a vault and a running container compose in one command. Prefer it over merging
+with `jq -s add`, which hides a dead producer
+([why](docs/design.md#why---secrets-from-twice-rather-than-jq--s-add)). Only one
+source may be `-`; naming stdin twice is an error, since the second read would
+find an exhausted pipe.
 
-```bash
-op inject -i secrets.tpl \
-  | jq -Rn '[inputs | select(test("^[A-Z_][A-Z0-9_]*=")) | split("=") | {(.[0]): (.[1:] | join("="))}] | add' \
-  | wet env populate web/.env.tpl -o web/.env.dev --secrets-from -
-```
-
-Run it from a `post_create` hook: `wet env populate` reads `$SLOT` / `$BRANCH`
-/ the ports out of the hook environment and renders exactly what a `render:`
-target would. A pipe can't be a `render:` target — those render *before* hooks,
-with nothing on stdin — so `render:` is for targets whose inputs need no
-producer.
-
-Use `set -o pipefail` around it. Without it a store that dies mid-pipe is
-invisible: wet renders from the partial object and fails on the first missing
-key, blaming the template rather than the vault.
-
-### Where a `secrets_from:` path points
-
-When a file is unavoidable, the path is resolved against **the checkout being
-configured** — a `secrets_from:` entry is a fact about the repo, so it means
-the same thing whichever directory `wet setup` was invoked from. (A
+When a file is unavoidable, a `secrets_from:` path in the config is resolved
+against **the checkout being configured** — it's a fact about the repo, so it
+means the same thing whichever directory `wet setup` ran from. (A
 `--secrets-from` flag is a fact about the invocation, so it stays relative to
-your cwd.)
-
-`~` and `$VAR` expand, so a committed config can name a per-machine location
-without hardcoding anyone's home directory:
+your cwd.) `~` and `$VAR` expand, so a committed config can name a per-machine
+location without hardcoding anyone's home directory:
 
 ```yaml
 render:
@@ -389,109 +322,48 @@ render:
     secrets_from: ["~/.config/myapp/secrets.json"]   # one file per workstation
 ```
 
-**A store key that shares a name with an `env:` entry overrides it**, and wet
-prints a warning naming the key. That combination is deliberate: overriding a
-default is a real use, but the same mechanism is how a store carrying staging
-URLs silently replaces the ports wet just allocated. If the store owns a key
-`env:` also derives, filter it out where you produce the JSON.
+### Rules
 
-### Several sources at once
-
-`--secrets-from` is repeatable, and **later sources win** on a key collision.
-That's how a vault and a running container compose:
-
-```bash
-docker compose config --format json | jq '.services.db.environment' > /tmp/db.json
-
-op item get myapp --format json | jq 'from_entries' \
-  | wet env populate config/.env.tpl -o config/.env \
-      --secrets-from /tmp/db.json \
-      --secrets-from -
-```
-
-You can merge in the shell instead — `{ producer_a; producer_b; } | jq -s add`
-does the same left-to-right merge — but the flag is worth preferring for two
-reasons: precedence stays visible in the command rather than buried in a
-pipeline, and a source that fails to read aborts the render. With `jq -s add`,
-a producer that dies still yields valid JSON from the survivors, so the key it
-was supposed to supply just goes missing.
-
-Only one source may be `-`; naming stdin twice is an error, since the second
-read would find an exhausted pipe.
-
-Rules:
-
-- **The source is always explicit.** wet never sniffs stdin to decide whether
-  something was piped in. A hook inherits its parent's stdin, so an
-  inherited-but-empty pipe (a script, CI, an agent harness) is
-  indistinguishable from one carrying JSON — and guessing wrong blocks forever
-  on a read that never delivers. With no `--secrets-from`, the template
-  renders from wet's own values alone.
+- **The source is always explicit.** wet never sniffs stdin
+  ([why](docs/design.md#why-wet-never-sniffs-stdin)); with no `--secrets-from`,
+  the template renders from wet's own values alone.
 - **Values must be scalars.** Strings, numbers, and booleans are stringified;
   a nested object or array is rejected by key name rather than silently
   serialized into the env file.
-- **Piped keys override `env:` entries**, but may *not* override a declared
-  port or a reserved field. A vault key named `APP_PORT` winning would hand
-  two worktrees the same port, so it's a hard error instead.
-- **An unresolved `{{.KEY}}` is fatal.** Never an empty value — `port=` in a
-  strictly-typed loader is a silent boot failure downstream.
+- **Piped keys override `env:` entries** — with a warning naming the key — but
+  may *not* override a declared port or a reserved field, which is a hard error
+  ([why](docs/design.md#why-a-store-key-may-override-env-but-not-a-port)).
+- **An unresolved `{{.KEY}}` is fatal**, never an empty value.
 - **Output is written `0600`**, since the whole point of the secrets channel
   is that the result may hold secrets.
-- **Rendered outputs are wet's to own**, in the main checkout as much as in a
-  worktree. Re-rendering is how you repair a checkout, so it must not need a
-  flag. Per-machine differences that once justified hand-editing the output —
-  a LAN IP, a staging hostname — belong in `.env.local` or `.wet.local.yaml`,
-  where a re-render preserves them instead of destroying them.
+- **Rendered outputs are wet's to own** — re-rendering is how you repair a
+  checkout, so it never needs a flag, and a hand-edit to the output does not
+  survive one. Per-machine values belong in `.env.local` or `.wet.local.yaml`
+  ([why](docs/design.md#rendered-outputs-are-wets-to-own)).
 
 ### Where it runs
 
-The usual place is a `post_create` hook, which runs through `sh -c` so the
-pipeline works verbatim:
-
-```yaml
-hooks:
-  post_create:
-    - op item get myapp --format json | jq 'from_entries' | wet env populate config/.env.tpl -o config/.env --secrets-from -
-```
-
-Hooks run *before* `setup` persists `.wet-worktrees.json`, so in that context
-populate reads its values from the environment `BuildHookEnv` exported
-(`$SLOT`, `$BRANCH`, `$APP_PORT`, `$POOL_DEVICES`, …) rather than from the
-state file. Run by hand after setup, it reads the state file entry for the
-current worktree instead. Either way the values are the ones that worktree was
-actually allocated.
+The usual place is a `post_create` hook, which runs through `sh -c` so a
+pipeline works verbatim. Hooks run *before* `setup` persists
+`.wet-worktrees.json`, so there populate reads its values from the hook
+environment (`$SLOT`, `$BRANCH`, `$APP_PORT`, …) rather than from the state
+file; run by hand afterwards it reads the state file entry for the current
+worktree. Either way the values are the ones that worktree was allocated.
 
 ## Monorepos — derive once, render many
 
-A monorepo has several env files (`web_elixir/.env.dev`, `mobile_elixir/.env`)
-whose values all descend from the same ports. The failure mode is that each one
-re-derives them:
-
-```
-PHX_PORT ──┬─→ docker-compose.yml   builds AUTH_BASE_URL
-           ├─→ Justfile             builds HYDRA_CORS_ORIGINS in shell
-           ├─→ web/.env.dev         declares AUTH_BASE_URL again
-           └─→ mobile/.env          hardcodes localhost:4000, patched by sed
-```
-
-Four derivations of one fact, in three languages. Adding one `wet env populate`
-call per package doesn't fix it — each template would still rebuild
-`AUTH_BASE_URL` from `{{.PHX_PORT}}`.
-
 **`env:` is the derivation layer.** Entries may reference each other, resolved
-to a fixed point rather than in sorted order, so a value can be built from
-other values:
+to a fixed point rather than in sorted order, so a value is built once and every
+package's template consumes the result instead of rebuilding it — see
+[the failure mode this avoids](docs/design.md#monorepos--the-failure-mode-is-re-derivation).
 
 ```yaml
 ports:
-  - { name: PHX_PORT,          base: 4000 }
-  - { name: HYDRA_PUBLIC_PORT, base: 4444 }
-  - { name: GRPC_PORT,         base: 50051 }
+  - { name: PHX_PORT, base: 4000 }
 
 env:
   DEV_HOST:           "localhost"
   AUTH_BASE_URL:      "http://{{.DEV_HOST}}:{{.PHX_PORT}}"
-  HYDRA_PUBLIC_URL:   "http://{{.DEV_HOST}}:{{.HYDRA_PUBLIC_PORT}}"
   VIPPS_REDIRECT_URI: "{{.AUTH_BASE_URL}}/hydra/login/vipps/callback"
 
 render:
@@ -502,14 +374,11 @@ render:
     out:      mobile_elixir/.env
 ```
 
-Every package's template then consumes `{{.AUTH_BASE_URL}}` instead of
-rebuilding it, `docker-compose.yml` reads it from `.env.worktree` instead of
-interpolating it, and the `sed` hook disappears.
-
 ### `render:` targets
 
-Declared rather than written as hook lines, because that's what makes the set
-inspectable:
+Targets are declared rather than written as hook lines, so the whole set is
+inspectable
+([why](docs/design.md#why-render-targets-are-declared-not-written-as-hook-lines)):
 
 ```
 wet env populate --all             # render every target
@@ -519,31 +388,25 @@ wet env populate --all --dry-run   # print every file, write nothing
 `wet setup` renders them too, **before** hooks — a hook that boots the stack
 finds the files already written.
 
-Each target carries its own `secrets_from`, because packages don't need the
-same secrets (a backend needs the vault, a mobile app usually needs nothing),
-and each renders against its own copy of the data — **one target's secrets
-cannot leak into another's output.** A template referencing a key it wasn't
-given fails; it never silently picks up a sibling's value.
-
-Two targets writing the same `out` is rejected at load time: the result would
-depend on ordering and the loser's secrets would vanish silently.
+Each target carries its own `secrets_from`, because packages don't need the same
+secrets, and **one target's secrets cannot leak into another's output.** Two
+targets writing the same `out` is rejected at load time.
 
 ### `.env.local` — per-machine overrides
 
 Some values vary by workstation, not by worktree — a LAN IP for physical-device
-testing, a personal staging hostname. Those belong in a gitignored `.env.local`
-at the repo root:
+testing, a personal staging hostname. Those go in a gitignored `.env.local` at
+the repo root:
 
 ```
 DEV_HOST=192.168.1.9
 ```
 
 Keys there **override `env:` entries**, which makes everything in `env:` a
-default, and the override propagates into every value derived from it —
-`AUTH_BASE_URL`, `VIPPS_REDIRECT_URI`, and both packages' env files all follow
-`DEV_HOST` without a single per-machine edit to `.wet.yaml`. The same overrides
-reach `.env.worktree`, hooks, and `pre_remove` (so teardown addresses the same
-stack setup brought up).
+default, and the override propagates into every value derived from it — every
+package's env file follows `DEV_HOST` without a per-machine edit to `.wet.yaml`.
+The same overrides reach `.env.worktree`, hooks, and `pre_remove`, so teardown
+addresses the same stack setup brought up.
 
 Format is the usual `KEY=value`, `#` comments and blanks ignored, quotes
 stripped. A line without `=` is an error rather than a silent skip — a dropped
@@ -551,20 +414,13 @@ override surfaces much later as a mystery wrong hostname.
 
 ## `.wet.local.yaml` — machine-local overrides
 
-Some of the config isn't a fact about the repo, it's a fact about a
-workstation. A `pools:` list of device IDs is the clearest case: `RFCR921L4DP`
-means nothing on a teammate's machine, so a committed pool either gets
-hand-edited by everyone or gets committed wrong. That's what makes an otherwise
-shareable `.wet.yaml` unshareable.
-
-Drop a gitignored `.wet.local.yaml` beside the `.wet.yaml` **in the checkout
-that has `main_branch:` checked out** — not necessarily git's "main working
-tree". A machine often carries several checkouts of one repo, and the one git
-calls main is just the one cloned first; it can sit on an unrelated branch, or
-be a stale clone nobody works in. wet reads the overlay (and `.env.local`, and
-the files `copy:` seeds a worktree with) from the trunk's checkout, and writes
-grown pool items back there. Shared allocation state stays in git's main tree,
-which is the one path every worktree agrees on.
+Some of the config isn't a fact about the repo, it's a fact about a workstation
+— a `pools:` list of device IDs is the clearest case. Drop a gitignored
+`.wet.local.yaml` beside the `.wet.yaml` **in the checkout that has
+`main_branch:` checked out** — not necessarily git's "main working tree", and
+[the difference matters](docs/design.md#why-wetlocalyaml-exists-and-where-it-is-read-from).
+wet reads the overlay (and `.env.local`, and the files `copy:` seeds a worktree
+with) from there, and writes grown pool items back there.
 
 ```yaml
 pools:
@@ -581,13 +437,8 @@ only the keys it wants to change; anything it doesn't mention falls through to
 
 **It overrides any key, not a special subset.** The merge happens inside the
 config loader, before anything is unmarshalled, so the rest of wet just reads
-"the config" and never learns the file exists. Override `port_stride` because
-4010 is taken on your machine, or a single hook, or `ports:` outright — it all
-works the same way:
-
-```yaml
-port_stride: 100        # slot 2 → base + 200
-```
+"the config". Override `port_stride`, a single hook, or `ports:` outright — it
+all works the same way.
 
 **Merge rules**, deliberately boring:
 
@@ -600,55 +451,47 @@ port_stride: 100        # slot 2 → base + 200
 - `wet setup` prints which top-level keys the local file overrode, so a
   surprising value is traceable.
 
-**Pool growth writes here, never to `.wet.yaml`.** An AVD the grower just
-created exists only on this machine; recording it in the committed config would
-dirty a tracked file and hand teammates a device they don't have. Because
-sequences replace, the local file gets the full merged list.
-
-### Emulator pool items
-
-A pool item names an AVD — `emulator:<AVD_NAME>` — never a runtime serial. An
-`emulator-5554` serial is assigned by adb at boot and means nothing while the
-emulator is stopped: recording it leaves the pool full of items that resolve to
-dead devices after a reboot, with no way to start them. Hooks test for the
-`emulator:` prefix to decide whether something needs booting, and resolve the
-serial at claim time. `pool_grow: android-emulator` follows the same
-convention, and asks adb for a free console port rather than parsing one out of
-the item.
+**Pool growth writes here, never to `.wet.yaml`** — a grown AVD exists only on
+this machine. Because sequences replace, the local file gets the full merged
+list.
 
 ## Items and handles
 
 A pool item is a durable name; a handle is how you address it right now. For
-everything except emulators they are the same string, and you can ignore the
-distinction. For an emulator they cannot be:
+everything except emulators they are the same string and you can ignore the
+distinction. For an emulator they cannot be: the item is `emulator:<AVD_NAME>`
+(an AVD survives reboots, so it is what gets recorded and what teardown reasons
+about), the handle is `emulator-5554` (what `flutter run -d` and `adb -s`
+actually take). `pool_grow: android-emulator` records items in the same form.
 
-- the item is `emulator:<AVD_NAME>` — an AVD survives reboots, a serial does
-  not, so the item is what gets recorded and what teardown reasons about
-  ("is this one mine to kill?");
-- the handle is `emulator-5554` — what `flutter run -d`, `adb -s` and a
-  screenshot actually take.
+Three rules follow from that, and they are the whole contract for emulator
+pools:
+
+- **A pool item names an AVD, never a runtime serial.** `emulator-5554` is
+  assigned by adb at boot and means nothing while the emulator is stopped
+  ([why that poisons a pool](docs/design.md#dont-resolve-emulator-serials-in-a-hook)).
+- **The `emulator:` prefix is what hooks test for** to decide whether an item
+  needs booting at all — a physical device is either plugged in or not, an AVD
+  has to be started. Write `case "$POOL_DEVICES" in emulator:*)` rather than
+  guessing from the item's shape.
+- **`pool_grow: android-emulator` asks adb for a free console port**, rather
+  than deriving one from the item — the item carries no port, and an emulator
+  someone started outside wet holds a port just as firmly as one wet booted.
 
 `wet setup` boots any claimed emulator that isn't running and resolves the
 serial before rendering anything, so `{{.Handles.devices}}` is a device you can
-target and `$POOL_HANDLE_DEVICES` is the same value in hooks.
-
-**Don't reimplement this in a hook.** The obvious shell version —
-`flutter emulators --launch` then `adb wait-for-device` — fails with "error:
-more than one device/emulator" as soon as a second device is attached, which is
-the normal state once you run worktrees in parallel. wet resolves by asking
-each console its AVD name, which is the only method that survives a crowd.
+target and `$POOL_HANDLE_DEVICES` is the same value in hooks. Don't reimplement
+this in a hook —
+[the obvious shell version breaks](docs/design.md#dont-resolve-emulator-serials-in-a-hook)
+as soon as a second device is attached.
 
 ## Running several worktrees at once
 
-Two `wet setup` runs started at the same moment used to hand out the same slot,
-the same ports and the same device: the state file was read-modify-write, and
-the claim was only written after the hooks, leaving an image-build-long window
-in which a taken slot looked free. Allocation now happens under a lock
-(`.wet-worktrees.lock`, beside the state file), and the claim is written before
-the hooks run. The lock never spans the hooks — concurrent stack boots are the
-point.
-
-Two consequences worth knowing:
+Slot, port and pool allocation happens under a lock (`.wet-worktrees.lock`,
+beside the state file), and the claim is written before any hook runs. The lock
+never spans the hooks — concurrent stack boots are the point
+([background](docs/design.md#why-allocation-holds-a-lock)). Two consequences
+worth knowing:
 
 - A failed setup leaves its claim behind. That is deliberate: the tree still
   exists, re-running setup finds its own entry and keeps the same slot, and
@@ -671,26 +514,21 @@ wet pr create --draft      # create as draft
 wet pr create --fill       # auto-fill title + body from commits (gh --fill)
 wet pr create -t "My PR"   # explicit title
 wet pr create -b develop   # override base branch
+
+wet pr open                # open this branch's existing PR in the browser
 ```
 
-**Base branch** resolves in order: `--base` flag → `.wet.yaml` `pr.base` → `"main"`.
+**Base branch** resolves in order: `--base` flag → `.wet.yaml` `pr.base` →
+`main_branch:` → `"main"`.
 
-**PR body** — when run from a tracked worktree, the body auto-includes the
-slot index, allocated ports, and pool items. Override with `pr.body_template`
-in `.wet.yaml`:
-
-```yaml
-pr:
-  base: main
-  body_template: |
-    ## Summary
-
-    Worktree slot {{.Slot}}, ports: {{range $k, $v := .Ports}}{{$k}}={{$v}} {{end}}
-```
+**PR body** — when run from a tracked worktree, the body auto-includes the slot
+index, allocated ports, and pool items. Override with `pr.body_template` in
+`.wet.yaml`; it sees `ProjectName`, `Branch`, `BranchSafe`, `Slot`, `Ports` and
+`Pools`.
 
 **Title** — defaults to the branch name cleaned up (`feature/add-login` →
-`Add login`). Common prefixes (`feature/`, `fix/`, `chore/`, etc.) are
-stripped automatically.
+`Add login`). Common prefixes (`feature/`, `fix/`, `chore/`, etc.) are stripped
+automatically.
 
 **Requirements**: `git` and `gh` (GitHub CLI, authenticated). Run `gh auth
 status` to verify.
@@ -715,35 +553,19 @@ worktree and copies `.env`. Everything else happens in `wet setup`.)
 
 ## Examples
 
-### Minimal — no ports, no Docker
+The smallest useful config is a `project_name:` and a `copy:` block — enough to
+fork a worktree with the same VS Code settings and env file. With no ports and
+no `env:`, nothing is rendered and no hooks run.
 
-```yaml
-project_name: pure-frontend
-copy:
-  files:
-    - .env.local
-  dirs:
-    - .vscode
-```
-
-Enough to fork a worktree with the same VS Code settings and env file. No
-`.env.worktree` is written (no ports or `env:` to render), no hooks run.
-
-### A full-stack config
+A full-stack one adds ports and hooks that point editor tooling at this
+worktree's slot:
 
 ```yaml
 project_name: myapp
 
 copy:
-  files:
-    - web/.env
-    - mobile/.env.dev
-    - .claude/settings.json
-    - .claude/settings.local.json
-  dirs:
-    - .vscode
-    - web/.vscode
-    - mobile/.vscode
+  files: [web/.env, mobile/.env.dev]
+  dirs:  [.vscode, web/.vscode, mobile/.vscode]
 
 port_stride: 10
 
@@ -758,10 +580,10 @@ env:
 hooks:
   post_create:
     - sed -i.bak 's/"port": 40000,/"port": {{.DEBUG_PORT}},/' web/.vscode/launch.json
-    - sed -i.bak -E 's/"port=[0-9]+"/"port={{.APP_PORT}}"/g' mobile/.vscode/launch.json
-    - rm -f web/.vscode/launch.json.bak mobile/.vscode/launch.json.bak
+    - rm -f web/.vscode/launch.json.bak
 ```
 
-Three ports, one env entry, two `sed`-based launch.json rewrites so the
-Delve attach port and the Flutter `--dart-define` port both point at the
-worktree's slot.
+More shapes, every key, and the validation rules:
+[`cmd/wet.example.yaml`](cmd/wet.example.yaml), or your installed copy at
+`.claude/skills/wet/wet.example.yaml`. Design rationale for the rules
+above: [`docs/design.md`](docs/design.md).
