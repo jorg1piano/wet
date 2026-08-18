@@ -22,83 +22,53 @@ Use this when the user is writing a fresh `.wet.yaml`, editing an existing one, 
 
 ## Quick schema orientation
 
-A `.wet.yaml` has eight top-level keys, all optional except `project_name`:
+A `.wet.yaml` has these top-level keys, all optional except `project_name`:
 
 - `project_name` — required. Docker-compose-safe name for generated compose project names.
+- `main_branch` — trunk new worktrees are cut from, and the default PR base. Defaults to `main`.
 - `copy` — files and directories copied from the main repo into each new worktree.
 - `port_stride` — default port stride (how far ports advance per slot). Defaults to `10`.
 - `ports` — named port declarations. Each port gets `base + slot * stride`.
 - `pools` — named lists of opaque strings round-robined across worktrees.
 - `pool_grow` — optional per-pool auto-expand strategy. Currently supports `android-emulator`: when a pool is exhausted, creates a new AVD, cold boots it, and appends the new serial to `.wet.yaml`.
-- `env` — Go `text/template` strings rendered into `.env.worktree`.
+- `env` — Go `text/template` strings, resolved to a fixed point; the derivation layer every template reads.
+- `render` — template → output pairs, rendered by `wet setup` and `wet env populate --all`.
 - `hooks` — shell commands run around worktree lifecycle events (`post_create`, `pre_remove`).
 - `pr` — configures `wet pr create` behavior (base branch, body template).
 
-Full reference: `cli/README.md` in the wet repo.
+## Read the schema of record first
 
-## The schema in full
-
-```yaml
-# .wet.yaml — paste at the repo root, edit per your project.
-
-project_name: myapp         # required; must match [a-z0-9][a-z0-9_-]*.
-
-copy:                       # optional. Missing files silently skipped.
-  files:                    # prefer an env template over copying a generated
-    - config/local.toml     # .env — see "Env templates" below.
-  dirs:
-    - .vscode
-    - .idea
-
-port_stride: 10             # default stride. Slot N → base + N*stride.
-
-ports:                      # named port declarations.
-  - name: APP_PORT          # must match [A-Z_][A-Z0-9_]*.
-    base: 8080
-  - name: DB_PORT
-    base: 5432
-  - name: DEBUG_PORT
-    base: 40000
-    stride: 5               # optional per-port override
-
-pools:                      # optional; round-robin allocated.
-  devices:
-    - emulator-5554
-    - emulator-5556
-  fixtures:
-    - fresh-snapshot-a
-    - fresh-snapshot-b
-
-pool_grow:                  # optional; auto-expand strategy per pool.
-  devices: android-emulator # creates a new AVD + cold boots when exhausted
-
-env:                        # KEY=value → .env.worktree
-  COMPOSE_PROJECT_NAME: "{{.ProjectName}}-{{.BranchSafe}}"
-
-hooks:
-  post_create:
-    - echo "created {{.Branch}} at slot {{.Slot}}"
-    - wet env populate config/.env.tpl -o config/.env   # see "Env templates"
-    - ./scripts/setup.sh
-  pre_remove:
-    - docker compose -p {{.ProjectName}}-{{.BranchSafe}} down
-
-pr:                         # optional; configures `wet pr create`.
-  base: main
-  body_template: |
-    Worktree slot {{.Slot}}
-```
+`wet.example.yaml` sits next to this file, in the same
+`.claude/skills/wet/` directory. It is a real local file, not a URL: open it
+with Read before writing or editing any `.wet.yaml`. It is the fully annotated
+schema — every key, its validation rule, and why it exists. This skill covers
+how to *use* the schema; that file defines it. If the two ever disagree,
+`wet.example.yaml` wins.
 
 ## Template fields reference
+
+Every `env:` value, `render:` template, and hook command is rendered with this
+data. Rendering uses `missingkey=error`: a reference to a field that does not
+exist fails the operation loudly rather than producing an empty string.
 
 | Key | Value | Example |
 |---|---|---|
 | `{{.ProjectName}}` | `project_name` from config | `myapp` |
 | `{{.Branch}}` | Raw git branch name | `feature/foo` |
-| `{{.BranchSafe}}` | Docker-Compose-sanitized branch | `feature-foo` |
-| `{{.Slot}}` | Allocated slot (1, 2, …) | `1` |
+| `{{.BranchSafe}}` | Branch with slashes flattened, safe for Docker names | `feature-foo` |
+| `{{.Slot}}` | Allocated slot (main = 0, worktrees from 1) | `1` |
 | `{{.APP_PORT}}`, … | One key per declared port | `8090` |
-| `{{.Pools.devices}}`, … | One key per declared pool | `emulator-5554` |
+| `{{.Pools.devices}}`, … | The item this worktree claimed from pool `devices` | `emulator:wet-myapp-1` |
+| `{{.Handles.devices}}`, … | The address that item answers to right now | `emulator-5554` |
+
+`Pools` vs `Handles`: the pool item is the durable name the lifecycle reasons
+about; the handle is what a command must target now. For an emulator the item
+is `emulator:<AVD_NAME>` and the handle is the live adb serial; for everything
+else the handle equals the item. Use `{{.Handles.x}}` in commands, `{{.Pools.x}}`
+when you mean the claim itself.
+
+`env:` entries are also available as fields to `render:` templates and hooks,
+so a derived value is written once and consumed everywhere.
 
 ## How to populate a fresh `.wet.yaml`
 
@@ -128,6 +98,28 @@ If you reach for `sed` to patch a port into a config file, check first whether t
 
 ### Step 7. PR config
 If the project uses GitHub, optionally add `pr: { base: main }`.
+
+### Step 8. Gitignore the machine-local state files
+
+wet writes two files at the **main repo root** that must never be committed:
+
+- `.wet-worktrees.json` — the allocation state (slots, ports, pool claims,
+  absolute worktree paths). Per-machine, not per-repo.
+- `.wet-worktrees.lock` — the empty flock file guarding allocation. Pure
+  scratch; it appears the first time anyone runs `wet worktree create` and
+  otherwise just clutters `git status`.
+
+Make sure the repo's `.gitignore` covers both. A single entry does it:
+
+```gitignore
+.wet-worktrees.*
+```
+
+If the `.gitignore` already lists `.wet-worktrees.json` on its own, add
+`.wet-worktrees.lock` beside it rather than leaving the lock file untracked.
+Also gitignore any per-worktree file the config generates at the repo root —
+typically `.env.worktree`, plus `.env.local` and `.wet.local.yaml` if the
+project uses those overlays.
 
 ## Common patterns
 
@@ -217,8 +209,8 @@ wet env populate config/.env.tpl -o config/.env
 wet env populate config/.env.tpl --dry-run      # print, don't write
 ```
 
-The template sees every field in the table above, plus every rendered `env:`
-entry:
+The template sees every field in the template-fields table above, plus every
+rendered `env:` entry:
 
 ```
 port={{.GRPC_PORT}}
@@ -349,13 +341,16 @@ machine-local pool, and a pool mixing physical devices with emulators is fine
 ## Validation rules
 
 - `project_name`: `[a-z0-9][a-z0-9_-]*`
-- Port `name`: `[A-Z_][A-Z0-9_]*`, must not collide with reserved fields (`ProjectName`, `Branch`, `BranchSafe`, `Slot`, `Pools`)
+- Port `name`: `[A-Z_][A-Z0-9_]*`, must not collide with reserved fields (`ProjectName`, `Branch`, `BranchSafe`, `Slot`, `Pools`, `Handles`)
 - Pool `name`: `[a-z_][a-z0-9_]*`, same reserved-name check
 - Copy paths: no `..`, no leading `/`
 - `env:` and hook strings: parsed as Go templates at load time (syntax errors fail early)
 - Slot 0 reserved for main; worktrees start at 1
 
 ## Hook environment quick-ref
+
+Hooks get every value twice: as a template field expanded before `sh -c` runs,
+and as a real environment variable the command (or a script it calls) can read.
 
 | Template | Shell env var | Example |
 |---|---|---|
@@ -364,7 +359,12 @@ machine-local pool, and a pool mixing physical devices with emulators is fine
 | `{{.BranchSafe}}` | `$BRANCH_SAFE` | `feature-foo` |
 | `{{.Slot}}` | `$SLOT` | `1` |
 | `{{.APP_PORT}}` | `$APP_PORT` | `8090` |
-| `{{.Pools.devices}}` | `$POOL_DEVICES` | `emulator-5554` |
+| `{{.Pools.devices}}` | `$POOL_DEVICES` | `emulator:wet-myapp-1` |
+| `{{.Handles.devices}}` | `$POOL_HANDLE_DEVICES` | `emulator-5554` |
+| every `env:` key | `$<KEY>` | `$COMPOSE_PROJECT_NAME` |
+
+Pool names uppercase into the var name: pool `test_fixtures` becomes
+`$POOL_TEST_FIXTURES` / `$POOL_HANDLE_TEST_FIXTURES`.
 
 ## Debugging
 
@@ -477,4 +477,6 @@ Team — ready
 
 # Further reading
 
-Full CLI + schema reference: `cli/README.md` in the wet repo.
+- `wet.example.yaml` — beside this file; the annotated schema of record.
+- `wet --help`, `wet worktree --help`, `wet env --help` — the installed CLI's
+  own reference, always matching the installed version.
