@@ -48,6 +48,11 @@ var secretsGroupsCmd = &cobra.Command{
 	RunE:  runSecretsGroups,
 }
 
+// defaultSecretsSection is where scaffolded vault keys land unless --section
+// says otherwise. Named once so `wet secrets setup` and the scaffold offer
+// made by `wet setup` cannot disagree about which section they wrote to.
+const defaultSecretsSection = "backend"
+
 var (
 	secretsSetupSection string
 	secretsSetupDryRun  bool
@@ -57,7 +62,7 @@ var (
 func init() {
 	rootCmd.AddCommand(secretsCmd)
 	secretsCmd.AddCommand(secretsSetupCmd, secretsGroupsCmd)
-	secretsSetupCmd.Flags().StringVar(&secretsSetupSection, "section", "backend",
+	secretsSetupCmd.Flags().StringVar(&secretsSetupSection, "section", defaultSecretsSection,
 		"secrets: section the vault-backed keys are added to")
 	secretsSetupCmd.Flags().BoolVar(&secretsSetupDryRun, "dry-run", false,
 		"print the resulting .wet.yaml instead of writing it")

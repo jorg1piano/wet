@@ -128,7 +128,16 @@ func runSetupCore(repoRoot, worktreePath, branchName string, headless, isMain bo
 		}
 		fmt.Printf("  No %s found in %s.\n", wetConfigFileName, searched)
 		fmt.Printf("  Wrote a starter one: %s\n", path)
-		return fmt.Errorf("edit %s (project_name, and ports: if your project listens on any), then re-run setup — for help writing it, see `wet install wet-skill`", path)
+
+		// Offering the catalog here rather than leaving it to a second
+		// command is the difference between a config that boots and one that
+		// boots without the keys the app reads. Only on a fresh scaffold: a
+		// re-run is not the moment to ask again, and a non-interactive caller
+		// gets a pointer instead of a picker it cannot answer.
+		if err := offerSecretGroups(path); err != nil {
+			return err
+		}
+		return fmt.Errorf("edit %s (check project_name and ports:), then re-run setup", path)
 	} else if cfgErr != nil {
 		return cfgErr
 	}
