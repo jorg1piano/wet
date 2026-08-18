@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"golang.org/x/term"
+
 	"github.com/spf13/cobra"
 )
 
@@ -329,9 +331,8 @@ func confirmOverwrite(targetPath string) (bool, error) {
 // a character device and passes this check, which is why confirmOverwrite
 // also treats EOF as "nobody to ask".
 func stdinIsTerminal() bool {
-	info, err := os.Stdin.Stat()
-	if err != nil {
-		return false
-	}
-	return info.Mode()&os.ModeCharDevice != 0
+	// term.IsTerminal, not a ModeCharDevice test: /dev/null is a character
+	// device too, so the mode check calls `wet ... </dev/null` interactive and
+	// every prompt guarded by it fires into a pipe that can never answer.
+	return term.IsTerminal(int(os.Stdin.Fd()))
 }
