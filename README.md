@@ -290,11 +290,19 @@ wet talks to no secret store. Hand it a flat JSON object and any command that
 can produce one works — `op`, `az`, `docker compose config`, a fixture file:
 
 ```bash
-op item get myapp --format json | jq 'from_entries' \
+./scripts/wet-secrets.sh \
   | wet env populate config/.env.tpl -o config/.env --secrets-from -
 
 wet env populate config/.env.tpl -o config/.env --secrets-from ./secrets.json
 ```
+
+Keep the producer in a committed script rather than inline in a hook, so it can
+be run on its own (`./scripts/wet-secrets.sh | jq keys`) when a render fails.
+`wet install skill` ships a working 1Password one at
+`.claude/skills/wet/secrets-op.sh`: copy it to `scripts/wet-secrets.sh`, list
+your keys in its `SECRETS` map, and point `OP_VAULT` / `OP_ITEM` (flags or env)
+at your vault. It resolves each key with `op read` and assembles the JSON with
+`jq --arg`, so a secret holding a quote or a newline still comes out valid.
 
 Prefer the pipe form: a `secrets_from:` path leaves a plaintext copy of every
 secret on disk, where `--secrets-from -` keeps them in one process's stdin. Wrap

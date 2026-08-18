@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -259,4 +260,131 @@ func TestEnsureGitignoreEntries(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestEmbeddedSecretsScript smoke-checks the third //go:embed in install.go
+// and, more importantly, that the shipped producer is a script that actually
+// runs: it is copied verbatim into user repos and piped into `wet env
+// populate`, so a syntax error would surface as a failed worktree create.
+func TestEmbeddedSecretsScript(t *testing.T) {
+	if wetSecretsScript == "" {
+		t.Fatal("wetSecretsScript is empty — //go:embed did not capture the file")
+	}
+	if !strings.HasPrefix(wetSecretsScript, "#!/usr/bin/env bash\n") {
+		t.Errorf("wetSecretsScript is missing its shebang; got first 40 bytes: %q",
+			wetSecretsScript[:min(40, len(wetSecretsScript))])
+	}
+	// The contract with `wet env populate --secrets-from -` is a flat JSON
+	// object on stdout, and the vault must stay a parameter — a hardcoded one
+	// makes the committed copy machine-specific.
+	for _, want := range []string{"OP_VAULT", "--vault", "jq -n"} {
+		if !strings.Contains(wetSecretsScript, want) {
+			t.Errorf("wetSecretsScript does not mention %q", want)
+		}
+	}
+
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skipf("bash not available: %v", err)
+	}
+	script := filepath.Join(t.TempDir(), "secrets-op.sh")
+	if err := os.WriteFile(script, []byte(wetSecretsScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(bash, "-n", script).CombinedOutput(); err != nil {
+		t.Fatalf("shipped secrets script does not parse: %v\n%s", err, out)
+	}
+
+	// Run it against a stub `op` that returns a value holding a quote, a
+	// backslash and a newline — the case that makes the naive `op inject`
+	// into a JSON template emit invalid JSON. The output must still parse,
+	// because `wet env populate --secrets-from -` will be reading it.
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skipf("jq not available: %v", err)
+	}
+	stubDir := filepath.Dir(script)
+	stub := "#!/bin/sh\nprintf 'a\"b\\\\c\\nd'\n"
+	if err := os.WriteFile(filepath.Join(stubDir, "op"), []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(bash, script, "--vault", "Shared")
+	cmd.Env = append(os.Environ(), "PATH="+stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("run secrets script: %v", err)
+	}
+	var got map[string]string
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("script output is not a flat JSON object: %v\n%s", err, out)
+	}
+	if len(got) == 0 {
+		t.Fatal("script produced an empty object; the SECRETS example must ship at least one key")
+	}
+	for k, v := range got {
+		if v != "a\"b\\c\nd" {
+			t.Errorf("%s = %q, want the stub value round-tripped intact", k, v)
+		}
+	}
+}
+
+// TestInstallSkillFilesMode covers the executable bit on secrets-op.sh. It is
+// checked separately from content because os.WriteFile only applies a mode
+// when it creates the file: an overwrite, or a byte-identical copy restored
+// from an archive, would otherwise leave a script the user cannot run.
+func TestInstallSkillFilesMode(t *testing.T) {
+	repo := t.TempDir()
+	if out, err := exec.Command("git", "-C", repo, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	t.Chdir(repo)
+	root, err := getRepoRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	prevForce := installForce
+	t.Cleanup(func() { installForce = prevForce })
+	installForce = true
+
+	files := []skillFile{
+		{name: "SKILL.md", content: "skill body\n"},
+		{name: "secrets-op.sh", content: "#!/usr/bin/env bash\necho hi\n", mode: 0o755},
+	}
+	path := func(name string) string {
+		return filepath.Join(root, ".claude", "skills", "wet", name)
+	}
+	assertMode := func(name string, want os.FileMode) {
+		t.Helper()
+		info, err := os.Stat(path(name))
+		if err != nil {
+			t.Fatalf("stat %s: %v", name, err)
+		}
+		if got := info.Mode().Perm(); got != want {
+			t.Errorf("%s mode = %o, want %o", name, got, want)
+		}
+	}
+
+	if err := installSkillFiles("wet", files); err != nil {
+		t.Fatalf("first install: %v", err)
+	}
+	assertMode("secrets-op.sh", 0o755)
+	assertMode("SKILL.md", 0o644)
+
+	// Same bytes, wrong bits — the up-to-date path must still repair them.
+	if err := os.Chmod(path("secrets-op.sh"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := installSkillFiles("wet", files); err != nil {
+		t.Fatalf("re-install: %v", err)
+	}
+	assertMode("secrets-op.sh", 0o755)
+
+	// Different bytes, overwritten under --force: WriteFile keeps the old
+	// file's mode, so the explicit chmod is what makes this pass.
+	if err := os.WriteFile(path("secrets-op.sh"), []byte("stale\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := installSkillFiles("wet", files); err != nil {
+		t.Fatalf("forced install: %v", err)
+	}
+	assertMode("secrets-op.sh", 0o755)
 }

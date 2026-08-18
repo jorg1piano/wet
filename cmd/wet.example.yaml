@@ -195,11 +195,16 @@ hooks:
     # itself — any command emitting a flat JSON object works. The source is
     # always explicit (`--secrets-from -`, or a path); wet never sniffs stdin,
     # because a hook inherits its parent's and a wrong guess would hang:
-    #   op item get myapp --format json | jq '...' | wet env populate ...
-    #   az keyvault secret list ...     | jq '...' | wet env populate ...
+    #   ./scripts/wet-secrets.sh    | wet env populate ...
+    #   az keyvault secret list ... | jq '...' | wet env populate ...
+    # Keep that producer in a committed script rather than inline here: it is
+    # then runnable on its own (`./scripts/wet-secrets.sh | jq keys`) when a
+    # render fails. `wet install skill` ships a ready one — copy
+    # .claude/skills/wet/secrets-op.sh to scripts/wet-secrets.sh and edit its
+    # SECRETS map and vault defaults.
     # Piped keys override env: entries above, but may not override a declared
     # port (that would defeat slot allocation, and is an error).
-    # - op item get myapp --format json | jq 'from_entries' | wet env populate .env.example.tpl -o .env --secrets-from -
+    # - ./scripts/wet-secrets.sh | wet env populate .env.example.tpl -o .env --secrets-from -
 
   pre_remove:
     - docker compose down -v

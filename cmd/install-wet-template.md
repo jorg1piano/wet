@@ -222,18 +222,45 @@ COMPOSE_PROJECT_NAME={{.COMPOSE_PROJECT_NAME}}
 hand it a flat JSON object from whatever holds yours:
 
 ```bash
-op item get myapp --format json | jq 'from_entries' \
+./scripts/wet-secrets.sh \
   | wet env populate config/.env.tpl -o config/.env --secrets-from -
 
 wet env populate config/.env.tpl -o config/.env --secrets-from ./secrets.json
 ```
+
+**Don't invent that producer pipeline per repo — install the script.**
+`secrets-op.sh` sits beside this file in `.claude/skills/wet/`. It is a
+runnable 1Password producer: it prints exactly the flat JSON object
+`--secrets-from -` wants, takes the vault and item as parameters
+(`OP_VAULT` / `--vault`, `OP_ITEM` / `--item`), and resolves each key through
+`op read` assembled with `jq --arg`, so a secret containing a quote or a
+newline still yields valid JSON.
+
+When a project needs secrets:
+
+1. Copy it in and commit it:
+   `cp .claude/skills/wet/secrets-op.sh scripts/wet-secrets.sh`
+2. Edit the `SECRETS=(...)` map so there is one `KEY=op://$OP_VAULT/$OP_ITEM/field`
+   line per key the templates reference, and set the `OP_VAULT` / `OP_ITEM`
+   defaults to this project's.
+3. Reference it from a hook — never inline the `op` pipeline into `.wet.yaml`:
+   ```yaml
+   hooks:
+     post_create:
+       - ./scripts/wet-secrets.sh | wet env populate config/.env.tpl -o config/.env --secrets-from -
+   ```
+
+Verify with `./scripts/wet-secrets.sh | jq 'keys'` before wiring the hook —
+that separates a vault problem from a template problem. For a store other than
+1Password, copy the same file and swap the `op read` line; the contract is the
+JSON on stdout, nothing else.
 
 Repeatable, later sources winning on a collision — so a vault and a running
 container compose without a shell-side merge:
 
 ```bash
 docker compose config --format json | jq '.services.db.environment' > /tmp/db.json
-op item get myapp --format json | jq 'from_entries' \
+./scripts/wet-secrets.sh \
   | wet env populate config/.env.tpl -o config/.env \
       --secrets-from /tmp/db.json --secrets-from -
 ```
@@ -478,5 +505,7 @@ Team — ready
 # Further reading
 
 - `wet.example.yaml` — beside this file; the annotated schema of record.
+- `secrets-op.sh` — beside this file; the 1Password secrets producer to copy
+  into `scripts/wet-secrets.sh` rather than re-deriving an `op` pipeline.
 - `wet --help`, `wet worktree --help`, `wet env --help` — the installed CLI's
   own reference, always matching the installed version.

@@ -32,6 +32,16 @@ var wetSkillTemplate string
 //go:embed wet.example.yaml
 var wetExampleConfig string
 
+// wetSecretsScript is a runnable 1Password secrets producer, shipped beside
+// the skill so the secrets story is a file the user edits rather than a shell
+// pipeline Claude re-invents per repo. It prints the flat JSON object that
+// `wet env populate --secrets-from -` consumes; the vault and item are
+// parameters, so the committed copy works against a personal vault locally
+// and a shared one in CI.
+//
+//go:embed secrets-op.sh
+var wetSecretsScript string
+
 var installForce bool
 
 var installCmd = &cobra.Command{
@@ -64,6 +74,10 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		if err := installSkillFiles("wet", []skillFile{
 			{name: "SKILL.md", content: wetSkillTemplate},
 			{name: "wet.example.yaml", content: wetExampleConfig},
+			// 0755: this one is meant to be copied into the repo and run,
+			// and a template that needs `chmod +x` before it works is a
+			// template that will be pasted wrong.
+			{name: "secrets-op.sh", content: wetSecretsScript, mode: 0o755},
 		}); err != nil {
 			return err
 		}
@@ -173,6 +187,17 @@ func ensureClaudeSettings() error {
 type skillFile struct {
 	name    string
 	content string
+	// mode is the permission bits to write the file with. Zero means 0644.
+	mode os.FileMode
+}
+
+// perm returns the mode to write f with, defaulting to 0644 so only files
+// that must be executable have to say so.
+func (f skillFile) perm() os.FileMode {
+	if f.mode == 0 {
+		return 0o644
+	}
+	return f.mode
 }
 
 // installSkillFiles writes embedded files into
@@ -200,6 +225,14 @@ func installSkillFiles(name string, files []skillFile) error {
 		targetPath := filepath.Join(targetDir, f.name)
 		if existing, err := os.ReadFile(targetPath); err == nil {
 			if string(existing) == f.content {
+				// Content match is not enough: a copy restored from an
+				// archive, or written by an older wet that had no mode
+				// field, can be byte-identical yet non-executable. Repair
+				// the bits rather than reporting a script that cannot run
+				// as up to date.
+				if err := os.Chmod(targetPath, f.perm()); err != nil {
+					return fmt.Errorf("chmod %s: %w", targetPath, err)
+				}
 				fmt.Printf("  %s is already up to date.\n", targetPath)
 				continue
 			}
@@ -218,8 +251,14 @@ func installSkillFiles(name string, files []skillFile) error {
 		}
 
 		data := []byte(f.content)
-		if err := os.WriteFile(targetPath, data, 0o644); err != nil {
+		if err := os.WriteFile(targetPath, data, f.perm()); err != nil {
 			return fmt.Errorf("write %s: %w", targetPath, err)
+		}
+		// WriteFile only applies the mode when it creates the file, so an
+		// overwrite of an existing 0644 copy would leave the script
+		// non-executable without this.
+		if err := os.Chmod(targetPath, f.perm()); err != nil {
+			return fmt.Errorf("chmod %s: %w", targetPath, err)
 		}
 		fmt.Printf("  Installed: %s (%d bytes)\n", targetPath, len(data))
 		wrote = true
