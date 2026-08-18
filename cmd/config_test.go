@@ -6,8 +6,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"regexp"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestSanitizeBranch(t *testing.T) {
@@ -492,6 +496,20 @@ func TestExampleTemplateRendersAgainstExampleConfig(t *testing.T) {
 		t.Fatalf("read example template: %v", err)
 	}
 
+	// Every template the example declares must actually exist, relative to
+	// the repo root the pair ships in. This is the check that matters: the
+	// hook scan below covers only what a hook names inline, and the example's
+	// live post_create hook is an `echo`, so without this loop a `render:`
+	// entry pointing at a nonexistent template passed the whole suite.
+	if len(cfg.Render) == 0 {
+		t.Fatal("example config declares no render targets; the worked example lost its point")
+	}
+	for _, r := range cfg.Render {
+		if _, err := os.Stat(filepath.Join("..", r.Template)); err != nil {
+			t.Errorf("render target %q names template %q, which does not exist: %v", r.Out, r.Template, err)
+		}
+	}
+
 	// Every file the example's hooks render must actually exist, relative to
 	// the repo root the pair ships in.
 	for _, hook := range cfg.Hooks.PostCreate {
@@ -748,5 +766,158 @@ func TestLocalConfigComesFromTheTrunkCheckout(t *testing.T) {
 	}
 	if len(got.Pools["devices"]) != 1 || got.Pools["devices"][0] != "my-phone" {
 		t.Fatalf("pools = %v, want [my-phone] from the trunk checkout's overlay", got.Pools["devices"])
+	}
+}
+
+// TestExampleConfigCoversSchema is the guard that keeps cmd/wet.example.yaml
+// honest: the file calls itself "the full `.wet.yaml` schema", and the only
+// way that claim survives a new field being added to WetConfig is if a test
+// reflects over the struct and insists every yaml key is documented.
+// (`main_branch:` had been a real key for a while before anyone noticed the
+// example never mentioned it.)
+//
+// The check is path-aware rather than a `strings.Contains(body, key+":")`,
+// because leaf names collide: `base:` is both a PortConfig field and a
+// PRConfig field, so a loose check would let `pr.base` alone vouch for
+// `ports[].base`. Live keys are therefore matched against paths walked out of
+// the parsed YAML tree.
+//
+// A key that is only illustrated in a commented-out block can't appear in
+// the parsed tree at all, so those get an explicit escape hatch:
+// commentedSchemaKeys, below. It is deliberately an allowlist and not a
+// fallback. The previous version accepted ANY schema key that appeared after
+// a `#` anywhere in the file, which meant a live key could rot into a comment
+// and still pass — commenting out `port_stride: 10` was undetectable. It was
+// also path-blind (it matched on the leaf name alone), so the commented
+// `render:` block vouched for a `template:` or `out:` leaf on any struct.
+// Now the escape hatch is a reviewable list of three paths, each pinned to
+// the shape it is allowed to be documented as.
+func TestExampleConfigCoversSchema(t *testing.T) {
+	body, err := os.ReadFile("wet.example.yaml")
+	if err != nil {
+		t.Fatalf("read wet.example.yaml: %v", err)
+	}
+	var root yaml.Node
+	if err := yaml.Unmarshal(body, &root); err != nil {
+		t.Fatalf("parse wet.example.yaml: %v", err)
+	}
+	live := map[string]bool{}
+	collectYAMLPaths(&root, "", live)
+
+	for _, path := range schemaYAMLPaths(t, reflect.TypeOf(WetConfig{}), "") {
+		if live[path] {
+			if _, exempt := commentedSchemaKeys[path]; exempt {
+				t.Errorf("schema key %q is now a live key in cmd/wet.example.yaml; "+
+					"drop it from commentedSchemaKeys so the strict check applies", path)
+			}
+			continue
+		}
+		re, exempt := commentedSchemaKeys[path]
+		if !exempt {
+			t.Errorf("schema key %q is not documented in cmd/wet.example.yaml "+
+				"(add it to the config, or — only if it is meant to be shown "+
+				"commented out — add it to commentedSchemaKeys)", path)
+			continue
+		}
+		if !re.Match(body) {
+			t.Errorf("schema key %q is exempt as documented-by-example, but no commented "+
+				"line matching %s is left in cmd/wet.example.yaml", path, re)
+		}
+	}
+}
+
+// commentedSchemaKeys are the schema paths cmd/wet.example.yaml documents by
+// showing them commented out rather than live, mapped to the exact commented
+// line each must still have. Both halves matter: without the map the key
+// would look undocumented, and without the regex the exemption would be a
+// blanket pass that survives the illustration being deleted.
+//
+// Adding an entry here is how you turn the strict check off for one path, so
+// it should stay short and each addition should be argued for in review.
+var commentedSchemaKeys = map[string]*regexp.Regexp{
+	// Optional per-pool auto-grow strategy; shown commented so the example
+	// config doesn't create emulators on anyone's machine.
+	"pool_grow": regexp.MustCompile(`(?m)^# pool_grow:$`),
+	// A PR body override; the default body is what most repos want.
+	"pr.body_template": regexp.MustCompile(`(?m)^\s+# body_template: \|$`),
+	// Secret sources belong to a specific render target, so they are
+	// illustrated inside the commented extra targets.
+	"render[].secrets_from": regexp.MustCompile(`(?m)^\s+#\s+secrets_from: \[`),
+}
+
+// schemaYAMLPaths walks a config struct and returns the dotted path of every
+// yaml key it can produce. Slices of structs contribute a "[]" segment so a
+// list element's fields are distinguishable from a mapping's.
+//
+// Map-typed fields (env:, pools:) stop the walk deliberately: their keys are
+// user-chosen, not schema. That is only sound while the map's values carry no
+// schema of their own, so a map of structs fails the test rather than being
+// silently skipped — the walker cannot express a path through it, and the
+// nested keys would go undocumented with nothing to notice.
+func schemaYAMLPaths(t *testing.T, typ reflect.Type, prefix string) []string {
+	t.Helper()
+	var out []string
+	for i := 0; i < typ.NumField(); i++ {
+		f := typ.Field(i)
+		tag := f.Tag.Get("yaml")
+		name, _, _ := strings.Cut(tag, ",")
+		if name == "-" || name == "" {
+			continue
+		}
+		path := name
+		if prefix != "" {
+			path = prefix + "." + name
+		}
+		out = append(out, path)
+
+		ft := f.Type
+		for ft.Kind() == reflect.Ptr {
+			ft = ft.Elem()
+		}
+		if ft.Kind() == reflect.Map {
+			elem := ft.Elem()
+			for elem.Kind() == reflect.Ptr || elem.Kind() == reflect.Slice {
+				elem = elem.Elem()
+			}
+			if elem.Kind() == reflect.Struct {
+				t.Fatalf("%s is a map of structs; schemaYAMLPaths cannot walk it, "+
+					"so its nested keys would go undocumented unnoticed. Teach the "+
+					"walker to descend through map values before adding this field.", path)
+			}
+			continue
+		}
+		if ft.Kind() == reflect.Slice {
+			ft = ft.Elem()
+			path += "[]"
+		}
+		if ft.Kind() == reflect.Struct {
+			out = append(out, schemaYAMLPaths(t, ft, path)...)
+		}
+	}
+	return out
+}
+
+// collectYAMLPaths records the dotted path of every mapping key present in a
+// parsed document, mirroring schemaYAMLPaths' "[]" convention for sequences.
+func collectYAMLPaths(n *yaml.Node, prefix string, out map[string]bool) {
+	switch n.Kind {
+	case yaml.DocumentNode:
+		for _, c := range n.Content {
+			collectYAMLPaths(c, prefix, out)
+		}
+	case yaml.MappingNode:
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			key := n.Content[i].Value
+			path := key
+			if prefix != "" {
+				path = prefix + "." + key
+			}
+			out[path] = true
+			collectYAMLPaths(n.Content[i+1], path, out)
+		}
+	case yaml.SequenceNode:
+		for _, c := range n.Content {
+			collectYAMLPaths(c, prefix+"[]", out)
+		}
 	}
 }
