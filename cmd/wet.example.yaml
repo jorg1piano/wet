@@ -1,4 +1,4 @@
-# .wet.example.yaml — the full `.wet.yaml` schema, annotated.
+# wet.example.yaml — the full `.wet.yaml` schema, annotated.
 #
 # Copy to `.wet.yaml` at your repo root and delete what you don't need.
 # Everything below is optional except `project_name`. wet itself contains no
@@ -17,6 +17,12 @@
 # Must match [a-z0-9][a-z0-9_-]* — it embeds into COMPOSE_PROJECT_NAME, so it
 # has to satisfy Docker Compose's naming rules.
 project_name: myapp
+
+# The trunk: the branch new worktrees are cut from (origin/<branch> when that
+# ref exists, so a worktree starts from what's on the remote rather than from
+# a stale local tip), the default base for `wet pr create`, and the one branch
+# wet refuses to open a PR from. Optional; defaults to "main".
+main_branch: main
 
 # ---------------------------------------------------------------------------
 # Files copied into each new worktree
@@ -40,11 +46,17 @@ copy:
 # Ports
 # ---------------------------------------------------------------------------
 #
-# Worktree N gets `base + N*stride` for each declared port, so several stacks
-# run side by side. Slots are reused lowest-first as worktrees are popped.
+# Every checkout holds a slot number N: the main repo is always slot 0, each
+# worktree gets the lowest free slot (1, 2, 3, ...). A declared port resolves
+# to `base + N*stride` — so with `base: 4000` and `stride: 10`, APP_PORT is
+# 4000 in the main repo, 4010 in the first worktree, 4020 in the second. That
+# is what lets several stacks run side by side. Slots are reused lowest-first
+# as worktrees are popped, and a slot is only taken if its ports are also
+# actually free on the host.
 #
 # Names must match [A-Z_][A-Z0-9_]* and must not collide with the reserved
-# template fields (ProjectName, Branch, BranchSafe, Slot, Pools).
+# template fields, which are: ProjectName, Branch, BranchSafe, Slot, Pools,
+# Handles.
 
 port_stride: 10 # default stride; optional, defaults to 10
 
@@ -61,26 +73,48 @@ ports:
 # ---------------------------------------------------------------------------
 #
 # Anything that can't be shared and can't be computed from a slot number:
-# emulator IDs, test-fixture snapshots, licence seats. Each `wet worktree
-# create` claims the lowest unclaimed item; claims release when the worktree
-# is popped. Allocation happens BEFORE `git worktree add`, so an exhausted
-# pool aborts with nothing left on disk.
+# emulators, test-fixture snapshots, licence seats. Allocation happens in
+# `wet setup`, which you run yourself from inside the worktree — `wet worktree
+# create` only forks the worktree and tells you the command. The first
+# unclaimed item in declared order is claimed and recorded in
+# `.wet-worktrees.json`. Claims release implicitly — dropping the worktree's
+# entry with `wet worktree pop` frees whatever it held, no release step to run.
 #
-# Pool names must match [a-z_][a-z0-9_]*. Reachable as {{.Pools.devices}} in
-# templates and $POOL_DEVICES in hooks.
+# On exhaustion (every item claimed and no `pool_grow:` strategy for that
+# pool), `wet setup` aborts with an error naming the branch holding each item.
+# By then the worktree and its branch are already on disk — they were created
+# by the earlier `wet worktree create` — and no state entry was recorded for
+# them. Free an item by popping another worktree and re-run `wet setup`, or
+# `wet worktree pop` this worktree away.
+#
+# Pool names must match [a-z_][a-z0-9_]*. Reachable as {{.Pools.devices}} /
+# {{.Handles.devices}} in templates and $POOL_DEVICES in hooks.
 
 pools:
+  # An emulator item names an AVD as `emulator:<AVD_NAME>`, never a runtime
+  # `emulator-5554` serial: the serial is assigned by adb at boot, so a pool
+  # of serials fills up with items that point at dead devices after a reboot
+  # and carry no way to start them again. The AVD name is durable, and it is
+  # what wet boots (and what teardown reasons about). The live serial is the
+  # *handle* — see .Handles below.
   devices:
-    - emulator-5554
-    - emulator-5556
-    - emulator-5558
+    - emulator:pixel-a
+    - emulator:pixel-b
+    - emulator:pixel-c
   fixtures:
     - snap-alpha
     - snap-beta
 
-# Optional: how to grow a pool when every item is claimed, instead of failing.
+# Optional: per-pool strategy for growing a pool when every item is claimed,
+# instead of failing. The only strategy wet implements is `android-emulator`:
+# it creates a new AVD named after the project, cold boots it, waits for it to
+# come online, appends `emulator:<AVD_NAME>` to the machine-local
+# `.wet.local.yaml` (never to this committed file), and claims it.
+#
+# A pool with no entry here — or with any other value — is not grown: it fails
+# with the exhaustion error described above.
 # pool_grow:
-#   devices: ./scripts/create-emulator.sh
+#   devices: android-emulator
 
 # ---------------------------------------------------------------------------
 # env: — the derivation layer
@@ -88,7 +122,13 @@ pools:
 #
 # Values are Go text/template strings. Available fields: ProjectName, Branch,
 # BranchSafe (branch with slashes flattened — safe for Docker names), Slot,
-# every declared port, and .Pools.<name>.
+# every declared port, .Pools.<name>, and .Handles.<name>.
+#
+# .Pools.<name> is the claimed item — the durable identity wet owns and tears
+# down (`emulator:pixel-a`). .Handles.<name> is the address that item answers
+# to right now, resolved at setup time (`emulator-5554`). Target commands at
+# the handle; identify the resource by the item. For a pool of plain strings
+# the two are identical.
 #
 # Entries may reference each other in any order — they resolve to a fixed
 # point, not in sorted order. That is what makes this the single source of
@@ -105,7 +145,7 @@ env:
   APP_URL: "http://{{.DEV_HOST}}:{{.APP_PORT}}"
   CALLBACK_URL: "{{.APP_URL}}/auth/callback" # derived from a derived value
   COMPOSE_PROJECT_NAME: "{{.ProjectName}}-{{.BranchSafe}}"
-  FLUTTER_DEVICE: "{{.Pools.devices}}"
+  FLUTTER_DEVICE: "{{.Handles.devices}}" # the live serial, not `emulator:pixel-a`
 
 # ---------------------------------------------------------------------------
 # render: — template → output pairs
@@ -163,7 +203,7 @@ hooks:
 
   pre_remove:
     - docker compose down -v
-    # - ./scripts/release-device.sh "$POOL_DEVICES"
+    # - ./scripts/release-device.sh "$POOL_DEVICES" # the item, e.g. emulator:pixel-a
 
 # ---------------------------------------------------------------------------
 # Pull requests — `wet pr create`
