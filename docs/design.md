@@ -182,3 +182,31 @@ cannot leak into another's output: a template referencing a key it wasn't given
 fails rather than silently picking up a sibling's value. Two targets writing the
 same `out` is rejected at load time, because the result would depend on ordering
 and the loser's secrets would vanish silently.
+
+## Why secrets stay outside `.wet.yaml`
+
+The store coordinates live in `wet.<store>.json`, not in the worktree config,
+and that is a boundary rather than a filing decision.
+
+wet has no vault code path at all: secrets reach a template only through
+`--secrets-from`, as opaque values it never resolves. Put `op://…` references
+in `.wet.yaml` and one of two things has to follow. Either wet interprets them
+— and now it shells out to `op`, holds credentials, and needs a provider
+abstraction the moment someone uses Azure — or it does not, and they are inert
+keys that config loading has to allowlist as "parsed, then ignored", which is
+worse than it sounds given that unknown keys are otherwise an error.
+
+The practical arguments point the same way. The consumers are shell scripts, so
+a YAML map would put `yq` on every machine and in CI to read a list nothing
+else reads. And `op://vault/item/field` is 1Password syntax, where `.wet.yaml`
+stays true whichever store you use — swapping stores should be two files in
+`scripts/`, not a config migration.
+
+What does belong in `.wet.yaml` is the invocation, which is where the choice of
+*which* secrets a worktree needs is properly expressed:
+
+```yaml
+hooks:
+  post_create:
+    - ./scripts/wet-secrets.sh core google | wet env populate backend/.env.tpl -o backend/.env --secrets-from -
+```

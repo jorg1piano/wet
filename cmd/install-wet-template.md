@@ -228,22 +228,40 @@ hand it a flat JSON object from whatever holds yours:
 wet env populate config/.env.tpl -o config/.env --secrets-from ./secrets.json
 ```
 
-**Don't invent that producer pipeline per repo — install the script.**
-`secrets-op.sh` sits beside this file in `.claude/skills/wet/`. It is a
-runnable 1Password producer: it prints exactly the flat JSON object
-`--secrets-from -` wants, takes the vault and item as parameters
-(`OP_VAULT` / `--vault`, `OP_ITEM` / `--item`), and resolves each key through
-`op read` assembled with `jq --arg`, so a secret containing a quote or a
-newline still yields valid JSON.
+**Don't invent that producer pipeline per repo — `wet install skill` already
+wrote it.** It puts four working files in the project itself, not in this skill
+directory: `wet.op.json` at the root, and `scripts/wet-secrets.sh`,
+`scripts/wet-secrets-provision.sh`, `scripts/secrets-map.sh`. Delete any you do
+not want. The producer prints exactly the flat JSON object `--secrets-from -`
+wants and resolves each key through `op read` assembled with `jq --arg`, so a
+secret containing a quote or a newline still yields valid JSON.
+
+`wet.op.json` is the single source of truth for both scripts — the middle
+segment of the filename names the store, so a repo on Azure would keep
+`wet.az.json` beside its own producer:
+
+```json
+{
+  "vault": "Development",
+  "item": "myapp",
+  "groups": {
+    "google": { "GOOGLE_CLIENT_ID": "google_client_id" }
+  }
+}
+```
 
 When a project needs secrets:
 
-1. Copy it in and commit it:
-   `cp .claude/skills/wet/secrets-op.sh scripts/wet-secrets.sh`
-2. Edit the `SECRETS=(...)` map so there is one `KEY=op://$OP_VAULT/$OP_ITEM/field`
-   line per key the templates reference, and set the `OP_VAULT` / `OP_ITEM`
-   defaults to this project's.
-3. Reference it from a hook — never inline the `op` pipeline into `.wet.yaml`:
+1. Edit `wet.op.json`: set `vault` / `item`, and add one entry per key the
+   templates reference, grouped so a caller can ask for a subset. A value is a
+   field on the default item, `"Other Item/field"` for another item, or a full
+   `"op://vault/item/field"`.
+2. Run `./scripts/wet-secrets-provision.sh` to create those fields in the
+   vault — it never touches a field that already has a value — then paste the
+   real secrets in. Never edit a `SECRETS=(...)` list in the scripts; there
+   isn't one.
+3. Reference the producer from a hook — never inline the `op` pipeline into
+   `.wet.yaml`:
    ```yaml
    hooks:
      post_create:

@@ -93,11 +93,14 @@ it, and lets it answer schema questions and debug hook failures without leaving
 the editor. Re-run with `--force` to overwrite. Both files behave the same in
 every worktree and every clone, so they're worth checking into git.
 
-It touches three more things in your repo, so it's worth knowing before you run
+It touches a few more things in your repo, so it's worth knowing before you run
 it:
 
 - `.claude/skills/wet/wet.example.yaml` — the annotated schema, alongside the
   skill, so Claude (and you) have it locally.
+- `wet.op.json` and `scripts/wet-secrets*.sh` — the 1Password secrets kit,
+  written into the project rather than the skill directory because you edit and
+  commit them. Delete the ones you don't want; nothing else depends on them.
 - `.gitignore` — appends `.wet-worktrees.json`, `.wet-worktrees.lock` and
   `.env.worktree` if they aren't already mentioned, and prints what it added.
   An existing file is appended to, never rewritten.
@@ -298,11 +301,51 @@ wet env populate config/.env.tpl -o config/.env --secrets-from ./secrets.json
 
 Keep the producer in a committed script rather than inline in a hook, so it can
 be run on its own (`./scripts/wet-secrets.sh | jq keys`) when a render fails.
-`wet install skill` ships a working 1Password one at
-`.claude/skills/wet/secrets-op.sh`: copy it to `scripts/wet-secrets.sh`, list
-your keys in its `SECRETS` map, and point `OP_VAULT` / `OP_ITEM` (flags or env)
-at your vault. It resolves each key with `op read` and assembles the JSON with
-`jq --arg`, so a secret holding a quote or a newline still comes out valid.
+`wet install skill` writes a working 1Password one straight into your project —
+no copying out of the skill directory, since these are files you edit:
+
+| file | role |
+| --- | --- |
+| `wet.op.json` | the keys and where their values live, in named groups |
+| `scripts/wet-secrets.sh` | reads the map, prints `{"KEY": "value"}` |
+| `scripts/wet-secrets-provision.sh` | reads the map, creates the fields in the vault |
+| `scripts/secrets-map.sh` | the map loader both scripts source |
+
+Keep what you use and delete the rest. Re-running `wet install skill` restores
+a deleted file and leaves an edited one alone unless you pass `--force`.
+
+The map is `wet.<store>.json` — the middle segment names the secret store, so a
+repo that later adds Azure keeps `wet.az.json` beside `wet.op.json`, each read
+by its own producer. A producer handed the wrong one refuses rather than
+resolving references with the wrong CLI. It stays out of `.wet.yaml` on
+purpose: wet has no vault code path, and keeping store coordinates outside its
+config is what makes that true ([why](docs/design.md#why-secrets-stay-outside-wetyaml)).
+
+```json
+{
+  "vault": "Development",
+  "item": "myapp",
+  "groups": {
+    "google": {
+      "GOOGLE_CLIENT_ID": "google_client_id",
+      "GOOGLE_CLIENT_SECRET": "google_client_secret"
+    }
+  }
+}
+```
+
+A value is a field on the default item, `"Other Item/field"` for another item
+in the same vault, or a full `"op://vault/item/field"`. Edit the map, not the
+scripts — it is the single source of truth, so a key cannot exist in the vault
+but be missing from the render. `OP_VAULT` / `OP_ITEM` (flags or env) override
+the file's defaults; name one or more groups to act on a subset
+(`./scripts/wet-secrets.sh core google`).
+
+The producer resolves each key with `op read` and assembles the JSON with
+`jq --arg`, so a secret holding a quote or a newline still comes out valid. The
+provisioner creates any field the map names and the vault lacks — empty, or
+prompted for with `--fill` — and never overwrites a field that already has a
+value, so first-time setup is a command instead of a click-through.
 
 Prefer the pipe form: a `secrets_from:` path leaves a plaintext copy of every
 secret on disk, where `--secrets-from -` keeps them in one process's stdin. Wrap

@@ -2,128 +2,130 @@
 #
 # wet secrets provisioner — 1Password.
 #
-# Creates the *fields* an OAuth provider needs, so you never hand-click them
-# into the UI. Values are left alone: a field that already has a value is never
-# touched, a missing one is created empty (or prompted for with --fill), and you
-# paste the real secret in later — from the provider's console or `op item edit`.
+# Creates the *fields* named in wet.op.json, so you never hand-click
+# them into the UI. Values are left alone: a field that already has a value is
+# never touched, a missing one is created empty (or prompted for with --fill),
+# and you paste the real secret in later — from the provider's console or
+# `op item edit`.
+#
+# It reads the same map as wet-secrets.sh and derives everything from the
+# op:// references in it — vault, item, field label — so whether you keep one
+# item per app or one item per service is a fact about the map, not about this
+# script. Adding an OAuth provider is one group in the JSON; no code changes.
 #
 # Usage:
-#   wet-secrets-provision.sh [--vault V] [--account A] [--fill] <provider>...
-#   wet-secrets-provision.sh --list
+#   wet-secrets-provision.sh [--vault V] [--item I] [--account A]
+#                            [--map wet.op.json] [--fill] [--dry-run] [group...]
 #
 # Examples:
-#   # one provider, default vault
+#   # every key in the map
+#   ./scripts/wet-secrets-provision.sh
+#
+#   # just one provider's fields
 #   ./scripts/wet-secrets-provision.sh google
 #
-#   # several providers into a named vault
+#   # a named vault and 1Password account
 #   ./scripts/wet-secrets-provision.sh google apple \
-#       --vault fantasy_basketball_development
-#
-#   # pick the 1Password account when you are signed in to more than one
-#   ./scripts/wet-secrets-provision.sh google \
 #       --vault fantasy_basketball_development \
 #       --account my.1password.com
 #
 #   # prompt for each value instead of creating the fields empty
 #   ./scripts/wet-secrets-provision.sh apple --fill
 #
-#   # show the providers and the op:// references they map to
-#   ./scripts/wet-secrets-provision.sh --list
+#   # show what it would create, touching nothing
+#   ./scripts/wet-secrets-provision.sh --dry-run
 #
-# One item per service, the way a vault is normally laid out — a "Google OAuth"
-# item with a `client_id` field, not one myapp item holding GOOGLE_CLIENT_ID.
-# The env key lives only in the mapping below, which is also what the producer
-# (wet-secrets.sh) needs: it prints the matching op:// references with --list.
-#
-# Redirect URIs are deliberately NOT here. `{{.HYDRA_PUBLIC_URL}}/callback/google`
+# Redirect URIs are deliberately NOT in the map. `{{.HYDRA_PUBLIC_URL}}/callback/google`
 # is derived per worktree by wet's env: block — putting it in the vault would
 # pin every checkout to one URL.
-#
-# To add a provider: append one PROVIDERS line. Nothing else changes.
 
 set -euo pipefail
 
 OP_VAULT="${OP_VAULT:-Development}"
+OP_ITEM="${OP_ITEM:-myapp}"
 OP_ACCOUNT="${OP_ACCOUNT:-}"
+SECRETS_MAP="${SECRETS_MAP:-wet.op.json}"
 FILL=0
+DRY_RUN=0
 
-# provider|item title|ENV_KEY=field_label ENV_KEY=field_label ...
-PROVIDERS=(
-  "google|Google OAuth|GOOGLE_CLIENT_ID=client_id GOOGLE_CLIENT_SECRET=client_secret"
-  "apple|Apple Sign In|APPLE_SERVICE_ID=service_id APPLE_TEAM_ID=team_id APPLE_KEY_ID=key_id APPLE_PRIVATE_KEY_PEM_BASE64=private_key_pem_base64"
-)
+usage() { sed -n '2,41p' "$0" | sed 's/^# \{0,1\}//'; }
 
-usage() { sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'; }
-
-entry_for() {
-  local want="$1" entry
-  for entry in "${PROVIDERS[@]}"; do
-    [ "${entry%%|*}" = "$want" ] && { printf '%s\n' "$entry"; return 0; }
-  done
-  return 1
-}
-
-list_providers() {
-  local entry rest item pairs pair
-  for entry in "${PROVIDERS[@]}"; do
-    rest="${entry#*|}"; item="${rest%%|*}"; pairs="${rest#*|}"
-    echo "${entry%%|*}  ->  item \"$item\""
-    for pair in $pairs; do
-      echo "    ${pair%%=*} = op://${OP_VAULT}/${item}/${pair#*=}"
-    done
-  done
-}
-
-selected=()
+groups=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --vault)   OP_VAULT="${2:?--vault needs a value}"; shift 2 ;;
+    --item)    OP_ITEM="${2:?--item needs a value}"; shift 2 ;;
     --account) OP_ACCOUNT="${2:?--account needs a value}"; shift 2 ;;
+    --map)     SECRETS_MAP="${2:?--map needs a value}"; shift 2 ;;
     --fill)    FILL=1; shift ;;
-    --list)    list_providers; exit 0 ;;
+    --dry-run) DRY_RUN=1; shift ;;
     -h|--help) usage; exit 0 ;;
     -*)        echo "$0: unknown flag: $1" >&2; exit 2 ;;
-    *)         selected+=("$1"); shift ;;
+    *)         groups+=("$1"); shift ;;
   esac
 done
-
-if [ "${#selected[@]}" -eq 0 ]; then
-  echo "$0: name at least one provider (see --list)" >&2
-  exit 2
-fi
 
 for bin in op jq; do
   command -v "$bin" >/dev/null 2>&1 || { echo "$0: $bin is not installed" >&2; exit 1; }
 done
 
-# Validate every provider before touching the vault, so a typo in the second
-# argument doesn't leave the first provider's item half-provisioned.
-entries=()
-for provider in "${selected[@]}"; do
-  if ! entry=$(entry_for "$provider"); then
-    echo "$0: unknown provider: $provider (known: $(printf '%s ' "${PROVIDERS[@]%%|*}"))" >&2
-    exit 2
+# shellcheck source=secrets-map.sh
+. "$(dirname "$0")/secrets-map.sh"
+secrets_map_load "$SECRETS_MAP" op ${groups[@]+"${groups[@]}"}
+
+# op://vault/item/field — anything else this script cannot provision, and
+# guessing would create fields in the wrong place.
+ref_part() {
+  local ref="$1" n="$2" rest
+  case "$ref" in op://*) rest="${ref#op://}" ;; *) return 1 ;; esac
+  case "$rest" in */*/*) ;; *) return 1 ;; esac
+  case "$n" in
+    vault) echo "${rest%%/*}" ;;
+    item)  rest="${rest#*/}"; echo "${rest%%/*}" ;;
+    field) echo "${rest##*/}" ;;
+  esac
+}
+
+# Group the selected entries by (vault, item) so each item is fetched and
+# edited exactly once, however the map is laid out.
+targets=()
+for i in "${!SECRETS_KEYS[@]}"; do
+  ref="${SECRETS_REFS[$i]}"
+  if ! vault=$(ref_part "$ref" vault) || ! item=$(ref_part "$ref" item); then
+    echo "$SECRETS_MAP: ${SECRETS_KEYS[$i]}: not an op://vault/item/field reference: $ref" >&2
+    exit 1
   fi
-  entries+=("$entry")
+  key="$vault|$item"
+  found=0
+  for t in ${targets[@]+"${targets[@]}"}; do
+    [ "$t" = "$key" ] && { found=1; break; }
+  done
+  [ "$found" -eq 0 ] && targets+=("$key")
 done
 
-op_args=(--vault "$OP_VAULT")
-[ -n "$OP_ACCOUNT" ] && op_args+=(--account "$OP_ACCOUNT")
+for target in "${targets[@]}"; do
+  vault="${target%%|*}"; item="${target#*|}"
 
-provision() {
-  local item="$1" pairs="$2" item_json pair env_key label value
-  local edits=()
+  op_args=(--vault "$vault")
+  [ -n "$OP_ACCOUNT" ] && op_args+=(--account "$OP_ACCOUNT")
 
-  if ! item_json=$(op item get "$item" "${op_args[@]}" --format json 2>/dev/null); then
-    echo "creating item \"$item\" in vault $OP_VAULT"
+  echo "item \"$item\" in vault $vault"
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    item_json='{"fields":[]}'
+  elif ! item_json=$(op item get "$item" "${op_args[@]}" --format json 2>/dev/null); then
+    echo "  creating item"
     item_json=$(op item create --category "API Credential" --title "$item" \
       "${op_args[@]}" --format json)
-  else
-    echo "item \"$item\" exists"
   fi
 
-  for pair in $pairs; do
-    env_key="${pair%%=*}"; label="${pair#*=}"
+  edits=()
+  for i in "${!SECRETS_KEYS[@]}"; do
+    ref="${SECRETS_REFS[$i]}"
+    [ "$(ref_part "$ref" vault)|$(ref_part "$ref" item)" = "$target" ] || continue
+    env_key="${SECRETS_KEYS[$i]}"
+    label="$(ref_part "$ref" field)"
+
     # A field counts as present only when it holds a non-empty value; an
     # existing empty field is still a candidate for --fill.
     if jq -e --arg l "$label" \
@@ -132,7 +134,7 @@ provision() {
       echo "  keep    $label (already set) -> $env_key"
       continue
     fi
-    if [ "$FILL" -eq 1 ]; then
+    if [ "$FILL" -eq 1 ] && [ "$DRY_RUN" -eq 0 ]; then
       printf '  value for %s (%s), empty to skip: ' "$label" "$env_key" >&2
       IFS= read -rs value; echo >&2
       if [ -n "$value" ]; then
@@ -147,38 +149,23 @@ provision() {
 
   if [ "${#edits[@]}" -eq 0 ]; then
     echo "  nothing to do"
-    return 0
+    continue
+  fi
+  if [ "$DRY_RUN" -eq 1 ]; then
+    echo "  (dry run — nothing written)"
+    continue
   fi
   op item edit "$item" "${op_args[@]}" "${edits[@]}" --format json >/dev/null
-}
-
-for entry in "${entries[@]}"; do
-  rest="${entry#*|}"
-  provision "${rest%%|*}" "${rest#*|}"
 done
 
-# The two files that consume these fields are checked in and hand-authored, so
-# the script prints the lines rather than editing them: appending would
-# duplicate on a re-run, and the template's ordering and comments are yours.
+# The .env template is checked in and hand-authored, so the script prints the
+# lines rather than editing it: appending would duplicate on a re-run, and the
+# template's ordering and comments are yours.
 echo
-echo "1. paste into SECRETS=() in scripts/wet-secrets.sh:"
-for entry in "${entries[@]}"; do
-  rest="${entry#*|}"; item="${rest%%|*}"
-  for pair in ${rest#*|}; do
-    echo "  \"${pair%%=*}=op://${OP_VAULT}/${item}/${pair#*=}\""
-  done
+echo "paste into your .env template, then fill the empty fields in 1Password:"
+for key in "${SECRETS_KEYS[@]}"; do
+  echo "  ${key}={{.${key}}}"
 done
-
 echo
-echo "2. paste into your .env template (redirect URIs derive from wet's env: block):"
-for entry in "${entries[@]}"; do
-  provider="${entry%%|*}"; rest="${entry#*|}"
-  for pair in ${rest#*|}; do
-    key="${pair%%=*}"
-    echo "  ${key}={{.${key}}}"
-  done
-  echo "  $(echo "$provider" | tr '[:lower:]' '[:upper:]')_REDIRECT_URI={{.HYDRA_PUBLIC_URL}}/callback/${provider}"
-done
-
-echo
-echo "then render:  ./scripts/wet-secrets.sh | wet env populate backend/.env.tpl -o backend/.env --secrets-from -"
+echo "render with:"
+echo "  ./scripts/wet-secrets.sh | wet env populate backend/.env.tpl -o backend/.env --secrets-from -"

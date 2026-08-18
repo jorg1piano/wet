@@ -42,6 +42,23 @@ var wetExampleConfig string
 //go:embed secrets-op.sh
 var wetSecretsScript string
 
+// The provisioner is the other half: it creates the fields the map names in
+// the vault, so first-time setup is a command instead of a click-through.
+//
+//go:embed secrets-op-provision.sh
+var wetSecretsProvisionScript string
+
+// Both scripts read this map and source this parser, so the key list lives in
+// exactly one place — a key cannot exist in the vault but be missing from the
+// render. The middle segment of `wet.op.json` names the store: a repo can hold
+// wet.az.json beside it, each read by its own producer.
+//
+//go:embed wet.op.json
+var wetSecretsMap string
+
+//go:embed secrets-map.sh
+var wetSecretsMapParser string
+
 var installForce bool
 
 var installCmd = &cobra.Command{
@@ -74,10 +91,22 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		if err := installSkillFiles("wet", []skillFile{
 			{name: "SKILL.md", content: wetSkillTemplate},
 			{name: "wet.example.yaml", content: wetExampleConfig},
-			// 0755: this one is meant to be copied into the repo and run,
-			// and a template that needs `chmod +x` before it works is a
-			// template that will be pasted wrong.
-			{name: "secrets-op.sh", content: wetSecretsScript, mode: 0o755},
+		}); err != nil {
+			return err
+		}
+		// The secrets files are working files, not reference material, so
+		// they land where they are used and the user prunes what they do not
+		// want — the map at the root beside .wet.yaml, the scripts in
+		// scripts/ where the hooks call them.
+		if err := installProjectFiles([]skillFile{
+			{name: "wet.op.json", content: wetSecretsMap},
+			// 0755: these are meant to be run, and a script that needs
+			// `chmod +x` before it works is a script that will be pasted
+			// wrong.
+			{name: filepath.Join("scripts", "wet-secrets.sh"), content: wetSecretsScript, mode: 0o755},
+			{name: filepath.Join("scripts", "wet-secrets-provision.sh"), content: wetSecretsProvisionScript, mode: 0o755},
+			// Sourced, never executed directly — 0644 is the honest mode.
+			{name: filepath.Join("scripts", "secrets-map.sh"), content: wetSecretsMapParser},
 		}); err != nil {
 			return err
 		}
@@ -215,14 +244,45 @@ func installSkillFiles(name string, files []skillFile) error {
 	if err != nil {
 		return err
 	}
-	targetDir := filepath.Join(repoRoot, ".claude", "skills", name)
+	wrote, err := installFiles(filepath.Join(repoRoot, ".claude", "skills", name), files)
+	if err != nil {
+		return err
+	}
+	if wrote {
+		fmt.Println("  Claude Code will load this skill on next session start.")
+		fmt.Println("  Restart Claude Code or run /reload if you want it active immediately.")
+	}
+	return nil
+}
+
+// installProjectFiles writes embedded files into the repo root itself, for
+// the ones that are working files rather than documentation: the user edits
+// them, commits them, and deletes the ones they do not want. A skill
+// directory is the wrong home for those — copying them out by hand is a
+// manual step that drifts from the bundled copy.
+func installProjectFiles(files []skillFile) error {
+	repoRoot, err := getRepoRoot()
+	if err != nil {
+		return err
+	}
+	_, err = installFiles(repoRoot, files)
+	return err
+}
+
+// installFiles writes each file into targetDir, reporting whether anything
+// changed. A file name may carry a subdirectory ("scripts/foo.sh"), which is
+// created on demand.
+func installFiles(targetDir string, files []skillFile) (bool, error) {
 	if err := os.MkdirAll(targetDir, 0o755); err != nil {
-		return fmt.Errorf("mkdir %s: %w", targetDir, err)
+		return false, fmt.Errorf("mkdir %s: %w", targetDir, err)
 	}
 
 	wrote := false
 	for _, f := range files {
 		targetPath := filepath.Join(targetDir, f.name)
+		if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+			return false, fmt.Errorf("mkdir %s: %w", filepath.Dir(targetPath), err)
+		}
 		if existing, err := os.ReadFile(targetPath); err == nil {
 			if string(existing) == f.content {
 				// Content match is not enough: a copy restored from an
@@ -231,7 +291,7 @@ func installSkillFiles(name string, files []skillFile) error {
 				// the bits rather than reporting a script that cannot run
 				// as up to date.
 				if err := os.Chmod(targetPath, f.perm()); err != nil {
-					return fmt.Errorf("chmod %s: %w", targetPath, err)
+					return false, fmt.Errorf("chmod %s: %w", targetPath, err)
 				}
 				fmt.Printf("  %s is already up to date.\n", targetPath)
 				continue
@@ -239,7 +299,7 @@ func installSkillFiles(name string, files []skillFile) error {
 			if !installForce {
 				ok, err := confirmOverwrite(targetPath)
 				if err != nil {
-					return err
+					return false, err
 				}
 				if !ok {
 					fmt.Printf("  Skipped: %s\n", targetPath)
@@ -247,28 +307,24 @@ func installSkillFiles(name string, files []skillFile) error {
 				}
 			}
 		} else if !os.IsNotExist(err) {
-			return fmt.Errorf("stat %s: %w", targetPath, err)
+			return false, fmt.Errorf("stat %s: %w", targetPath, err)
 		}
 
 		data := []byte(f.content)
 		if err := os.WriteFile(targetPath, data, f.perm()); err != nil {
-			return fmt.Errorf("write %s: %w", targetPath, err)
+			return false, fmt.Errorf("write %s: %w", targetPath, err)
 		}
 		// WriteFile only applies the mode when it creates the file, so an
 		// overwrite of an existing 0644 copy would leave the script
 		// non-executable without this.
 		if err := os.Chmod(targetPath, f.perm()); err != nil {
-			return fmt.Errorf("chmod %s: %w", targetPath, err)
+			return false, fmt.Errorf("chmod %s: %w", targetPath, err)
 		}
 		fmt.Printf("  Installed: %s (%d bytes)\n", targetPath, len(data))
 		wrote = true
 	}
 
-	if wrote {
-		fmt.Println("  Claude Code will load this skill on next session start.")
-		fmt.Println("  Restart Claude Code or run /reload if you want it active immediately.")
-	}
-	return nil
+	return wrote, nil
 }
 
 // confirmOverwrite asks before clobbering a file that differs from the

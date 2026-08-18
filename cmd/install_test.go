@@ -277,7 +277,7 @@ func TestEmbeddedSecretsScript(t *testing.T) {
 	// The contract with `wet env populate --secrets-from -` is a flat JSON
 	// object on stdout, and the vault must stay a parameter — a hardcoded one
 	// makes the committed copy machine-specific.
-	for _, want := range []string{"OP_VAULT", "--vault", "jq -n"} {
+	for _, want := range []string{"OP_VAULT", "--vault", "jq -n", "secrets_map_load"} {
 		if !strings.Contains(wetSecretsScript, want) {
 			t.Errorf("wetSecretsScript does not mention %q", want)
 		}
@@ -287,12 +287,29 @@ func TestEmbeddedSecretsScript(t *testing.T) {
 	if err != nil {
 		t.Skipf("bash not available: %v", err)
 	}
-	script := filepath.Join(t.TempDir(), "secrets-op.sh")
-	if err := os.WriteFile(script, []byte(wetSecretsScript), 0o755); err != nil {
-		t.Fatal(err)
+	// The producer sources the parser from its own directory and reads the
+	// map by name, so the quartet has to be laid out the way `wet install
+	// skill` lays it out.
+	stubDir := t.TempDir()
+	script := filepath.Join(stubDir, "secrets-op.sh")
+	provision := filepath.Join(stubDir, "secrets-op-provision.sh")
+	for _, f := range []struct {
+		path    string
+		content string
+	}{
+		{script, wetSecretsScript},
+		{provision, wetSecretsProvisionScript},
+		{filepath.Join(stubDir, "secrets-map.sh"), wetSecretsMapParser},
+		{filepath.Join(stubDir, "wet.op.json"), wetSecretsMap},
+	} {
+		if err := os.WriteFile(f.path, []byte(f.content), 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if out, err := exec.Command(bash, "-n", script).CombinedOutput(); err != nil {
-		t.Fatalf("shipped secrets script does not parse: %v\n%s", err, out)
+	for _, f := range []string{script, provision, filepath.Join(stubDir, "secrets-map.sh")} {
+		if out, err := exec.Command(bash, "-n", f).CombinedOutput(); err != nil {
+			t.Fatalf("shipped script %s does not parse: %v\n%s", filepath.Base(f), err, out)
+		}
 	}
 
 	// Run it against a stub `op` that returns a value holding a quote, a
@@ -302,12 +319,12 @@ func TestEmbeddedSecretsScript(t *testing.T) {
 	if _, err := exec.LookPath("jq"); err != nil {
 		t.Skipf("jq not available: %v", err)
 	}
-	stubDir := filepath.Dir(script)
 	stub := "#!/bin/sh\nprintf 'a\"b\\\\c\\nd'\n"
 	if err := os.WriteFile(filepath.Join(stubDir, "op"), []byte(stub), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	cmd := exec.Command(bash, script, "--vault", "Shared")
+	cmd.Dir = stubDir
 	cmd.Env = append(os.Environ(), "PATH="+stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	out, err := cmd.Output()
 	if err != nil {
@@ -324,6 +341,116 @@ func TestEmbeddedSecretsScript(t *testing.T) {
 		if v != "a\"b\\c\nd" {
 			t.Errorf("%s = %q, want the stub value round-tripped intact", k, v)
 		}
+	}
+
+	// The map is the single source of truth: selecting a group must narrow
+	// what the producer fetches, or the two scripts would drift apart again.
+	cmd = exec.Command(bash, script, "--vault", "Shared", "--dry-run", "google")
+	cmd.Dir = stubDir
+	cmd.Env = append(os.Environ(), "PATH="+stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	out, err = cmd.Output()
+	if err != nil {
+		t.Fatalf("run secrets script --dry-run google: %v", err)
+	}
+	if !strings.Contains(string(out), "GOOGLE_CLIENT_ID") ||
+		strings.Contains(string(out), "SENTRY_DSN") {
+		t.Errorf("--dry-run google did not narrow to the google group:\n%s", out)
+	}
+
+	// An unknown group is a typo, and must fail rather than quietly produce
+	// nothing — an empty object renders every template field as missing.
+	cmd = exec.Command(bash, script, "--vault", "Shared", "nope")
+	cmd.Dir = stubDir
+	cmd.Env = append(os.Environ(), "PATH="+stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if err := cmd.Run(); err == nil {
+		t.Error("an unknown group must fail, got success")
+	}
+
+	// The provisioner reads the same map; --dry-run proves it parses the
+	// op:// references into item/field without touching a vault.
+	cmd = exec.Command(bash, provision, "--vault", "Shared", "--dry-run", "google")
+	cmd.Dir = stubDir
+	cmd.Env = append(os.Environ(), "PATH="+stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	out, err = cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run provisioner --dry-run: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "google_client_id") {
+		t.Errorf("provisioner did not name the field it would create:\n%s", out)
+	}
+
+	// The shipped map must be valid JSON — it is copied verbatim into user
+	// repos, and a trailing comma would only surface at worktree-create time.
+	var parsed struct {
+		Vault  string                       `json:"vault"`
+		Item   string                       `json:"item"`
+		Groups map[string]map[string]string `json:"groups"`
+	}
+	if err := json.Unmarshal([]byte(wetSecretsMap), &parsed); err != nil {
+		t.Fatalf("shipped wet.op.json is not valid JSON: %v", err)
+	}
+	if parsed.Vault == "" || parsed.Item == "" || len(parsed.Groups) == 0 {
+		t.Errorf("shipped wet.op.json needs vault, item and at least one group; got %+v", parsed)
+	}
+
+	// The filename declares the store. A producer handed another store's map
+	// must refuse, rather than resolve op:// references with the wrong CLI.
+	wrong := filepath.Join(stubDir, "wet.az.json")
+	if err := os.WriteFile(wrong, []byte(wetSecretsMap), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd = exec.Command(bash, script, "--map", wrong, "--dry-run")
+	cmd.Dir = stubDir
+	cmd.Env = append(os.Environ(), "PATH="+stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if err := cmd.Run(); err == nil {
+		t.Error("the op producer accepted a wet.az.json map, want a refusal")
+	}
+}
+
+// TestInstallProjectFilesLayout pins where the secrets files land. They are
+// working files the user edits and prunes, so a skill directory is the wrong
+// home: the map belongs at the root beside .wet.yaml and the scripts in
+// scripts/, which the hooks call by that path. A nested name must also create
+// its directory — scripts/ does not exist in a fresh repo.
+func TestInstallProjectFilesLayout(t *testing.T) {
+	repo := t.TempDir()
+	if out, err := exec.Command("git", "-C", repo, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	t.Chdir(repo)
+	root, err := getRepoRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	files := []skillFile{
+		{name: "wet.op.json", content: "{}\n"},
+		{name: filepath.Join("scripts", "wet-secrets.sh"), content: "#!/usr/bin/env bash\n", mode: 0o755},
+	}
+	if err := installProjectFiles(files); err != nil {
+		t.Fatalf("installProjectFiles: %v", err)
+	}
+
+	for _, f := range files {
+		info, err := os.Stat(filepath.Join(root, f.name))
+		if err != nil {
+			t.Fatalf("%s was not installed at the repo root: %v", f.name, err)
+		}
+		if got := info.Mode().Perm(); got != f.perm() {
+			t.Errorf("%s mode = %o, want %o", f.name, got, f.perm())
+		}
+	}
+
+	// It must not also leave a copy in the skill directory — two copies of an
+	// editable file is exactly the drift this move removes.
+	if _, err := os.Stat(filepath.Join(root, ".claude", "skills", "wet", "wet.op.json")); !os.IsNotExist(err) {
+		t.Errorf("wet.op.json is still being written into the skill directory (stat err: %v)", err)
+	}
+
+	// Re-running is a no-op, not a prompt: installForce is false here, so a
+	// second call that tried to overwrite would fail on the closed stdin.
+	if err := installProjectFiles(files); err != nil {
+		t.Fatalf("second installProjectFiles: %v", err)
 	}
 }
 
