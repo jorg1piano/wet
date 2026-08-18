@@ -337,6 +337,12 @@ var (
 	poolNameRE = regexp.MustCompile(`^[a-z_][a-z0-9_]*$`)
 )
 
+// PoolGrowAndroidEmulator is the only `pool_grow:` strategy wet implements:
+// on exhaustion it creates a new AVD, cold boots it, and appends the serial to
+// the local config. Validate() and AllocatePools both compare against this
+// constant so the accepted value and the dispatch cannot drift apart.
+const PoolGrowAndroidEmulator = "android-emulator"
+
 // reservedTemplateFields are the template data keys that wet injects
 // automatically into every `env:` and hook render. A port or pool declared
 // with one of these names (case-insensitively) would shadow the reserved
@@ -441,6 +447,24 @@ func (c *WetConfig) Validate() error {
 				return fmt.Errorf("pools[%q]: duplicate item %q", name, item)
 			}
 			seenItems[item] = true
+		}
+	}
+
+	// pool_grow validation — every key must name a declared pool, and every
+	// value must be a strategy wet implements. Without this an unrecognized
+	// value is silently ignored and only surfaces much later as a misleading
+	// "pool exhausted" error that never mentions pool_grow.
+	growNames := make([]string, 0, len(c.PoolGrow))
+	for name := range c.PoolGrow {
+		growNames = append(growNames, name)
+	}
+	sort.Strings(growNames)
+	for _, name := range growNames {
+		if _, ok := c.Pools[name]; !ok {
+			return fmt.Errorf("pool_grow[%q]: no pool named %q is declared under pools: — declare the pool or remove this entry", name, name)
+		}
+		if strategy := c.PoolGrow[name]; strategy != PoolGrowAndroidEmulator {
+			return fmt.Errorf("pool_grow[%q]: unknown strategy %q — the only supported value is %q", name, strategy, PoolGrowAndroidEmulator)
 		}
 	}
 
@@ -706,7 +730,7 @@ func AllocatePools(cfg *WetConfig, existing []WorktreeState, repoRoot string, he
 		if picked == "" {
 			// Check for a grow strategy before erroring.
 			strategy := cfg.PoolGrow[name]
-			if strategy == "android-emulator" {
+			if strategy == PoolGrowAndroidEmulator {
 				hl := len(headless) > 0 && headless[0]
 				newItem, err := growAndroidEmulatorPool(cfg, name, repoRoot, hl)
 				if err != nil {

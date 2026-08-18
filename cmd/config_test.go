@@ -921,3 +921,98 @@ func collectYAMLPaths(n *yaml.Node, prefix string, out map[string]bool) {
 		}
 	}
 }
+
+func TestValidatePoolGrow(t *testing.T) {
+	cases := []struct {
+		name     string
+		pools    map[string][]string
+		poolGrow map[string]string
+		wantErr  string // substring; empty means the config must validate
+	}{
+		{
+			name:     "valid android-emulator strategy",
+			pools:    map[string][]string{"devices": {"emulator-5554"}},
+			poolGrow: map[string]string{"devices": PoolGrowAndroidEmulator},
+		},
+		{
+			name:     "no pool_grow block at all",
+			pools:    map[string][]string{"devices": {"emulator-5554"}},
+			poolGrow: nil,
+		},
+		{
+			name:     "misspelled strategy",
+			pools:    map[string][]string{"devices": {"emulator-5554"}},
+			poolGrow: map[string]string{"devices": "android_emulator"},
+			wantErr:  `pool_grow["devices"]: unknown strategy "android_emulator"`,
+		},
+		{
+			name:     "script path mistaken for a strategy",
+			pools:    map[string][]string{"devices": {"emulator-5554"}},
+			poolGrow: map[string]string{"devices": "./scripts/create-emulator.sh"},
+			wantErr:  `unknown strategy "./scripts/create-emulator.sh"`,
+		},
+		{
+			name:     "empty strategy value",
+			pools:    map[string][]string{"devices": {"emulator-5554"}},
+			poolGrow: map[string]string{"devices": ""},
+			wantErr:  `unknown strategy ""`,
+		},
+		{
+			name:     "strategy for an undeclared pool",
+			pools:    map[string][]string{"devices": {"emulator-5554"}},
+			poolGrow: map[string]string{"device": PoolGrowAndroidEmulator},
+			wantErr:  `pool_grow["device"]: no pool named "device" is declared under pools:`,
+		},
+		{
+			name:     "strategy with no pools block at all",
+			pools:    nil,
+			poolGrow: map[string]string{"devices": PoolGrowAndroidEmulator},
+			wantErr:  `no pool named "devices" is declared`,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := &WetConfig{
+				ProjectName: "myapp",
+				PortStride:  10,
+				Pools:       c.pools,
+				PoolGrow:    c.poolGrow,
+			}
+			err := cfg.Validate()
+			if c.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", c.wantErr)
+			}
+			if !strings.Contains(err.Error(), c.wantErr) {
+				t.Fatalf("error %q does not contain %q", err, c.wantErr)
+			}
+		})
+	}
+}
+
+// A bad pool_grow value used to survive load and only surface later as a
+// generic "pool exhausted" error that never mentioned pool_grow. Guard that
+// it is now caught at load time instead.
+func TestValidateRejectsUnknownPoolGrowBeforeExhaustion(t *testing.T) {
+	cfg := &WetConfig{
+		ProjectName: "myapp",
+		PortStride:  10,
+		Pools:       map[string][]string{"devices": {"emulator-5554"}},
+		PoolGrow:    map[string]string{"devices": "android_emulator"},
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected Validate to reject the typo'd strategy")
+	}
+	if !strings.Contains(err.Error(), "pool_grow") {
+		t.Fatalf("error must name pool_grow, got %q", err)
+	}
+	if strings.Contains(err.Error(), "exhausted") {
+		t.Fatalf("error should not be the misleading exhaustion message, got %q", err)
+	}
+}
