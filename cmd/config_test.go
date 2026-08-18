@@ -435,9 +435,9 @@ func TestLoadWetConfigForWorktreeSurfacesInvalidWorktreeConfig(t *testing.T) {
 // The example config is the documentation of record for the schema. If it
 // stops parsing or validating, the docs are lying to anyone who copies it.
 func TestExampleConfigIsValid(t *testing.T) {
-	body, err := os.ReadFile(filepath.Join("..", ".wet.example.yaml"))
+	body, err := os.ReadFile("wet.example.yaml")
 	if err != nil {
-		t.Fatalf("read .wet.example.yaml: %v", err)
+		t.Fatalf("read wet.example.yaml: %v", err)
 	}
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, wetConfigFileName), body, 0644); err != nil {
@@ -474,7 +474,7 @@ func TestExampleConfigIsValid(t *testing.T) {
 // the pair gets a broken setup on their first run.
 func TestExampleTemplateRendersAgainstExampleConfig(t *testing.T) {
 	dir := t.TempDir()
-	cfgBody, err := os.ReadFile(filepath.Join("..", ".wet.example.yaml"))
+	cfgBody, err := os.ReadFile("wet.example.yaml")
 	if err != nil {
 		t.Fatalf("read example config: %v", err)
 	}

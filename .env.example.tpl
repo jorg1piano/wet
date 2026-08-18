@@ -1,7 +1,7 @@
-# .env.example.tpl — the template half of .wet.example.yaml.
+# .env.example.tpl — the template half of cmd/wet.example.yaml.
 #
 # Checked into git and rendered per checkout by the `render:` list in
-# .wet.example.yaml — via `wet setup`, or on demand:
+# cmd/wet.example.yaml — via `wet setup`, or on demand:
 #
 #   wet env populate --all
 #   wet env populate --all --dry-run      # show every file, write nothing
