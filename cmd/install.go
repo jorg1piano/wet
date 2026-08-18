@@ -32,33 +32,6 @@ var wetSkillTemplate string
 //go:embed wet.example.yaml
 var wetExampleConfig string
 
-// wetSecretsScript is a runnable 1Password secrets producer, shipped beside
-// the skill so the secrets story is a file the user edits rather than a shell
-// pipeline Claude re-invents per repo. It prints the flat JSON object that
-// `wet env populate --secrets-from -` consumes; the vault and item are
-// parameters, so the committed copy works against a personal vault locally
-// and a shared one in CI.
-//
-//go:embed secrets-op.sh
-var wetSecretsScript string
-
-// The provisioner is the other half: it creates the fields the map names in
-// the vault, so first-time setup is a command instead of a click-through.
-//
-//go:embed secrets-op-provision.sh
-var wetSecretsProvisionScript string
-
-// Both scripts read this map and source this parser, so the key list lives in
-// exactly one place — a key cannot exist in the vault but be missing from the
-// render. The middle segment of `wet.op.json` names the store: a repo can hold
-// wet.az.json beside it, each read by its own producer.
-//
-//go:embed wet.op.json
-var wetSecretsMap string
-
-//go:embed secrets-map.sh
-var wetSecretsMapParser string
-
 var installForce bool
 
 var installCmd = &cobra.Command{
@@ -91,22 +64,6 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		if err := installSkillFiles("wet", []skillFile{
 			{name: "SKILL.md", content: wetSkillTemplate},
 			{name: "wet.example.yaml", content: wetExampleConfig},
-		}); err != nil {
-			return err
-		}
-		// The secrets files are working files, not reference material, so
-		// they land where they are used and the user prunes what they do not
-		// want — the map at the root beside .wet.yaml, the scripts in
-		// scripts/ where the hooks call them.
-		if err := installProjectFiles([]skillFile{
-			{name: "wet.op.json", content: wetSecretsMap},
-			// 0755: these are meant to be run, and a script that needs
-			// `chmod +x` before it works is a script that will be pasted
-			// wrong.
-			{name: filepath.Join("scripts", "wet-secrets.sh"), content: wetSecretsScript, mode: 0o755},
-			{name: filepath.Join("scripts", "wet-secrets-provision.sh"), content: wetSecretsProvisionScript, mode: 0o755},
-			// Sourced, never executed directly — 0644 is the honest mode.
-			{name: filepath.Join("scripts", "secrets-map.sh"), content: wetSecretsMapParser},
 		}); err != nil {
 			return err
 		}

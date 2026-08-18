@@ -98,9 +98,6 @@ it:
 
 - `.claude/skills/wet/wet.example.yaml` — the annotated schema, alongside the
   skill, so Claude (and you) have it locally.
-- `wet.op.json` and `scripts/wet-secrets*.sh` — the 1Password secrets kit,
-  written into the project rather than the skill directory because you edit and
-  commit them. Delete the ones you don't want; nothing else depends on them.
 - `.gitignore` — appends `.wet-worktrees.json`, `.wet-worktrees.lock` and
   `.env.worktree` if they aren't already mentioned, and prints what it added.
   An existing file is appended to, never rewritten.
@@ -301,51 +298,105 @@ wet env populate config/.env.tpl -o config/.env --secrets-from ./secrets.json
 
 Keep the producer in a committed script rather than inline in a hook, so it can
 be run on its own (`./scripts/wet-secrets.sh | jq keys`) when a render fails.
-`wet install skill` writes a working 1Password one straight into your project —
-no copying out of the skill directory, since these are files you edit:
+### Scaffold the keys instead of typing them
 
-| file | role |
-| --- | --- |
-| `wet.op.json` | the keys and where their values live, in named groups |
-| `scripts/wet-secrets.sh` | reads the map, prints `{"KEY": "value"}` |
-| `scripts/wet-secrets-provision.sh` | reads the map, creates the fields in the vault |
-| `scripts/secrets-map.sh` | the map loader both scripts source |
+`wet secrets setup` writes a provider's keys into `.wet.yaml` for you — the
+`env:` defaults and the `secrets:` entries saying which of them come from the
+vault:
 
-Keep what you use and delete the rest. Re-running `wet install skill` restores
-a deleted file and leaves an edited one alone unless you pass `--force`.
-
-The map is `wet.<store>.json` — the middle segment names the secret store, so a
-repo that later adds Azure keeps `wet.az.json` beside `wet.op.json`, each read
-by its own producer. A producer handed the wrong one refuses rather than
-resolving references with the wrong CLI. It stays out of `.wet.yaml` on
-purpose: wet has no vault code path, and keeping store coordinates outside its
-config is what makes that true ([why](docs/design.md#why-secrets-stay-outside-wetyaml)).
-
-```json
-{
-  "vault": "Development",
-  "item": "myapp",
-  "groups": {
-    "google": {
-      "GOOGLE_CLIENT_ID": "google_client_id",
-      "GOOGLE_CLIENT_SECRET": "google_client_secret"
-    }
-  }
-}
+```bash
+wet secrets setup                    # multi-select of the catalog
+wet secrets setup google apple       # or name them
+wet secrets groups                   # what each group contains
 ```
 
-A value is a field on the default item, `"Other Item/field"` for another item
-in the same vault, or a full `"op://vault/item/field"`. Edit the map, not the
-scripts — it is the single source of truth, so a key cannot exist in the vault
-but be missing from the render. `OP_VAULT` / `OP_ITEM` (flags or env) override
-the file's defaults; name one or more groups to act on a subset
-(`./scripts/wet-secrets.sh core google`).
+```yaml
+# Enabled groups: apple, core, google
 
-The producer resolves each key with `op read` and assembles the JSON with
-`jq --arg`, so a secret holding a quote or a newline still comes out valid. The
-provisioner creates any field the map names and the vault lacks — empty, or
-prompted for with `--fill` — and never overwrites a field that already has a
-value, so first-time setup is a command instead of a click-through.
+env:
+  # google
+  GOOGLE_CLIENT_ID: ''
+  GOOGLE_CLIENT_SECRET: ''
+  GOOGLE_REDIRECT_URI: '{{.HYDRA_PUBLIC_URL}}/callback/google'
+```
+
+Every stored key is written **empty**, so a fresh clone still renders and boots
+with no vault at all; real values arrive over the secrets channel and win over
+the default. Derived values like a redirect URI are computed per worktree and
+are deliberately never added to the vault — storing one would pin every
+checkout to a single URL.
+
+Existing keys are never touched, so re-running to add a provider leaves the
+values you have filled in alone (`--dry-run` prints the result instead of
+writing, `--no-vault` skips the `secrets:` half, `--section` picks which
+section the vault-backed keys join).
+
+The catalog lives in the wet binary, not in your repo — what `google` means is
+a fact about Google, not about your project, so a group gains keys when you
+upgrade wet rather than when you remember to copy a file.
+
+### Or let wet talk to 1Password
+
+A `secrets:` block in `.wet.yaml` replaces the producer script for the
+1Password case. It is optional — without one, wet talks to no store at all and
+everything above still applies.
+
+```yaml
+render:
+  - template: backend/.env.tpl
+    out: backend/.env
+    secrets: backend          # a section, below
+  - template: mobile/.env.tpl
+    out: mobile/.env
+    secrets: mobile
+
+secrets:
+  store: op
+  vault: fantasy_basketball_development
+  item: fantasy
+  sections:
+    backend:
+      SECRET_KEY_BASE: secret_key_base
+      GOOGLE_CLIENT_ID: google_client_id
+    mobile:
+      GOOGLE_CLIENT_ID: google_client_id
+      APPLE_KEY_ID: apple_key_id
+```
+
+**Sections name consumers, not storage.** `backend` and `mobile` are labels a
+render target picks with `secrets:`; that target's template gets those keys and
+no others. Both may name the same field — `GOOGLE_CLIENT_ID` is one credential
+whether the API or the app reads it — so the vault holds no per-consumer
+duplicates and a rotation is one edit. Nothing in the vault records which
+section uses a value.
+
+A value is a field on `item`, `"Other Item/field"` for another item in the same
+vault, or a full `"op://vault/item/field"`.
+
+Two commands move values across:
+
+```bash
+wet op vault seed --input .env.development    # env file -> vault
+wet op vault read --output .env.development   # vault -> backend/.env.development
+                                              #           mobile/.env.development
+```
+
+`read` takes a file *name*; each section supplies the directory, from the
+render targets that name it — so neither the vault nor the section ever spells
+out a path. `seed` never overwrites: a field holding a different value is
+reported as a conflict and left alone until you pass `--force`, so re-seeding
+an old file cannot undo a rotation. A key in the input that no section maps is
+an error, not a silent skip. Both take `--section` to narrow, and `--dry-run`.
+
+If `vault` or `account` is missing, wet asks — a picker over `op account list`
+and `op vault list` — and remembers the answer in the gitignored
+`.wet.local.yaml`, since which account you are signed into is a fact about your
+machine, not the project. With no terminal (a hook, CI) it fails and names the
+flag instead of hanging.
+
+Rendering picks the section up automatically: `wet setup` and `wet env populate
+--all` fetch each target's section and layer any `secrets_from` over it, so an
+explicit source still wins on a collision.
 
 Prefer the pipe form: a `secrets_from:` path leaves a plaintext copy of every
 secret on disk, where `--secrets-from -` keeps them in one process's stdin. Wrap

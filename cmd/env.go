@@ -130,7 +130,18 @@ func runEnvPopulate(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("render[%d] (%s): %w", i, target.Out, err)
 		}
+		// A target's own secrets: section is the base layer. Files and stdin
+		// are layered over it, keeping the existing "later sources win" rule
+		// intact: an explicit --secrets-from can still override one key
+		// without the vault having to know.
+		fromVault, err := readSectionSecrets(cfg, target.Secrets)
+		if err != nil {
+			return fmt.Errorf("render[%d] (%s): %w", i, target.Out, err)
+		}
 		merged := map[string]string{}
+		for k, v := range fromVault {
+			merged[k] = v
+		}
 		for k, v := range shared {
 			merged[k] = v
 		}
@@ -254,6 +265,36 @@ func readAllSecrets(root string, sources []string) (map[string]string, error) {
 		return nil, nil
 	}
 	return merged, nil
+}
+
+// readSectionSecrets fetches the keys of one secrets: section from the store.
+//
+// It runs per render target rather than once for the whole config, because
+// that is what keeps a section from leaking: the mobile app's env file gets
+// the mobile section's keys and no others, even though both sections live in
+// one vault item. An empty section name means the target declared none, which
+// is not an error — most targets need no secrets at all.
+func readSectionSecrets(cfg *WetConfig, section string) (map[string]string, error) {
+	if section == "" || cfg.Secrets == nil {
+		return nil, nil
+	}
+	if err := requireOP(); err != nil {
+		return nil, err
+	}
+	refs, err := cfg.Secrets.ResolveSection(section)
+	if err != nil {
+		return nil, err
+	}
+	client := opClient{account: cfg.Secrets.Account}
+	out := make(map[string]string, len(refs))
+	for _, ref := range refs {
+		value, err := client.read(ref.URI())
+		if err != nil {
+			return nil, err
+		}
+		out[ref.Key] = value
+	}
+	return out, nil
 }
 
 // resolveSecretsSource expands a secrets source into a path readSecrets can

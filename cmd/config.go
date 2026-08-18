@@ -31,6 +31,7 @@ type WetConfig struct {
 	Env         map[string]string   `yaml:"env"`
 	Hooks       HooksConfig         `yaml:"hooks"`
 	Render      []RenderTarget      `yaml:"render,omitempty"`
+	Secrets     *SecretsConfig      `yaml:"secrets,omitempty"`
 	Pools       map[string][]string `yaml:"pools,omitempty"`
 	PoolGrow    map[string]string   `yaml:"pool_grow,omitempty"`
 	PR          PRConfig            `yaml:"pr,omitempty"`
@@ -55,12 +56,42 @@ type RenderTarget struct {
 	Template    string   `yaml:"template"`
 	Out         string   `yaml:"out"`
 	SecretsFrom []string `yaml:"secrets_from,omitempty"`
+	// Secrets names a section of the top-level secrets: block, whose keys are
+	// fetched from the store and merged in like any other --secrets-from
+	// source. It is a label, not a path: the same section can feed two
+	// targets, and the vault never learns which directory consumes it.
+	Secrets string `yaml:"secrets,omitempty"`
 }
 
 // PRConfig optionally configures `wet pr create` behavior.
 type PRConfig struct {
 	Base         string `yaml:"base,omitempty"`          // base branch (default "main")
 	BodyTemplate string `yaml:"body_template,omitempty"` // Go text/template for PR body
+}
+
+// SecretsConfig describes where this repo's secrets live and which of them
+// each render target needs.
+//
+// Sections are the second dimension: `backend` and `mobile` are labels for
+// consumers, not for storage. Both can name the same field of the same item —
+// GOOGLE_CLIENT_ID is one credential whether the backend or the app reads it —
+// so the vault stays free of per-consumer duplicates, and a rotation is one
+// edit.
+type SecretsConfig struct {
+	// Store is the secret manager. Only "op" (1Password) is implemented; the
+	// field exists so a second store is a value here rather than a rewrite.
+	Store string `yaml:"store"`
+	// Vault and Item may be empty: `wet op vault` then asks, and writes the
+	// answer back, so a fresh clone is not a scavenger hunt for names.
+	Vault string `yaml:"vault,omitempty"`
+	Item  string `yaml:"item,omitempty"`
+	// Account is the 1Password account (sign-in address or UUID). Empty means
+	// whichever account the shell is signed into, or ask when ambiguous.
+	Account string `yaml:"account,omitempty"`
+	// Sections maps a section name to its env keys: ENV_KEY -> field name on
+	// Item, "Other Item/field" for a different item in the same vault, or a
+	// full "op://vault/item/field".
+	Sections map[string]map[string]string `yaml:"sections"`
 }
 
 // CopyConfig lists files and directories copied from the main repo into each
@@ -468,6 +499,10 @@ func (c *WetConfig) Validate() error {
 		}
 	}
 
+	if err := c.validateSecrets(); err != nil {
+		return err
+	}
+
 	// Parse env templates eagerly so syntax errors fail at load, not at apply.
 	for key, tmpl := range c.Env {
 		if key == "" {
@@ -489,6 +524,69 @@ func (c *WetConfig) Validate() error {
 		}
 	}
 	return nil
+}
+
+// validateSecrets checks the secrets: block and every render target that names
+// a section of it. A render target pointing at a section that does not exist
+// is the failure mode worth catching at load: without this it would surface as
+// a template field that will not resolve, long after the typo.
+func (c *WetConfig) validateSecrets() error {
+	if c.Secrets != nil {
+		if c.Secrets.Store != secretsStoreOP {
+			return fmt.Errorf("secrets.store %q is not supported (known: %s)",
+				c.Secrets.Store, secretsStoreOP)
+		}
+		if len(c.Secrets.Sections) == 0 {
+			return errors.New("secrets: needs at least one section")
+		}
+		for section, keys := range c.Secrets.Sections {
+			if section == "" {
+				return errors.New("secrets.sections: section name must not be empty")
+			}
+			if len(keys) == 0 {
+				return fmt.Errorf("secrets.sections.%s: no keys", section)
+			}
+			for key, ref := range keys {
+				if key == "" {
+					return fmt.Errorf("secrets.sections.%s: key must not be empty", section)
+				}
+				if ref == "" {
+					return fmt.Errorf("secrets.sections.%s.%s: empty reference", section, key)
+				}
+				// The key becomes a template field, so the same names wet
+				// reserves for its own data are off limits — a secret named
+				// Branch would shadow it and render the wrong value.
+				if isReservedTemplateField(key) {
+					return fmt.Errorf("secrets.sections.%s.%s: %s is reserved by wet", section, key, key)
+				}
+			}
+		}
+	}
+
+	for i, r := range c.Render {
+		if r.Secrets == "" {
+			continue
+		}
+		if c.Secrets == nil {
+			return fmt.Errorf("render[%d].secrets: %q named, but there is no secrets: block", i, r.Secrets)
+		}
+		if _, ok := c.Secrets.Sections[r.Secrets]; !ok {
+			return fmt.Errorf("render[%d].secrets: unknown section %q (known: %s)",
+				i, r.Secrets, strings.Join(sortedKeys(c.Secrets.Sections), ", "))
+		}
+	}
+	return nil
+}
+
+// sortedKeys returns a map's keys in a stable order, for error messages that
+// must not vary between runs.
+func sortedKeys[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // MaskedFailureHooks reports post_create hooks whose shell body can turn a

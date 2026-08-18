@@ -183,30 +183,41 @@ fails rather than silently picking up a sibling's value. Two targets writing the
 same `out` is rejected at load time, because the result would depend on ordering
 and the loser's secrets would vanish silently.
 
-## Why secrets stay outside `.wet.yaml`
+## Why the secrets map lives in `.wet.yaml`
 
-The store coordinates live in `wet.<store>.json`, not in the worktree config,
-and that is a boundary rather than a filing decision.
+The store coordinates and the key map sit in `.wet.yaml`, and `wet op vault`
+talks to 1Password directly. That is a deliberate reversal of wet's older
+position, which was that wet should own no vault code path at all and secrets
+should arrive only as opaque values through `--secrets-from`.
 
-wet has no vault code path at all: secrets reach a template only through
-`--secrets-from`, as opaque values it never resolves. Put `op://…` references
-in `.wet.yaml` and one of two things has to follow. Either wet interprets them
-— and now it shells out to `op`, holds credentials, and needs a provider
-abstraction the moment someone uses Azure — or it does not, and they are inert
-keys that config loading has to allowlist as "parsed, then ignored", which is
-worse than it sounds given that unknown keys are otherwise an error.
+What changed the balance is that the old boundary bought purity at the cost of
+a second source of truth. The key list had to live somewhere the producer
+script could read, the render targets had to be described again in `.wet.yaml`,
+and nothing connected the two: a key could exist in the vault and be missing
+from the render, or a section could name a directory that no target wrote. The
+failure mode was always the same shape — two files agreeing at the moment they
+were written and drifting afterwards.
 
-The practical arguments point the same way. The consumers are shell scripts, so
-a YAML map would put `yq` on every machine and in CI to read a list nothing
-else reads. And `op://vault/item/field` is 1Password syntax, where `.wet.yaml`
-stays true whichever store you use — swapping stores should be two files in
-`scripts/`, not a config migration.
+`--secrets-from` is untouched and still the right answer for a store wet does
+not speak, for a CI runner that injects values, or for anyone who would rather
+wet stayed out of it. A `secrets:` block is optional; without one, wet still
+talks to no store.
 
-What does belong in `.wet.yaml` is the invocation, which is where the choice of
-*which* secrets a worktree needs is properly expressed:
+What the block buys, beyond one file:
 
-```yaml
-hooks:
-  post_create:
-    - ./scripts/wet-secrets.sh core google | wet env populate backend/.env.tpl -o backend/.env --secrets-from -
-```
+- `render[].secrets` names a section, so the config already says which env file
+  consumes which keys. `wet op vault read` derives its output directories from
+  that instead of restating them.
+- Sections are consumer labels, not storage. `backend` and `mobile` may name
+  the same field, so one credential in the vault feeds both and a rotation is
+  one edit. The vault never learns which consumer reads what.
+- Validation happens at load: a target naming a section that does not exist is
+  an error at `wet setup` time, where the old arrangement surfaced it as an
+  unresolvable template field much later.
+
+The cost is real and worth stating: wet now shells out to `op`, so the binary
+is in the path of a credential fetch. It holds no credential of its own — every
+call is `op` with the user's existing session, and values live in memory for
+the length of one render — but the property "wet cannot leak a secret because
+it never has one" is now "wet handles secrets for as long as it takes to write
+them to a 0600 file".

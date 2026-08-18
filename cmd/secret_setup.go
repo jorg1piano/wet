@@ -1,0 +1,317 @@
+package cmd
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+
+	"github.com/charmbracelet/bubbles/list"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/spf13/cobra"
+	"golang.org/x/term"
+)
+
+var secretsCmd = &cobra.Command{
+	Use:   "secrets",
+	Short: "Scaffold the env: and secrets: blocks of .wet.yaml",
+	Long: `Add a provider's keys to .wet.yaml: its env: defaults, and the
+secrets: entries saying which of them come from the vault.
+
+The catalog of providers is built into wet — nothing is installed into your
+repo — so a group gains keys when you upgrade wet, not when you remember to
+copy a file.`,
+}
+
+var secretsSetupCmd = &cobra.Command{
+	Use:   "setup [group...]",
+	Short: "Pick provider groups and write them into .wet.yaml",
+	Long: `Scaffold one or more provider groups into .wet.yaml.
+
+With no arguments it opens a multi-select of the catalog, pre-checked with
+whatever is already scaffolded. Every key is written with an EMPTY default so a
+fresh clone still renders and boots without a vault; real values arrive over
+the secrets channel and win over the default.
+
+Existing keys are never touched, so it is safe to re-run when you add a
+provider — a value you have filled in stays filled in.`,
+	RunE: runSecretsSetup,
+}
+
+var secretsGroupsCmd = &cobra.Command{
+	Use:   "groups",
+	Short: "List the provider groups wet knows",
+	Args:  cobra.NoArgs,
+	RunE:  runSecretsGroups,
+}
+
+var (
+	secretsSetupSection string
+	secretsSetupDryRun  bool
+	secretsSetupNoVault bool
+)
+
+func init() {
+	rootCmd.AddCommand(secretsCmd)
+	secretsCmd.AddCommand(secretsSetupCmd, secretsGroupsCmd)
+	secretsSetupCmd.Flags().StringVar(&secretsSetupSection, "section", "backend",
+		"secrets: section the vault-backed keys are added to")
+	secretsSetupCmd.Flags().BoolVar(&secretsSetupDryRun, "dry-run", false,
+		"print the resulting .wet.yaml instead of writing it")
+	secretsSetupCmd.Flags().BoolVar(&secretsSetupNoVault, "no-vault", false,
+		"write only env: defaults, leaving the secrets: block alone")
+}
+
+func runSecretsGroups(cmd *cobra.Command, args []string) error {
+	catalog, order, err := LoadSecretGroups()
+	if err != nil {
+		return err
+	}
+	for _, name := range order {
+		g := catalog[name]
+		fmt.Printf("%-10s %s\n", name, g.Description)
+		for _, key := range g.Order {
+			if field := g.Env[key].Secret; field != "" {
+				fmt.Printf("    %-30s vault: %s\n", key, field)
+			} else {
+				fmt.Printf("    %-30s %s\n", key, describeDefault(g.Env[key].Default))
+			}
+		}
+	}
+	return nil
+}
+
+func describeDefault(def string) string {
+	if strings.Contains(def, "{{") {
+		return "derived: " + def
+	}
+	if def == "" {
+		return "(empty)"
+	}
+	return "default: " + def
+}
+
+func runSecretsSetup(cmd *cobra.Command, args []string) error {
+	catalog, order, err := LoadSecretGroups()
+	if err != nil {
+		return err
+	}
+	repoRoot, err := getRepoRoot()
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(repoRoot, wetConfigFileName)
+	doc, err := ReadYAMLDocument(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("no %s here — run `wet install skill` and write one first", wetConfigFileName)
+		}
+		return err
+	}
+	if len(doc.Content) == 0 {
+		return fmt.Errorf("%s is empty", path)
+	}
+	already := EnabledGroups(doc.Content[0])
+
+	groups := args
+	if len(groups) == 0 {
+		groups, err = pickGroups(catalog, order, already)
+		if err != nil {
+			if errors.Is(err, errPickerCancelled) {
+				fmt.Println("Cancelled — nothing written.")
+				return nil
+			}
+			return err
+		}
+	}
+	for _, name := range groups {
+		if _, ok := catalog[name]; !ok {
+			return fmt.Errorf("unknown group %q (known: %s)", name, strings.Join(order, ", "))
+		}
+	}
+	if len(groups) == 0 {
+		fmt.Println("No groups selected — nothing written.")
+		return nil
+	}
+
+	section := secretsSetupSection
+	if secretsSetupNoVault {
+		section = ""
+	}
+	res, err := ScaffoldGroups(doc, catalog, groups, section)
+	if err != nil {
+		return err
+	}
+	out, err := MarshalYAMLDocument(doc)
+	if err != nil {
+		return err
+	}
+
+	// The result has to load — a scaffold that writes a config wet then
+	// rejects would be worse than no scaffold at all.
+	if err := validateScaffolded(out, path); err != nil {
+		return err
+	}
+
+	if secretsSetupDryRun {
+		fmt.Print(string(out))
+		return nil
+	}
+	if err := os.WriteFile(path, out, 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+
+	fmt.Printf("Scaffolded %s into %s\n", strings.Join(groups, ", "), wetConfigFileName)
+	if len(res.AddedEnv) > 0 {
+		fmt.Printf("  env:     +%d keys (%s)\n", len(res.AddedEnv), strings.Join(res.AddedEnv, ", "))
+	}
+	if len(res.AddedSecrets) > 0 {
+		fmt.Printf("  secrets: +%d keys in section %q\n", len(res.AddedSecrets), section)
+	}
+	if len(res.KeptEnv) > 0 {
+		fmt.Printf("  kept:    %d existing key(s) untouched (%s)\n", len(res.KeptEnv), strings.Join(res.KeptEnv, ", "))
+	}
+	if len(res.AddedSecrets) > 0 {
+		fmt.Println("\nNext: `wet op vault seed --input <env file>` to store real values,")
+		fmt.Println("or fill them in 1Password and `wet op vault read --output .env.development`.")
+	}
+	return nil
+}
+
+// validateScaffolded runs the freshly written bytes through the real loader.
+func validateScaffolded(out []byte, path string) error {
+	dir, err := os.MkdirTemp("", "wet-scaffold")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(dir)
+	if err := os.WriteFile(filepath.Join(dir, wetConfigFileName), out, 0o600); err != nil {
+		return err
+	}
+	if _, err := LoadWetConfigWithLocal(dir, ""); err != nil {
+		return fmt.Errorf("the scaffolded config does not load (%s left unchanged): %w", path, err)
+	}
+	return nil
+}
+
+// --- multi-select ---
+
+type groupItem struct {
+	name     string
+	desc     string
+	keys     int
+	selected bool
+	existing bool
+}
+
+func (g groupItem) Title() string {
+	mark := "[ ]"
+	if g.selected {
+		mark = "[x]"
+	}
+	if g.existing {
+		return fmt.Sprintf("%s %s (already scaffolded)", mark, g.name)
+	}
+	return fmt.Sprintf("%s %s", mark, g.name)
+}
+func (g groupItem) Description() string { return fmt.Sprintf("%s — %d keys", g.desc, g.keys) }
+func (g groupItem) FilterValue() string { return g.name + " " + g.desc }
+
+type multiSelectModel struct {
+	list      list.Model
+	cancelled bool
+	done      bool
+}
+
+func (m multiSelectModel) Init() tea.Cmd { return nil }
+
+func (m multiSelectModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.list.SetSize(msg.Width, msg.Height-3)
+		return m, nil
+	case tea.KeyMsg:
+		if m.list.FilterState() == list.Filtering {
+			break
+		}
+		switch msg.String() {
+		case "q", "esc", "ctrl+c":
+			m.cancelled = true
+			return m, tea.Quit
+		case " ", "x":
+			idx := m.list.Index()
+			if it, ok := m.list.SelectedItem().(groupItem); ok {
+				it.selected = !it.selected
+				m.list.SetItem(idx, it)
+			}
+			return m, nil
+		case "enter":
+			m.done = true
+			return m, tea.Quit
+		}
+	}
+	var cmd tea.Cmd
+	m.list, cmd = m.list.Update(msg)
+	return m, cmd
+}
+
+func (m multiSelectModel) View() string {
+	if m.cancelled || m.done {
+		return ""
+	}
+	help := lipgloss.NewStyle().Faint(true).
+		Render("  space toggles · enter confirms · q cancels")
+	return m.list.View() + "\n" + help
+}
+
+// pickGroups runs the multi-select, pre-checking what is already scaffolded.
+//
+// Pre-checking matters: the list is the file's state, not a blank form, so
+// confirming without touching anything is a no-op rather than a way to
+// accidentally drop a group.
+func pickGroups(catalog map[string]SecretGroup, order, already []string) ([]string, error) {
+	if !term.IsTerminal(int(os.Stdin.Fd())) || !term.IsTerminal(int(os.Stdout.Fd())) {
+		return nil, errors.New("no terminal to ask in: name the groups as arguments (see `wet secrets groups`)")
+	}
+	enabled := map[string]bool{}
+	for _, g := range already {
+		enabled[g] = true
+	}
+	items := make([]list.Item, 0, len(order))
+	for _, name := range order {
+		g := catalog[name]
+		items = append(items, groupItem{
+			name: name, desc: g.Description, keys: len(g.Env),
+			selected: enabled[name], existing: enabled[name],
+		})
+	}
+	l := list.New(items, list.NewDefaultDelegate(), 0, 0)
+	l.Title = "Which providers does this project use?"
+	l.SetShowStatusBar(false)
+	l.SetFilteringEnabled(true)
+	l.Styles.Title = lipgloss.NewStyle().Bold(true).Padding(0, 1)
+
+	final, err := tea.NewProgram(multiSelectModel{list: l}, tea.WithAltScreen()).Run()
+	if err != nil {
+		return nil, fmt.Errorf("picker: %w", err)
+	}
+	m := final.(multiSelectModel)
+	if m.cancelled {
+		return nil, errPickerCancelled
+	}
+	var chosen []string
+	for _, it := range m.list.Items() {
+		g := it.(groupItem)
+		// An already-scaffolded group is re-listed only if still checked;
+		// unchecking it does not remove anything, since deleting keys the app
+		// may already read is not a thing a scaffold should do silently.
+		if g.selected {
+			chosen = append(chosen, g.name)
+		}
+	}
+	sort.Strings(chosen)
+	return chosen, nil
+}

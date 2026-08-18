@@ -228,50 +228,65 @@ hand it a flat JSON object from whatever holds yours:
 wet env populate config/.env.tpl -o config/.env --secrets-from ./secrets.json
 ```
 
-**Don't invent that producer pipeline per repo — `wet install skill` already
-wrote it.** It puts four working files in the project itself, not in this skill
-directory: `wet.op.json` at the root, and `scripts/wet-secrets.sh`,
-`scripts/wet-secrets-provision.sh`, `scripts/secrets-map.sh`. Delete any you do
-not want. The producer prints exactly the flat JSON object `--secrets-from -`
-wants and resolves each key through `op read` assembled with `jq --arg`, so a
-secret containing a quote or a newline still yields valid JSON.
+**Don't hand-write the keys — scaffold them.** `wet secrets setup` (no args
+for a picker, or `wet secrets setup google apple`) writes a provider's `env:`
+defaults and its `secrets:` entries into `.wet.yaml`. `wet secrets groups`
+lists what wet knows. Stored keys are written empty on purpose, so a fresh
+clone renders without a vault; derived values like a redirect URI are computed
+per worktree and never stored. Re-running is safe: existing values are left
+alone. Reach for it before writing any of the block below by hand.
 
-`wet.op.json` is the single source of truth for both scripts — the middle
-segment of the filename names the store, so a repo on Azure would keep
-`wet.az.json` beside its own producer:
+**For 1Password, don't write a producer at all — declare it.** A `secrets:`
+block in `.wet.yaml` gives wet the vault and the key map, and two commands move
+values across:
 
-```json
-{
-  "vault": "Development",
-  "item": "myapp",
-  "groups": {
-    "google": { "GOOGLE_CLIENT_ID": "google_client_id" }
-  }
-}
+```yaml
+render:
+  - template: backend/.env.tpl
+    out: backend/.env
+    secrets: backend
+  - template: mobile/.env.tpl
+    out: mobile/.env
+    secrets: mobile
+
+secrets:
+  store: op
+  vault: fantasy_basketball_development
+  item: fantasy
+  sections:
+    backend:
+      SECRET_KEY_BASE: secret_key_base
+      GOOGLE_CLIENT_ID: google_client_id
+    mobile:
+      GOOGLE_CLIENT_ID: google_client_id
+      APPLE_KEY_ID: apple_key_id
 ```
 
-When a project needs secrets:
+```bash
+wet op vault seed --input .env.development    # env file -> vault
+wet op vault read --output .env.development   # vault -> one file per section
+```
 
-1. Edit `wet.op.json`: set `vault` / `item`, and add one entry per key the
-   templates reference, grouped so a caller can ask for a subset. A value is a
-   field on the default item, `"Other Item/field"` for another item, or a full
-   `"op://vault/item/field"`.
-2. Run `./scripts/wet-secrets-provision.sh` to create those fields in the
-   vault — it never touches a field that already has a value — then paste the
-   real secrets in. Never edit a `SECRETS=(...)` list in the scripts; there
-   isn't one.
-3. Reference the producer from a hook — never inline the `op` pipeline into
-   `.wet.yaml`:
-   ```yaml
-   hooks:
-     post_create:
-       - ./scripts/wet-secrets.sh | wet env populate config/.env.tpl -o config/.env --secrets-from -
-   ```
+Rules worth stating to a user before writing this block:
 
-Verify with `./scripts/wet-secrets.sh | jq 'keys'` before wiring the hook —
-that separates a vault problem from a template problem. For a store other than
-1Password, copy the same file and swap the `op read` line; the contract is the
-JSON on stdout, nothing else.
+- **Sections name consumers, never storage.** `backend` and `mobile` are labels
+  a render target claims with `secrets:`. Two sections may map the same field —
+  one credential, two readers — and the vault stays free of per-consumer
+  duplicates. Never suggest `backend_google_client_id` style field names; the
+  section already carries that meaning, in the config where it belongs.
+- **No paths in the secrets block.** `read` writes into the directories of the
+  render targets that name the section. A section that no target claims has
+  nowhere to go, and wet says so.
+- **`seed` never overwrites** a field holding a different value without
+  `--force`, so re-seeding a stale file cannot undo a rotation.
+- **`vault` / `account` may be omitted** — wet asks and remembers the answer in
+  the gitignored `.wet.local.yaml`. Do not put an account in `.wet.yaml` unless
+  the whole team signs into the same one.
+- A value is a field on `item`, `"Other Item/field"`, or a full
+  `"op://vault/item/field"`.
+
+For any other store, `--secrets-from` is unchanged and is the answer: any
+command emitting a flat JSON object works, and wet talks to nothing itself.
 
 Repeatable, later sources winning on a collision — so a vault and a running
 container compose without a shell-side merge:
@@ -523,7 +538,7 @@ Team — ready
 # Further reading
 
 - `wet.example.yaml` — beside this file; the annotated schema of record.
-- `secrets-op.sh` — beside this file; the 1Password secrets producer to copy
-  into `scripts/wet-secrets.sh` rather than re-deriving an `op` pipeline.
+- `wet op vault --help` — the 1Password path, driven by the `secrets:` block in
+  `.wet.yaml` rather than a per-repo `op` pipeline.
 - `wet --help`, `wet worktree --help`, `wet env --help` — the installed CLI's
   own reference, always matching the installed version.

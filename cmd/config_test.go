@@ -843,6 +843,18 @@ var commentedSchemaKeys = map[string]*regexp.Regexp{
 	// Secret sources belong to a specific render target, so they are
 	// illustrated inside the commented extra targets.
 	"render[].secrets_from": regexp.MustCompile(`(?m)^\s+#\s+secrets_from: \[`),
+	// Likewise the section a target consumes — meaningless without a
+	// secrets: block, so it is shown in the same commented targets.
+	"render[].secrets": regexp.MustCompile(`(?m)^\s+#\s+secrets: \w+`),
+	// The whole secrets: block is optional and names a real vault, so a live
+	// example would send anyone running the example config at a vault that
+	// isn't theirs. Each leaf is pinned to the shape it is documented as.
+	"secrets":          regexp.MustCompile(`(?m)^# secrets:$`),
+	"secrets.store":    regexp.MustCompile(`(?m)^#\s+store: op$`),
+	"secrets.vault":    regexp.MustCompile(`(?m)^#\s+vault: \S+`),
+	"secrets.item":     regexp.MustCompile(`(?m)^#\s+item: \S+`),
+	"secrets.account":  regexp.MustCompile(`(?m)^#\s+account: \S+`),
+	"secrets.sections": regexp.MustCompile(`(?m)^#\s+sections:$`),
 }
 
 // schemaYAMLPaths walks a config struct and returns the dotted path of every

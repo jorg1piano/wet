@@ -169,11 +169,56 @@ env:
 render:
   - template: .env.example.tpl
     out: .env
-  # - template: web/.env.tpl
-  #   out: web/.env.dev
-  #   secrets_from: [/tmp/vault.json]
+  # - template: backend/.env.tpl
+  #   out: backend/.env
+  #   secrets: backend            # a section of secrets: below
   # - template: mobile/.env.tpl
   #   out: mobile/.env
+  #   secrets: mobile
+  #   secrets_from: [/tmp/vault.json]
+
+# ---------------------------------------------------------------------------
+# secrets: — the vault, and which keys each consumer needs
+# ---------------------------------------------------------------------------
+#
+# Optional. Without this block wet talks to no secret store at all and secrets
+# arrive only through secrets_from / --secrets-from, which stays fully
+# supported — this block is for the case where you would rather not maintain a
+# producer script per repo.
+#
+# `sections` is the second dimension, and it names CONSUMERS, not storage.
+# `backend` and `mobile` are labels: a render target picks one with `secrets:`,
+# and that target's template gets those keys and no others. Both sections may
+# name the same field — GOOGLE_CLIENT_ID is one credential whether the API or
+# the app reads it — so the vault holds no per-consumer duplicates and a
+# rotation is one edit in one place. Nothing in the vault records which section
+# uses a value; that mapping lives here.
+#
+# A value is a field on `item`, "Other Item/field" for another item in the same
+# vault, or a full "op://vault/item/field" when it lives somewhere else
+# entirely.
+#
+# vault/item/account may be omitted: `wet op vault ...` asks (a picker over
+# `op account list` / `op vault list`) and remembers the answer in the
+# gitignored .wet.local.yaml, since which account you are signed into is a fact
+# about your machine, not about the project.
+#
+#   wet op vault seed --input .env.development   # env file -> vault
+#   wet op vault read --output .env.development  # vault -> one env file per section
+
+# secrets:
+#   store: op
+#   vault: fantasy_basketball_development
+#   item: fantasy
+#   account: my.1password.com
+#   sections:
+#     backend:
+#       SECRET_KEY_BASE: secret_key_base
+#       GOOGLE_CLIENT_ID: google_client_id
+#       GOOGLE_CLIENT_SECRET: google_client_secret
+#     mobile:
+#       GOOGLE_CLIENT_ID: google_client_id
+#       APPLE_SERVICE_ID: apple_service_id
 
 # ---------------------------------------------------------------------------
 # Hooks
@@ -199,9 +244,8 @@ hooks:
     #   az keyvault secret list ... | jq '...' | wet env populate ...
     # Keep that producer in a committed script rather than inline here: it is
     # then runnable on its own (`./scripts/wet-secrets.sh | jq keys`) when a
-    # render fails. `wet install skill` ships a ready one — copy
-    # .claude/skills/wet/secrets-op.sh to scripts/wet-secrets.sh and edit its
-    # SECRETS map and vault defaults.
+    # render fails. For 1Password there is no script to write — declare a
+    # secrets: block instead (above) and the render targets fetch their own.
     # Piped keys override env: entries above, but may not override a declared
     # port (that would defeat slot allocation, and is an error).
     # - ./scripts/wet-secrets.sh | wet env populate .env.example.tpl -o .env --secrets-from -
