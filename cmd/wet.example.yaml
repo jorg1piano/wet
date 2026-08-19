@@ -177,17 +177,30 @@ render:
   #   secrets: mobile
   #   secrets_from: [/tmp/vault.json]
 
-  # Editor config is a render target too, not just env files. A debugger has
-  # to attach to *this* slot's port and *this* worktree's device, so a copied
-  # launch.json is wrong the moment a second worktree exists. Missing parent
-  # directories are created, so .vscode/ need not already be in the worktree.
+  # Editor config usually needs NO render target. Point it at the env file
+  # wet already renders, and it stops varying per worktree:
   #
-  # Render it rather than patching a tracked launch.json in place: `sed` plus
-  # `git update-index --assume-unchanged` also hides every later edit the user
-  # makes to that file. Add the rendered output to .gitignore, keep the .tpl
-  # in git.
-  # - template: .vscode/launch.json.tpl
-  #   out: .vscode/launch.json
+  #   // .vscode/launch.json — plain, committed, identical everywhere
+  #   {"configurations": [{
+  #     "name": "app (dev)", "request": "launch", "type": "dart",
+  #     "args": ["--dart-define-from-file", ".env"]
+  #   }]}
+  #
+  # VS Code's node/python debuggers take `"envFile"` for the same job. One
+  # indirection, and the file with the per-worktree values is the rendered
+  # one — which is where they belong, since the app reads them too.
+  #
+  # Leave the host, port, and device OUT of launch.json entirely. A pinned
+  # port is wrong in every worktree but one, and a committed device id sends
+  # everyone else's run at hardware they don't have.
+  #
+  # Render editor config only when the tool cannot read an env file and the
+  # value must sit in the JSON. Then the output must be gitignored: `wet
+  # setup` runs in the main checkout too, so a tracked out: is overwritten and
+  # left dirty on every run. Beware `.gitignore` with `.vscode/` — git cannot
+  # re-include a file under an excluded directory, so a committed template in
+  # there needs `.vscode/*` (not `.vscode/`) plus a `!` line, or `copy:` the
+  # directory instead.
 
 # ---------------------------------------------------------------------------
 # secrets: — the vault, and which keys each consumer needs

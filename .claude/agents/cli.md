@@ -48,7 +48,7 @@ The long-term vision is that `wet worktree create` spins up a **fully isolated, 
 2. Copied-in `.env` and config files.
 3. A **rendered `docker-compose.worktree.yml`** with per-worktree port offsets (`APP_PORT`, `DB_PORT`, `DEBUG_PORT`, `GRPC_PORT`) so two worktrees can run `docker compose up` simultaneously without colliding.
 4. A unique `COMPOSE_PROJECT_NAME` per worktree to isolate Docker networks/volumes.
-5. ~~A generated `.vscode/launch.json`~~ — **done, via `render:`.** See below; do not build a bespoke generator for it.
+5. ~~A generated `.vscode/launch.json`~~ — **dropped.** Editor config should read the rendered env file instead of being generated. See "Editor config" below.
 6. Optional: Postgres snapshot save/restore so new worktrees can start from a known DB state (`wet snapshot save`, `wet snapshot restore`).
 7. Optional: Flutter device targeting — let the user pick a device when creating a worktree so `flutter run` on two worktrees can target two physical devices in parallel without manual juggling.
 
@@ -59,53 +59,44 @@ Your job is to evolve this CLI toward that vision. Concretely, the critical path
 1. **Port allocator**: add `WorktreeState.Index` (or compute from slot) and a helper that maps an index to a port offset (e.g. `baseAppPort + index*10`). Every new worktree grabs the next free slot.
 2. **`.env.worktree` generation**: render a file with the calculated ports + `COMPOSE_PROJECT_NAME` and drop it into the new worktree before any docker compose call.
 3. **`docker-compose.worktree.yml` template**: coordinate with the `web` teammate — they'll parameterize `web/docker-compose.yml` to read ports from env vars. You consume their work and render the per-worktree override.
-4. ~~**VS Code launch.json generation**~~ — solved by the generic `render:` engine. See "launch.json is a `render:` target" below.
+4. ~~**VS Code launch.json generation**~~ — not wet's job. Point launch.json at the rendered `.env`; see "Editor config" below.
 5. ~~**Device targeting**~~ — solved by pools. `{{.Handles.<pool>}}` is the live device id.
 6. **Snapshot commands**: eventually wire `wet snapshot save/restore` to `pg_dump`/`pg_restore` against a per-worktree container.
 
 You are the **orchestrator** of the worktree experience. The `web` and `mobile` teammates own the backend and app side of port configurability — you own the CLI that ties them together.
 
-## launch.json is a `render:` target, not a feature
+## Editor config: one indirection, not a render target
 
-wet holds **no project knowledge**. A per-worktree `.vscode/launch.json` therefore
-ships as a user-supplied template, not as a `vscode:` config block wet knows how to
-fill in. Everything such a template needs already exists:
+The recurring request is "make wet write `.vscode/launch.json` per worktree".
+Push back one level first. Everything that varies — ports, host, device — is
+already in the rendered `.env`, and most debuggers read an env file
+(`"envFile"`, or Flutter's `--dart-define-from-file`). Point launch.json at it
+and the file stops varying, so it is committed like any other source file. No
+template, no gitignore trap, no `--assume-unchanged`.
 
-```yaml
-render:
-  - template: .vscode/launch.json.tpl
-    out: .vscode/launch.json
-```
+Render editor config only when the tool cannot read an env file. Then two
+preconditions bite, and both are documented in `cmd/wet.example.yaml`:
 
-```jsonc
-// .vscode/launch.json.tpl
-{
-  "configurations": [{
-    "name": "{{.BranchSafe}} (slot {{.Slot}})",
-    "envFile": "${workspaceFolder}/.env.worktree",
-    "port": {{.DEBUG_PORT}},
-    "args": ["-d", "{{.Handles.android}}"]
-  }]
-}
-```
+- **The output must be gitignored.** `wet setup` renders in the main checkout
+  at slot 0 too, so a tracked `out:` is overwritten and left dirty every run.
+- **The template must reach the worktree.** Templates are read from the
+  worktree. `.gitignore` cannot re-include a file under an excluded directory,
+  so `.vscode/` + `!.vscode/*.tpl` silently leaves the template ignored; it
+  needs `.vscode/*`, or `copy: dirs:` instead.
 
-`render:` runs inside setup *before* `post_create` hooks (`cmd/worktree_setup.go`), so
-a hook that boots the stack sees the finished file.
+Never bake project knowledge into wet to solve this. There is no `vscode:` key
+and there should not be one.
 
-**Prefer this over the `sed` + `git update-index --assume-unchanged` recipe** still
-shown in `README.md` and `cmd/install-wet-template.md`. That pattern patches a
-*tracked* file in place and then hides it from git, which also hides every real edit
-the user later makes to it. A rendered, gitignored output has neither problem.
+## Copying a checkout onto itself
 
-Known gaps in `renderSetupTarget` (`cmd/env.go`) that this use case is the first to hit:
+`copyFile` truncates the destination before reading the source, so `src == dst`
+zeroes the file. `copyFromConfig`, `copyOneFile`, `copyOneDir` and `copyFile`
+all guard with `sameDir` — keep it that way.
 
-- **No `os.MkdirAll` on the output's parent.** Every existing target renders to the
-  tree root, so nothing has needed it. `.vscode/launch.json` fails with a bare ENOENT
-  when `.vscode/` isn't in the worktree.
-- **Mode is hardcoded `0600`.** Correct for a secrets-bearing `.env`, wrong for an
-  editor config, and not a per-target decision today.
-
-Fix these before, or as part of, documenting the recipe.
+The non-obvious reachability: `LocalConfigDir` resolves to whichever checkout
+holds `main_branch`, so a checkout standing on that branch gets
+`srcRoot == dstRoot` even under `wet worktree setup`, where `isMain` is false.
+`isMain` describes which command ran; it never described the hazard.
 
 ## Working with the Go codebase
 

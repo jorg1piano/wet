@@ -659,8 +659,8 @@ The smallest useful config is a `project_name:` and a `copy:` block — enough t
 fork a worktree with the same VS Code settings and env file. With no ports and
 no `env:`, nothing is rendered and no hooks run.
 
-A full-stack one adds ports and hooks that point editor tooling at this
-worktree's slot:
+A full-stack one adds ports and a rendered env file that points editor
+tooling at this worktree's slot:
 
 ```yaml
 project_name: myapp
@@ -679,10 +679,21 @@ ports:
 env:
   COMPOSE_PROJECT_NAME: "{{.ProjectName}}-{{.BranchSafe}}"
 
-hooks:
-  post_create:
-    - sed -i.bak 's/"port": 40000,/"port": {{.DEBUG_PORT}},/' web/.vscode/launch.json
-    - rm -f web/.vscode/launch.json.bak
+render:
+  - template: web/.env.tpl
+    out: web/.env          # gitignored; carries this worktree's ports
+```
+
+Editor config then needs no wet involvement at all — point the debugger at the
+rendered env file and `launch.json` stops varying per worktree, so it can just
+be committed:
+
+```jsonc
+// web/.vscode/launch.json
+{"configurations": [{
+  "name": "app (dev)", "request": "launch", "type": "node",
+  "envFile": "${workspaceFolder}/web/.env"
+}]}
 ```
 
 More shapes, every key, and the validation rules:

@@ -80,7 +80,17 @@ Ask: **"What's the project name?"** Must match `[a-z0-9][a-z0-9_-]*`.
 ### Step 2. Files and directories to copy
 Ask: **"What files/dirs are not in git but needed per-worktree?"** Probe: `.env*`, `.vscode/`, `.idea/`, `.claude/settings*.json`, `config/local.*`. Check `.gitignore` for candidates.
 
-Split the answers in two. Editor and tool settings (`.vscode/`, `.claude/`) are identical in every worktree — `copy:` them. Anything holding a port, a hostname, or a secret differs per worktree — make it a checked-in `.env.tpl` rendered by a `wet env populate` hook instead, or the copy will carry the previous worktree's ports.
+Split the answers in **three**:
+
+- **Identical in every worktree** (`.claude/settings.json`, most of `.vscode/`) — `copy:` them.
+- **Holds a port, hostname, device id, or secret** — a checked-in `.tpl` plus a
+  `render:` target, never a copy. A copy carries the previous worktree's ports.
+  Editor config is the subtle case: `.vscode/launch.json` *looks* static, but a
+  debugger attaches to this slot's port. Don't render it — point it at the
+  rendered `.env` (`--dart-define-from-file` / `envFile`) and it becomes static
+  for real, so `copy:` or commit it. See below.
+- **Genuinely machine-local** (a LAN IP, a personal API key) — `.env.local`,
+  which is gitignored and overrides `env:` entries.
 
 ### Step 3. Ports
 Ask: **"What ports does your project listen on?"** Probe: `docker-compose.yml` ports, `Dockerfile` EXPOSE, Go `:NNNN` listen strings, `package.json` scripts. Name each port `UPPER_SNAKE_CASE`.
@@ -164,36 +174,78 @@ services:
       - "${DB_PORT:-5432}:5432"
 ```
 
-### Patch a config file with sed
+### Point editor config at the rendered env file
+
+The first move for `launch.json` and friends is **not** to render them. Ask
+whether the tool can read an env file — most can — and if so, keep the editor
+config plain and committed:
+
+```jsonc
+// .vscode/launch.json — identical in every worktree, so just commit it
+{"configurations": [{
+  "name": "app (dev)", "request": "launch", "type": "dart",
+  "args": ["--dart-define-from-file", ".env"]   // VS Code node/python: "envFile"
+}]}
+```
+
+`.env` is a `render:` target, so it already carries this worktree's ports.
+launch.json then holds nothing that varies, and needs no template, no
+gitignore juggling, and no `--assume-unchanged`.
+
+Tell the user to leave host, port, and device **out** of the JSON. A pinned
+port is right in exactly one worktree; a committed device id points at
+hardware their colleagues don't have. Device selection belongs in the editor's
+device picker or a `just` recipe that reads the worktree's allocation.
+
+### Render a config file the tool can't parameterize
+
+Only when the value must sit inside the JSON and no env-file indirection
+exists:
+
+```yaml
+render:
+  - template: config/thing.json.tpl
+    out: config/thing.json
+```
+
+Two preconditions to check with the user:
+
+1. **The output must be gitignored.** `wet setup` renders in the main checkout
+   too (slot 0), so a *tracked* output is overwritten and left dirty on every
+   run.
+2. **The template must reach the worktree.** Templates are read from the
+   worktree. Watch the `.gitignore` trap: git cannot re-include a file under an
+   excluded directory, so `.vscode/` + `!.vscode/*.tpl` silently leaves the
+   template ignored — it needs `.vscode/*` + `!.vscode/*.tpl`, or keep the
+   directory in `copy: dirs:` and accept an untracked template.
+
+Missing parent directories of `out:` are created. (Not for a bare
+`wet env populate -o <path>`: that path is unvalidated user input, so it fails
+fast rather than building directory trees from a typo.)
+
+### Patching a tracked file with sed (last resort)
+
+Only when the file cannot be generated from a template — e.g. it is huge,
+hand-maintained, and only one line varies. Patching a tracked file makes it
+show as modified, and users will commit per-worktree ports back to the shared
+branch, so it needs `git update-index --assume-unchanged` as the last step:
+
 ```yaml
 hooks:
   post_create:
     - sed -i.bak 's/"port": 40000/"port": {{.DEBUG_PORT}}/' .vscode/launch.json
     - rm -f .vscode/launch.json.bak
-    # IMPORTANT: hide patched tracked files from git status in this worktree
     - git update-index --assume-unchanged .vscode/launch.json
 ```
 
-**IMPORTANT: hiding patched tracked files from git.** When a `post_create`
-hook patches a **tracked** file (like `.vscode/launch.json`), the worktree's
-`git status` will show it as modified. Users will accidentally commit the
-per-worktree port values back to the shared branch. Fix this with
-`git update-index --assume-unchanged <file>` as the last hook step.
+Be honest with the user about the cost: `--assume-unchanged` is permanent and
+indiscriminate. It hides *every* later change to that file, including edits
+they make deliberately and expect to commit. `.gitignore` and
+`.git/info/exclude` are no help — both only apply to untracked files. Undo with
+`git update-index --no-assume-unchanged <file>`.
 
-Key points:
-- `.gitignore` does NOT work for tracked files — only for untracked ones.
-- `.git/info/exclude` also only works for untracked files.
-- `--assume-unchanged` tells git to stop checking the file in this worktree's
-  index. It's per-worktree, so it doesn't affect the main repo.
-- To undo (e.g., if the user intentionally wants to commit a port change):
-  `git update-index --no-assume-unchanged <file>`
-
-**When helping the user write sed hooks**, always add a matching
-`git update-index --assume-unchanged` line for every tracked file that
-gets patched. Group them into one command:
-```yaml
-    - git update-index --assume-unchanged web/.vscode/launch.json mobile/.vscode/launch.json
-```
+**If you find yourself writing a sed hook, first ask whether the file could be
+rendered instead.** Usually it can, and then none of this applies.
 
 ### Create a PR from a worktree
 `wet pr create` pushes the branch and opens a GitHub PR. Title auto-generated from branch name. Flags: `--draft`, `--fill`, `-t "title"`, `-b base`.
