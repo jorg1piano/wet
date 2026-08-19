@@ -505,24 +505,141 @@ func TestMergeOverridesWarnsOnEnvShadow(t *testing.T) {
 // fresh worktree. Before MkdirAll this failed with a bare ENOENT.
 func TestRenderSetupTargetCreatesMissingParentDir(t *testing.T) {
 	tree := t.TempDir()
-	if err := os.WriteFile(filepath.Join(tree, "launch.json.tpl"),
+	// The template lives in .vscode/ too, as the documented recipe has it.
+	if err := os.MkdirAll(filepath.Join(tree, ".vscode"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tree, ".vscode", "launch.json.tpl"),
 		[]byte(`{"port": {{.APP_PORT}}}`), 0600); err != nil {
 		t.Fatal(err)
 	}
-
+	// Render into a sibling directory that does not exist yet.
 	cfg := &WetConfig{ProjectName: "app"}
 	data := map[string]any{"APP_PORT": 4010}
-	target := RenderTarget{Template: "launch.json.tpl", Out: ".vscode/launch.json"}
+	target := RenderTarget{Template: ".vscode/launch.json.tpl", Out: ".idea/launch.json"}
 
 	if err := renderSetupTarget(cfg, data, tree, target, nil); err != nil {
 		t.Fatalf("render into missing parent dir: %v", err)
 	}
 
-	got, err := os.ReadFile(filepath.Join(tree, ".vscode", "launch.json"))
+	out := filepath.Join(tree, ".idea", "launch.json")
+	got, err := os.ReadFile(out)
 	if err != nil {
 		t.Fatalf("read rendered output: %v", err)
 	}
 	if want := `{"port": 4010}`; string(got) != want {
 		t.Errorf("rendered %q, want %q", got, want)
+	}
+	// The created directory must not widen access to a file that may hold
+	// secrets beyond the owner.
+	info, err := os.Stat(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0600 {
+		t.Errorf("rendered file mode %o, want 600", got)
+	}
+}
+
+// --dry-run must not touch the filesystem, including by creating the parent
+// directory it would have written into. This is the branch most at risk if
+// the MkdirAll is ever hoisted above the dry-run early return.
+func TestRenderTargetDryRunCreatesNothing(t *testing.T) {
+	tree := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tree, "x.tpl"),
+		[]byte(`{{.APP_PORT}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	restoreAll, restoreDry := envPopulateAll, envPopulateDryRun
+	envPopulateAll, envPopulateDryRun = true, true
+	defer func() { envPopulateAll, envPopulateDryRun = restoreAll, restoreDry }()
+
+	// Capture stdout: the dry-run branch prints the rendered body, which would
+	// otherwise interleave with the test runner's own output. Asserting on it
+	// also covers what dry-run is actually for.
+	orig := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+
+	target := RenderTarget{Template: "x.tpl", Out: "generated/x"}
+	renderErr := renderTarget(&WetConfig{ProjectName: "app"},
+		map[string]any{"APP_PORT": 4010}, tree, target, nil)
+
+	w.Close()
+	os.Stdout = orig
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if renderErr != nil {
+		t.Fatalf("dry run: %v", renderErr)
+	}
+
+	if !strings.Contains(string(out), "4010") {
+		t.Errorf("dry run printed %q; want the rendered value 4010", out)
+	}
+	if _, err := os.Stat(filepath.Join(tree, "generated")); !os.IsNotExist(err) {
+		t.Errorf("dry run created the output directory (stat err: %v)", err)
+	}
+}
+
+// The --all path renders declared, validated targets, so it creates missing
+// parents. A bare --out is an unvalidated user-supplied path and must keep
+// failing fast instead of building directory trees from a typo.
+func TestRenderTargetBareOutDoesNotCreateParent(t *testing.T) {
+	tree := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tree, "x.tpl"),
+		[]byte(`{{.APP_PORT}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	restoreAll, restoreDry := envPopulateAll, envPopulateDryRun
+	envPopulateAll, envPopulateDryRun = false, false
+	defer func() { envPopulateAll, envPopulateDryRun = restoreAll, restoreDry }()
+
+	target := RenderTarget{
+		Template: filepath.Join(tree, "x.tpl"),
+		Out:      filepath.Join(tree, "nope", "x"),
+	}
+	err := renderTarget(&WetConfig{ProjectName: "app"},
+		map[string]any{"APP_PORT": 4010}, tree, target, nil)
+	if err == nil {
+		t.Fatal("expected an error for a missing parent under a bare --out")
+	}
+	if _, statErr := os.Stat(filepath.Join(tree, "nope")); !os.IsNotExist(statErr) {
+		t.Error("bare --out created a directory tree")
+	}
+}
+
+// The --all path creates missing parent directories (declared targets have
+// been through validateCopyPath). Without this, only the negative cases were
+// covered and deleting the MkdirAll left the suite green.
+func TestRenderTargetAllCreatesMissingParentDir(t *testing.T) {
+	tree := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tree, "x.tpl"),
+		[]byte(`{{.APP_PORT}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	restoreAll, restoreDry := envPopulateAll, envPopulateDryRun
+	envPopulateAll, envPopulateDryRun = true, false
+	defer func() { envPopulateAll, envPopulateDryRun = restoreAll, restoreDry }()
+
+	target := RenderTarget{Template: "x.tpl", Out: "generated/deep/x"}
+	if err := renderTarget(&WetConfig{ProjectName: "app"},
+		map[string]any{"APP_PORT": 4010}, tree, target, nil); err != nil {
+		t.Fatalf("render into missing parent dir: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(tree, "generated", "deep", "x"))
+	if err != nil {
+		t.Fatalf("read rendered output: %v", err)
+	}
+	if string(got) != "4010" {
+		t.Errorf("rendered %q, want %q", got, "4010")
 	}
 }

@@ -176,6 +176,16 @@ func renderSetupTarget(cfg *WetConfig, data map[string]any, treePath string, tar
 		return err
 	}
 	out := filepath.Join(treePath, target.Out)
+	// A target may render into a directory that doesn't exist yet — .vscode/
+	// is gitignored in most repos, so a fresh worktree has no such directory
+	// until something makes one. Without this, such a target fails with a
+	// bare ENOENT naming a path the user can see is right.
+	if err := os.MkdirAll(filepath.Dir(out), 0755); err != nil {
+		return fmt.Errorf("create parent of %s: %w", out, err)
+	}
+	// 0600 for the same reason as renderTarget below: a rendered target may
+	// carry secrets and outlives the command. The 0755 directory only exposes
+	// the file's name, which is already public in .wet.yaml.
 	if err := os.WriteFile(out, []byte(rendered), 0600); err != nil {
 		return fmt.Errorf("write %s: %w", out, err)
 	}
@@ -214,6 +224,20 @@ func renderTarget(cfg *WetConfig, data map[string]any, treePath string, target R
 		}
 		fmt.Print(rendered)
 		return nil
+	}
+	// Same reason as renderSetupTarget: a declared target's output directory
+	// may not exist yet, and ENOENT on a correct-looking path is a bad way to
+	// say so.
+	//
+	// Only for --all, where out: comes from .wet.yaml and has been through
+	// validateCopyPath — relative, no `..` escape, resolved against the
+	// checkout. A bare --out is whatever path the user typed, unvalidated and
+	// relative to their cwd; creating trees for that would turn a typo
+	// (`-o ../../etc/x`) from a fast ENOENT into new directories on disk.
+	if envPopulateAll {
+		if err := os.MkdirAll(filepath.Dir(outPath), 0755); err != nil {
+			return fmt.Errorf("create parent of %s: %w", outPath, err)
+		}
 	}
 	// 0600: the whole point of the secrets channel is that this file may hold
 	// secrets, and it lands in a tree that outlives the command.
