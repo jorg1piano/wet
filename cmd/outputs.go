@@ -368,10 +368,71 @@ func (r *latchingReader) Read(uri string) (string, error) {
 	return value, err
 }
 
-// opSecretReader reads through the 1Password CLI.
-type opSecretReader struct{ client opClient }
+// opSecretReader reads through the 1Password CLI, one `op` invocation per
+// ITEM rather than per field.
+//
+// `op read op://vault/item/field` resolves a single field, so a pull selecting
+// nine secrets off one item used to spawn nine `op` processes. That is not
+// merely slow: on macOS each invocation is a fresh process the OS attributes
+// to the terminal, so the user was asked to authorize file access nine times
+// for what is conceptually one read. Fetching the item once and taking the
+// fields out of the response makes it one process and one prompt.
+//
+// The cache is per reader, and a reader lives for one pull, so this never
+// serves a value that outlived the command that fetched it.
+type opSecretReader struct {
+	client opClient
+	items  map[string]opItem
+	// missing records items the store does not have, so a second secret on an
+	// absent item does not re-pay the round trip that already answered.
+	missing map[string]bool
+}
 
-func (r opSecretReader) Read(uri string) (string, error) { return r.client.read(uri) }
+func newOPSecretReader(client opClient) *opSecretReader {
+	return &opSecretReader{
+		client:  client,
+		items:   map[string]opItem{},
+		missing: map[string]bool{},
+	}
+}
+
+func (r *opSecretReader) Read(uri string) (string, error) {
+	ref, err := parseOPRef(uri)
+	if err != nil {
+		return "", err
+	}
+	key := ref.Vault + "/" + ref.Item
+
+	item, cached := r.items[key]
+	switch {
+	case cached:
+	case r.missing[key]:
+		return "", fmt.Errorf("item %q not found in vault %q", ref.Item, ref.Vault)
+	default:
+		var found bool
+		// A failure here is the store's, not this field's: item() reports a
+		// genuinely absent item as found=false, so any error returned is a
+		// store-level one and keeps its errStoreUnavailable marking for the
+		// latching reader.
+		item, found, err = r.client.item(ref.Vault, ref.Item)
+		if err != nil {
+			return "", err
+		}
+		if !found {
+			r.missing[key] = true
+			return "", fmt.Errorf("item %q not found in vault %q", ref.Item, ref.Vault)
+		}
+		r.items[key] = item
+	}
+
+	value, ok := item.value(ref.Field)
+	if !ok {
+		// Per-field absence, deliberately not marked as a store failure: the
+		// policy may answer this one secret from its default and carry on.
+		return "", fmt.Errorf("field %q not found on item %q in vault %q", ref.Field, ref.Item, ref.Vault)
+	}
+	return value, nil
+}
 
 // SecretOrigin says where a resolved secret's value came from, so the pull can
 // report provenance without ever printing the value.
@@ -860,7 +921,7 @@ func newStoreReader(cfg *WetConfig) (SecretReader, error) {
 		if err := requireOP(); err != nil {
 			return nil, err
 		}
-		return opSecretReader{client: opClient{account: cfg.Secrets.Account}}, nil
+		return newOPSecretReader(opClient{account: cfg.Secrets.Account}), nil
 	default:
 		return nil, fmt.Errorf("secrets.store %q is not supported (known: %s)", cfg.Secrets.Store, secretsStoreOP)
 	}

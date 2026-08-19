@@ -30,6 +30,10 @@ state="` + statePath + `"
 args=("$@")
 # Drop a leading --account pair the way the real op accepts it anywhere.
 if [ "${args[0]}" = "--account" ]; then args=("${args[@]:2}"); fi
+# One line per invocation. Every op call is a process, and how many
+# processes a pull spawns is itself behaviour worth asserting -- see
+# TestPullFetchesEachItemOnce.
+echo "${args[*]}" >> "` + filepath.Join(binDir, "calls.log") + `"
 
 case "${args[0]} ${args[1]}" in
   "item get")
@@ -715,5 +719,42 @@ outputs:
 		if !strings.Contains(body, want) {
 			t.Errorf("declared default missing after the store timed out (%s):\n%s", want, body)
 		}
+	}
+}
+
+// TestPullFetchesEachItemOnce pins the cost of a pull in processes, not just
+// in values.
+//
+// Correct output is not enough here. `op read op://vault/item/field` fetches
+// one field, so a per-field loop produces exactly the right file while
+// spawning one `op` per secret — and on macOS each of those is a process the
+// OS asks the user to authorize, so a nine-secret project meant nine identical
+// prompts for what is conceptually one read. Only counting invocations catches
+// a regression to that shape.
+func TestPullFetchesEachItemOnce(t *testing.T) {
+	requireJQ(t)
+	binDir, _ := stubOP(t, `{"fantasy":{"secret_key_base":"real-key","google_client_id":"goog-123"}}`)
+	opRepo(t)
+	resetEnvFlags(t)
+	worktreeEnv(t, 1)
+
+	if err := runEnvPull(nil, nil); err != nil {
+		t.Fatalf("pull: %v", err)
+	}
+
+	calls := strings.Split(strings.TrimSpace(readFileString(t, filepath.Join(binDir, "calls.log"))), "\n")
+	var gets int
+	for _, c := range calls {
+		if strings.HasPrefix(c, "item get") {
+			gets++
+		}
+		if strings.HasPrefix(c, "read ") {
+			t.Errorf("pull used per-field `op read`, which costs one process per secret: %q", c)
+		}
+	}
+	// Two secrets are selected, both on item `fantasy`. One item, one fetch.
+	if gets != 1 {
+		t.Errorf("got %d `op item get` calls, want 1 (one per item, not per field):\n%s",
+			gets, strings.Join(calls, "\n"))
 	}
 }
