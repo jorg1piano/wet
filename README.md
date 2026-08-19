@@ -14,7 +14,11 @@ wet worktree mount <branch>     # same, for a branch that already exists (local 
 wet worktree setup              # worktree-only form of `wet setup`
 wet worktree list               # interactive list — pick one to open in tmux or VS Code (alias: ls)
 wet worktree pop                # remove the current worktree (run pre_remove hooks, tear down)
-wet env populate <tpl> -o <out> # render a template with this checkout's values
+wet secrets setup [group…]      # scaffold a provider's keys into .wet.yaml
+wet env pull [output]           # regenerate the env files declared under outputs:
+wet env explain [output]        # what each output contains, and where its secrets live
+wet env push <output> --from …  # write that output's declared secrets back to the store
+wet op vault                    # pick this machine's 1Password account + vault
 wet pr create                   # push branch + open a GitHub PR (via gh)
 wet install wet-skill           # install the Claude Code helper skill
 ```
@@ -126,7 +130,9 @@ in it:
 ### Template fields
 
 Both `env:` values and hook commands are Go `text/template` strings. The
-following keys are injected automatically for every render:
+following keys are injected automatically for every render. `outputs:` names
+the same values, but by bare name rather than as a template — `include:
+[APP_PORT]`, `from: Pools.devices`:
 
 | Key | Value | Example |
 |---|---|---|
@@ -263,242 +269,401 @@ only where a difference is forced:
 `wet worktree setup` remains as the worktree-only form; run in the main repo it
 points you at `wet setup`.
 
-## Env templates — `wet env populate`
+## Generated env files — `outputs:`
 
-`wet env populate` replaces the copied-`.env` habit with a checked-in template
-that re-renders per worktree
-([why](docs/design.md#why-templates-beat-copying-a-generated-env)).
+Every environment file wet generates is declared inline in `.wet.yaml` under
+`outputs:`. There is no checked-in `.env.tpl` and no `render:` block: for a
+dotenv file wet already knows every value, so the only thing left to say is
+which values the file carries and under what key
+([why the template layer is gone](docs/design.md#why-generated-env-files-are-declared-not-templated)).
+
+```yaml
+outputs:
+  - name: backend                 # the CLI identifier: `wet env pull backend`
+    out: backend/.env.dev         # relative to the checkout being configured
+    format: dotenv
+    include:                      # keep the wet name as the output key
+      - AUTH_BASE_URL
+      - DATABASE_URL
+      - PHX_PORT
+    secrets:                      # only these definitions are visible here
+      - SECRET_KEY_BASE
+      - GOOGLE_CLIENT_SECRET
+
+  - name: mobile
+    out: mobile/.env
+    format: dotenv
+    mode: "0644"                  # optional; default 0600
+    values:                       # rename, or write a fixed value
+      host:          { from: DEV_HOST }
+      port:          { from: GRPC_PORT }
+      webBaseUrl:    { from: AUTH_BASE_URL }
+      oidcClientId:  { literal: myapp-mobile }
+```
+
+That one block answers the questions the old split between `.wet.yaml` and a
+pile of `.env.tpl` files could not: which files does this repo generate, which
+keys does each hold, and which of those keys are secrets.
+
+**The three key sources.**
+
+- `include:` names an ordinary value, a declared port, or a reserved field, and
+  keeps its name as the output key.
+- `secrets:` names entries of `secrets.definitions:` (below) and likewise keeps
+  their names. A secret is never renamed — see the scoping rule further down.
+- `values:` maps an output key to either `from:` (an ordinary value, a port, a
+  reserved field, or a `Pools.<name>` / `Handles.<name>` pick) or `literal:` (a
+  fixed scalar). The two are mutually exclusive, and one of them is required.
+
+`values:` keys are emitted in the order you wrote them, and the file as a whole
+is `include:`, then `secrets:`, then `values:` — declaration order, so the
+generated file reads the way the config does. That order is a real guarantee,
+not an accident of the YAML library: `values:` decodes through a custom
+unmarshaller and `.wet.local.yaml` is merged at the node level, so nothing
+alphabetizes the keys on the way through
+([why that had to be fixed](docs/design.md#why-values-keeps-its-declared-order)).
+
+**Everything that can be checked from `.wet.yaml` alone is checked at load**,
+in every command, long before a store is contacted or a byte is written: an
+unknown `include:` name, a secret an output forgot to declare, `from:` and
+`literal:` both set, the same output key claimed twice across the three
+sources, two outputs writing the same `out:`, a duplicate `name:`, an `out:`
+escaping the checkout, an unsupported `format:`, a `mode:` that isn't octal,
+and an output declaring no keys at all. A misspelled include must not first
+surface as a missing key in a booting app.
+
+One consequence worth stating: the names an `include:` may use come from the
+config — reserved fields, `ports:`, `env:` — and **not** from `.env.local`. A
+key that exists only on your workstation cannot become an output's contract;
+`.env.local` overrides declared values, it does not add new ones.
+
+**Writing.** Each file is written atomically — a sibling temp file created
+`0600`, chmodded to the final mode, then renamed over the target — so a process
+that dies mid-write cannot leave half an env file for a booting app to read.
+Missing parent directories of `out:` are created. Every file starts with
 
 ```
-wet env populate config/.env.tpl -o config/.env
-wet env populate config/.env.tpl --dry-run     # print instead of writing
+# Generated by wet. Do not edit — change outputs: in .wet.yaml.
 ```
 
-The template is Go `text/template` and sees the same fields hooks do:
-`ProjectName`, `Branch`, `BranchSafe`, `Slot`, every declared port, every
-`.Pools.<name>`, and every rendered `env:` entry.
+because a hand-edit there does not survive the next pull. A value containing a
+newline is rejected rather than escaped: dotenv dialects disagree about
+multi-line values, and a value that half-parses puts the tail of a private key
+on a line the reader treats as the next assignment. Base64-encode PEM material
+into a single-line secret.
+
+Generated files default to mode `0600` — they may carry secrets and they
+outlive the command that wrote them. Set `mode:` explicitly if a consumer needs
+otherwise.
+
+### `wet env pull` — regenerate, and nothing else
 
 ```
-port={{.GRPC_PORT}}
-webBaseUrl=http://localhost:{{.APP_PORT}}
-COMPOSE_PROJECT_NAME={{.COMPOSE_PROJECT_NAME}}
+wet env pull                       # every declared output
+wet env pull backend               # just that one
+wet env pull --dry-run             # resolve, validate, write nothing
+wet env pull --secrets=disabled    # override secrets.policy for this run
 ```
 
-### Secrets come in through `--secrets-from`
+Values come from this worktree's allocation — its slot, its strided ports, its
+pool items — layered with `.env.local` and the resolved `env:` block. `pull`
+regenerates files and nothing else: it does not register a worktree, allocate
+or change a slot, ports or pool items, write `.env.worktree`, or run lifecycle
+hooks. That is `wet setup`, which finishes by running this same pull. So a pull
+is always safe to re-run, and re-running is how you repair a checkout
+([why it needs no flag](docs/design.md#rendered-outputs-are-wets-to-own)).
 
-wet talks to no secret store. Hand it a flat JSON object and any command that
-can produce one works — `op`, `az`, `docker compose config`, a fixture file:
+Every requested output is resolved and validated **before any of them is
+written**, so a second output that fails validation cannot leave the first one
+already replaced on disk.
 
-```bash
-./scripts/wet-secrets.sh \
-  | wet env populate config/.env.tpl -o config/.env --secrets-from -
+`--dry-run` still contacts the store, because whether a `required` secret
+actually exists is exactly what a dry run is asked to find out. It never prints
+a secret value.
 
-wet env populate config/.env.tpl -o config/.env --secrets-from ./secrets.json
+### `wet env explain` — read the inventory
+
+```
+wet env explain
+wet env explain backend
 ```
 
-Keep the producer in a committed script rather than inline in a hook, so it can
-be run on its own (`./scripts/wet-secrets.sh | jq keys`) when a render fails.
+Reads `.wet.yaml` only: no worktree, no store, no values. It prints each
+output's keys and where each comes from, and for every selected secret the
+vault/item/field it resolves to and whether it has a declared default.
+
+### Secrets — `secrets.definitions:`
+
+The `secrets:` block declares, once for the whole repo, what each credential is
+called and where it lives. It holds no values.
+
+```yaml
+secrets:
+  store: op                 # only 1Password is implemented
+  policy: fallback          # required | fallback | disabled — default fallback
+  vault: myapp_development  # may come from .wet.local.yaml instead
+  item: backend-development
+  definitions:
+    SECRET_KEY_BASE:
+      field: secret_key_base
+      default: dev-only-secret-key-base
+    SENTRY_DSN:
+      field: sentry_dsn
+      default: ""           # deliberately unconfigured locally
+    STRIPE_KEY:
+      field: api_key
+      item: stripe          # per-secret override of the block's item
+    LEGACY_TOKEN:
+      ref: op://Shared/legacy/token   # or a full reference instead
+```
+
+A definition is `field:` plus optional `vault:` / `item:` overrides, **or** a
+full `ref:` — the two forms are mutually exclusive, because a half-overridden
+reference is ambiguous. `default:` is a pointer in spirit: an explicit `""` is
+a real, deliberate default ("this provider simply isn't configured locally")
+and is not the same as having none, which is an error the developer must see.
+
+**One definition per credential, shared by name.** `GOOGLE_CLIENT_ID` is one
+credential whether the backend or the app reads it, so the store holds no
+per-consumer duplicates and a rotation is one edit.
+
+**Scope is per output, and the output's `secrets:` list is the authorization
+boundary.** Defining a credential does not hand it to every generated file; an
+output sees exactly the definitions it named
+([why](docs/design.md#why-secret-scope-belongs-to-the-output)). Two rules fall
+out of that and are enforced at load:
+
+- `include:` refuses a secret name and tells you to use `secrets:`.
+- `values.<key>.from:` refuses a secret name outright. Secrets are emitted only
+  through `secrets:`, under their own name, so a rename can never smuggle one
+  into an output that did not select it.
+
+A secret name must look like an env var (`[A-Z_][A-Z0-9_]*`), must not be a
+reserved field, and must not collide with a declared port or an `env:` entry. A
+store value shadowing an allocated port would hand two worktrees the same port;
+a secret and an ordinary value sharing a name makes the output key ambiguous —
+put the fallback in the definition's `default:` instead.
+
+`.env.local` cannot override a secret. It overrides ordinary values, which is
+its job; secret values reach a generated file only from the store or from a
+declared `default:`.
+
 ### Scaffold the keys instead of typing them
 
-`wet secrets setup` writes a provider's keys into `.wet.yaml` for you — the
-`env:` defaults and the `secrets:` entries saying which of them come from the
-vault:
+`wet secrets setup` writes a provider's keys into `.wet.yaml` for you — across
+all three blocks, wired together:
 
 ```bash
 wet secrets setup                    # multi-select of the catalog
 wet secrets setup google apple       # or name them
+wet secrets setup google --output web
 wet secrets groups                   # what each group contains
+wet secrets setup --dry-run          # print the result instead of writing it
 ```
 
-```yaml
-# Enabled groups: apple, core, google
+It splits each group's keys by what they are:
 
-env:
-  # google
-  GOOGLE_CLIENT_ID: ''
-  GOOGLE_CLIENT_SECRET: ''
-  GOOGLE_REDIRECT_URI: '{{.HYDRA_PUBLIC_URL}}/callback/google'
-```
+- **Credentials** (the ones with a store field) become
+  `secrets.definitions.<KEY>: { field: …, default: … }`, carrying the catalog's
+  development fallback in `default:`. If there is no `secrets:` block yet it
+  creates one with `store: op` and `policy: fallback`.
+- **Derived and plainly public values** — a redirect URI built from this
+  worktree's ports — stay ordinary `env:` entries. Storing one in the vault
+  would pin every checkout to a single URL.
 
-Every stored key is written **empty**, so a fresh clone still renders and boots
-with no vault at all; real values arrive over the secrets channel and win over
-the default. Derived values like a redirect URI are computed per worktree and
-are deliberately never added to the vault — storing one would pin every
-checkout to a single URL.
+The two are disjoint on purpose: a definition sharing a name with an `env:`
+entry is a load error, so the scaffolder never writes a credential to both.
 
-Existing keys are never touched, so re-running to add a provider leaves the
-values you have filled in alone (`--dry-run` prints the result instead of
-writing, `--no-vault` skips the `secrets:` half, `--section` picks which
-section the vault-backed keys join).
+**Both halves are then wired into an output**, `backend` unless `--output` says
+otherwise, appending to its `include:` and `secrets:` lists — and creating the
+output (`out: <name>/.env.dev`, `format: dotenv`) if the file has none by that
+name. Skipping this step is what would make a scaffolded group inert: the
+definitions would exist, no generated file would select them, and `wet env
+pull` would write exactly what it wrote before, which reads as wet ignoring the
+provider you just added. The summary says explicitly when an output was
+invented, since that is the one change you didn't ask for.
+
+Nothing existing is ever touched. Re-running to add a provider leaves the
+values you have filled in alone, doesn't re-list a name an output already
+selects, and leaves a credential you had already written into `env:` as an
+ordinary value rather than moving it out from under you. The result is run
+through the real loader before it is saved — a scaffold that writes a config
+wet then rejects would be worse than no scaffold at all.
+
+`wet setup` offers the same picker when it scaffolds a starter config, so a
+fresh clone doesn't need to know the command exists.
 
 The catalog lives in the wet binary, not in your repo — what `google` means is
 a fact about Google, not about your project, so a group gains keys when you
 upgrade wet rather than when you remember to copy a file.
 
-### Or let wet talk to 1Password
+### Secret policy — `required`, `fallback`, `disabled`
 
-A `secrets:` block in `.wet.yaml` replaces the producer script for the
-1Password case. It is optional — without one, wet talks to no store at all and
-everything above still applies.
+Automatic secret loading must not make a fresh clone ambiguous
+([why there are exactly three](docs/design.md#why-three-secret-policies)).
+`secrets.policy:` sets it; `wet env pull --secrets=…` overrides it for one run.
 
-```yaml
-render:
-  - template: backend/.env.tpl
-    out: backend/.env
-    secrets: backend          # a section, below
-  - template: mobile/.env.tpl
-    out: mobile/.env
-    secrets: mobile
+| Policy | Behavior |
+|---|---|
+| `required` | Every selected secret must come from the store. A declared `default:` deliberately does **not** substitute — this mode exists so a project can be certain the real credential is what landed in the file. |
+| `fallback` (default) | Try the store; on any failure — client missing, not signed in, item absent, field absent — use the declared `default:`. A secret with neither is an error. |
+| `disabled` | Never contact the store. Declared defaults must satisfy every selected secret. For offline work and deterministic tests. |
 
-secrets:
-  store: op
-  vault: fantasy_basketball_development
-  item: fantasy
-  sections:
-    backend:
-      SECRET_KEY_BASE: secret_key_base
-      GOOGLE_CLIENT_ID: google_client_id
-    mobile:
-      GOOGLE_CLIENT_ID: google_client_id
-      APPLE_KEY_ID: apple_key_id
+`fallback` is the default because it is the only policy under which a fresh
+clone with no store access still boots — and it is never silent. Each output
+gets a provenance line, names only:
+
+```
+  Secrets for backend/.env.dev: 7 from 1Password, 3 defaults
+    defaults: ADMIN_EMAILS, POSTMARK_API_KEY, SENTRY_DSN
 ```
 
-**Sections name consumers, not storage.** `backend` and `mobile` are labels a
-render target picks with `secrets:`; that target's template gets those keys and
-no others. Both may name the same field — `GOOGLE_CLIENT_ID` is one credential
-whether the API or the app reads it — so the vault holds no per-consumer
-duplicates and a rotation is one edit. Nothing in the vault records which
-section uses a value.
+A developer who believes Sentry and Google sign-in are configured, when wet
+actually wrote empty strings, debugs the wrong thing for an hour.
 
-A value is a field on `item`, `"Other Item/field"` for another item in the same
-vault, or a full `"op://vault/item/field"`.
+Each distinct reference is fetched **once** per run, across every requested
+output — one round trip, and more importantly one authorization prompt.
 
-Two commands move values across:
+### `wet op vault` — this machine's account and vault
 
-```bash
-wet op vault seed --input .env.development    # env file -> vault
-wet op vault read --output .env.development   # vault -> backend/.env.development
-                                              #           mobile/.env.development
+```
+wet op vault                  # pick, and remember in .wet.local.yaml
+wet op vault --no-remember    # resolve and print, write nothing
 ```
 
-`read` takes a file *name*; each section supplies the directory, from the
-render targets that name it — so neither the vault nor the section ever spells
-out a path. `seed` never overwrites: a field holding a different value is
-reported as a conflict and left alone until you pass `--force`, so re-seeding
-an old file cannot undo a rotation. A key in the input that no section maps is
-an error, not a silent skip. Both take `--section` to narrow, and `--dry-run`.
+The map lives in `.wet.yaml` and is shared by everyone. Which 1Password account
+you are signed into and which vault you keep the project's item in are facts
+about *your workstation*, so they are the only parts that live in the
+gitignored overlay. `wet op vault` resolves them — from flags, from the config,
+or by asking with a picker over `op account list` / `op vault list` — and
+writes the answer to `.wet.local.yaml` so nothing asks again. With no terminal
+(a hook, CI) it fails and names the flag rather than hanging.
 
-If `vault` or `account` is missing, wet asks — a picker over `op account list`
-and `op vault list` — and remembers the answer in the gitignored
-`.wet.local.yaml`, since which account you are signed into is a fact about your
-machine, not the project. With no terminal (a hook, CI) it fails and names the
-flag instead of hanging.
+The provider is never named on the command line anywhere else: `secrets.store:`
+decides, and `wet op vault` moves no secrets at all. That is what `wet env
+pull` and `wet env push` are for.
 
-Rendering picks the section up automatically: `wet setup` and `wet env populate
---all` fetch each target's section and layer any `secrets_from` over it, so an
-explicit source still wins on a collision.
+### `wet env push` — declared secrets, back to the store
 
-Prefer the pipe form: a `secrets_from:` path leaves a plaintext copy of every
-secret on disk, where `--secrets-from -` keeps them in one process's stdin. Wrap
-it in `set -o pipefail` — see
-[Prefer a pipe over a file on disk](docs/design.md#prefer-a-pipe-over-a-file-on-disk).
-
-`--secrets-from` is repeatable and **later sources win** on a key collision, so
-a vault and a running container compose in one command. Prefer it over merging
-with `jq -s add`, which hides a dead producer
-([why](docs/design.md#why---secrets-from-twice-rather-than-jq--s-add)). Only one
-source may be `-`; naming stdin twice is an error, since the second read would
-find an exhausted pipe.
-
-When a file is unavoidable, a `secrets_from:` path in the config is resolved
-against **the checkout being configured** — it's a fact about the repo, so it
-means the same thing whichever directory `wet setup` ran from. (A
-`--secrets-from` flag is a fact about the invocation, so it stays relative to
-your cwd.) `~` and `$VAR` expand, so a committed config can name a per-machine
-location without hardcoding anyone's home directory:
-
-```yaml
-render:
-  - template: web/.env.tpl
-    out:      web/.env.dev
-    secrets_from: ["~/.config/myapp/secrets.json"]   # one file per workstation
+```
+wet env push backend --from backend/.env.dev --dry-run
+wet env push backend --from backend/.env.dev
 ```
 
-### Rules
+**The named output is the authorization boundary.** wet writes a key only when
+it is both declared under `secrets.definitions:` and listed in that output's
+`secrets:`. Every other key in the file — ordinary configuration, unknown
+names, a secret belonging to another output — is ignored and reported. There is
+no flag that lets an undeclared key reach the store, and a destination mapping
+cannot be invented on the command line.
 
-- **The source is always explicit.** wet never sniffs stdin
-  ([why](docs/design.md#why-wet-never-sniffs-stdin)); with no `--secrets-from`,
-  the template renders from wet's own values alone.
-- **Values must be scalars.** Strings, numbers, and booleans are stringified;
-  a nested object or array is rejected by key name rather than silently
-  serialized into the env file.
-- **Piped keys override `env:` entries** — with a warning naming the key — but
-  may *not* override a declared port or a reserved field, which is a hard error
-  ([why](docs/design.md#why-a-store-key-may-override-env-but-not-a-port)).
-- **An unresolved `{{.KEY}}` is fatal**, never an empty value.
-- **Output is written `0600`**, since the whole point of the secrets channel
-  is that the result may hold secrets.
-- **Rendered outputs are wet's to own** — re-rendering is how you repair a
-  checkout, so it never needs a flag, and a hand-edit to the output does not
-  survive one. Per-machine values belong in `.env.local` or `.wet.local.yaml`
-  ([why](docs/design.md#rendered-outputs-are-wets-to-own)).
+That is why a mixed, generated file needs no permissive flag: `backend/.env.dev`
+is a perfectly normal input.
 
-### Where it runs
+**A value equal to that secret's declared `default:` is refused by default**,
+reported as `fallback value — not pushed`. A file generated under the
+`fallback` policy is full of development placeholders, and pushing an empty
+string or a dev-only key over a real credential is the one mistake this command
+must never make. `--include-defaults` overrides it, deliberately.
 
-The usual place is a `post_create` hook, which runs through `sh -c` so a
-pipeline works verbatim. Hooks run *before* `setup` persists
-`.wet-worktrees.json`, so there populate reads its values from the hook
-environment (`$SLOT`, `$BRANCH`, `$APP_PORT`, …) rather than from the state
-file; run by hand afterwards it reads the state file entry for the current
-worktree. Either way the values are the ones that worktree was allocated.
+| Flag | Effect |
+|---|---|
+| `--from <file>` | the dotenv file to read (required) |
+| `--dry-run` | report every destination and status, write nothing |
+| `--force` | overwrite a field holding a different non-empty value (a conflict is otherwise reported and left alone, so re-pushing a stale file cannot undo a rotation) |
+| `--create-item` | create the destination item; a missing item is otherwise an error |
+| `--reject-unmapped` | fail if the source holds any key this output does not select — what you want when importing a dedicated secrets-only file and a typo should be loud. It does not widen what wet may write. |
+| `--include-defaults` | also push values equal to a declared `default:` |
 
-## Monorepos — derive once, render many
+Names, destinations and statuses are printed. Values never are.
+
+### Where generation runs
+
+`wet setup` runs this same pull itself, after `.env.worktree` exists and
+**before** `post_create` hooks (and skips it entirely when the config declares
+no `outputs:` — there is nothing to generate) — a hook that boots the stack finds its env
+files already written. Setup owns the lifecycle; it owns no second way to write
+an env file ([why that matters](docs/design.md#why-setup-and-pull-share-one-pipeline)).
+
+You can also call `wet env pull` from a `post_create` hook. Hooks run *before*
+`setup` persists `.wet-worktrees.json`, so there the pull reads its values from
+the hook environment (`$SLOT`, `$BRANCH`, `$APP_PORT`, …) rather than from the
+state file; run by hand afterwards it reads the state file entry for the
+current worktree. Either way the values are the ones that worktree was
+allocated.
+
+### Migrating from `render:`
+
+`render:` and `secrets.sections:` are removed, and loading a config that still
+has either is a hard error naming the replacement — not a silent skip, which
+would leave a stale `.env.dev` on disk looking current. Migration is a
+deliberate, reviewable edit:
+
+1. For each `render:` target, add an `outputs:` entry with the target's `out:`
+   as `out:` and `format: dotenv`.
+2. Move each `KEY={{.FIELD}}` line out of the `.env.tpl`: same name on both
+   sides becomes `include: [KEY]`, a rename becomes
+   `values: { KEY: { from: FIELD } }`, and a constant becomes
+   `values: { KEY: { literal: … } }`.
+3. Turn each `secrets.sections.<name>` entry into a `secrets.definitions:`
+   entry (`LOGICAL_NAME: { field: … }`), and list the names each output needs
+   under that output's `secrets:`.
+4. Move any development fallback out of `env:` and into the definition's
+   `default:` — the two may no longer share a name.
+5. Delete the `.env.tpl` files.
+
+## Monorepos — derive once, emit many
 
 **`env:` is the derivation layer.** Entries may reference each other, resolved
 to a fixed point rather than in sorted order, so a value is built once and every
-package's template consumes the result instead of rebuilding it — see
+package's output consumes the result instead of rebuilding it — see
 [the failure mode this avoids](docs/design.md#monorepos--the-failure-mode-is-re-derivation).
 
 ```yaml
 ports:
-  - { name: PHX_PORT, base: 4000 }
+  - { name: PHX_PORT,  base: 4000 }
+  - { name: GRPC_PORT, base: 50051 }
 
 env:
   DEV_HOST:           "localhost"
   AUTH_BASE_URL:      "http://{{.DEV_HOST}}:{{.PHX_PORT}}"
   VIPPS_REDIRECT_URI: "{{.AUTH_BASE_URL}}/hydra/login/vipps/callback"
 
-render:
-  - template: web_elixir/.env.tpl
-    out:      web_elixir/.env.dev
-    secrets_from: [/tmp/vault.json]
-  - template: mobile_elixir/.env.tpl
-    out:      mobile_elixir/.env
+outputs:
+  - name: web
+    out: web_elixir/.env.dev
+    format: dotenv
+    include: [AUTH_BASE_URL, VIPPS_REDIRECT_URI]
+    secrets: [SECRET_KEY_BASE]
+
+  - name: mobile
+    out: mobile_elixir/.env
+    format: dotenv
+    values:
+      host:       { from: DEV_HOST }
+      port:       { from: GRPC_PORT }
+      webBaseUrl: { from: AUTH_BASE_URL }
 ```
 
-### `render:` targets
+Outputs are declared rather than written as hook lines, so the whole set is
+inspectable — `wet env explain` and `wet env pull --dry-run` can report every
+file wet would write for this slot, which opaque `sh -c` lines cannot
+([why](docs/design.md#why-outputs-are-declared-not-written-as-hook-lines)).
 
-Targets are declared rather than written as hook lines, so the whole set is
-inspectable
-([why](docs/design.md#why-render-targets-are-declared-not-written-as-hook-lines)):
+The mobile output carries no `secrets:`, so no backend credential can reach a
+shipped client — not by accident and not by rename. It still gets this
+worktree's allocated `GRPC_PORT`, under the key the app expects.
 
-```
-wet env populate --all             # render every target
-wet env populate --all --dry-run   # print every file, write nothing
-```
-
-`wet setup` renders them too, **before** hooks — a hook that boots the stack
-finds the files already written.
-
-Each target carries its own `secrets_from`, because packages don't need the same
-secrets, and **one target's secrets cannot leak into another's output.** Two
-targets writing the same `out` is rejected at load time.
+`wet setup` generates them too, **before** hooks, so a hook that boots the
+stack finds the files already written. Two outputs writing the same `out:` is
+rejected at load time.
 
 ### `.env.local` — per-machine overrides
 
 Some values vary by workstation, not by worktree — a LAN IP for physical-device
-testing, a personal staging hostname. Those go in a gitignored `.env.local` at
-the repo root:
+testing, a personal staging hostname. Those go in a gitignored `.env.local` beside
+the checkout that has your trunk branch checked out — the same place
+`.wet.local.yaml` lives, and the same one every worktree reads it from:
 
 ```
 DEV_HOST=192.168.1.9
@@ -513,6 +678,12 @@ addresses the same stack setup brought up.
 Format is the usual `KEY=value`, `#` comments and blanks ignored, quotes
 stripped. A line without `=` is an error rather than a silent skip — a dropped
 override surfaces much later as a mystery wrong hostname.
+
+It **overrides** declared values; it does not introduce new ones and it cannot
+touch a secret. An `include:` may only name something `.wet.yaml` declares, so
+a key that exists on one workstation never becomes an output's contract, and
+secret values reach a generated file only from the store or a declared
+`default:`.
 
 ## `.wet.local.yaml` — machine-local overrides
 
@@ -657,9 +828,9 @@ worktree and copies `.env`. Everything else happens in `wet setup`.)
 
 The smallest useful config is a `project_name:` and a `copy:` block — enough to
 fork a worktree with the same VS Code settings and env file. With no ports and
-no `env:`, nothing is rendered and no hooks run.
+no `env:`, nothing is generated and no hooks run.
 
-A full-stack one adds ports and a rendered env file that points editor
+A full-stack one adds ports and a generated env file that points editor
 tooling at this worktree's slot:
 
 ```yaml
@@ -679,13 +850,16 @@ ports:
 env:
   COMPOSE_PROJECT_NAME: "{{.ProjectName}}-{{.BranchSafe}}"
 
-render:
-  - template: web/.env.tpl
+outputs:
+  - name: web
     out: web/.env          # gitignored; carries this worktree's ports
+    format: dotenv
+    mode: "0644"           # no secrets here, and the toolchain reads it
+    include: [APP_PORT, DB_PORT, DEBUG_PORT, COMPOSE_PROJECT_NAME]
 ```
 
 Editor config then needs no wet involvement at all — point the debugger at the
-rendered env file and `launch.json` stops varying per worktree, so it can just
+generated env file and `launch.json` stops varying per worktree, so it can just
 be committed:
 
 ```jsonc

@@ -1,6 +1,23 @@
 # Design: per-deploy-environment values
 
-Status: **rejected.** Recorded so the idea is not re-proposed.
+Status: **rejected**, and now partly **superseded**. Recorded so the idea is not
+re-proposed.
+
+> **Written against an older schema.** This proposal predates the inline
+> `outputs:` model. It talks about a per-target `environment:` key on `render:`,
+> and `render:` no longer exists — generated env files are declared inline under
+> `outputs:`, and secrets are `secrets.definitions:` selected per output. Read
+> the mechanics as historical.
+>
+> The *conclusion* survives the schema change intact, and so does its reasoning:
+> there is still no `environments:` block, `outputs:` entries still carry no
+> `environment:` key, and wet still configures local checkouts only. If anything
+> the case is stronger now — `.wet.yaml` is the single inventory of what this
+> checkout generates, and a block describing what some *other* machine runs
+> would be the one thing in the file that isn't about this checkout.
+>
+> One piece has since been half-fixed and one is now designed but unbuilt; both
+> are called out in "What was worth keeping" below.
 
 ## The question
 
@@ -41,7 +58,7 @@ contract.
 |              | non-secret                                    | secret                                |
 | ------------ | --------------------------------------------- | ------------------------------------- |
 | **deployed** | the per-app config of the deploy platform      | the platform's secret store, from a vault |
-| **local**    | wet `env:` — derived from this slot and ports  | wet `secrets:` → rendered `.env`      |
+| **local**    | wet `env:` — derived from this slot and ports  | `secrets.definitions:`, selected by an `outputs:` entry |
 
 Nothing in that table is a new wet feature. The only missing arrow is the one
 into the platform's secret store: something must read the vault and push the
@@ -49,20 +66,44 @@ values. That belongs in the consuming repo as a `just` recipe, not in
 `.wet.yaml` — wet does not deploy, and a block named for deployment would imply
 it does.
 
+The inline-outputs design does sketch one narrow extension in this area: a
+`deployments:` block emitting a file of `op://vault/item/field` *references*
+(not values) from the same `secrets.definitions:`, to replace a hand-maintained
+`secrets.tpl` that today repeats both the variable names and the field names.
+That is not implemented, and it is not the rejected idea: it adds no second
+home for values, because it emits no values — it is the canonical definition
+list rendered in a different notation. If it is ever built, it must stay that.
+
 ## What was worth keeping
 
-One prerequisite from the rejected design stands on its own and should still be
-fixed:
+Two prerequisites from the rejected design stand on their own:
 
-**Unknown config keys are silently ignored.** `LoadWetConfigWithLocal` decodes
-with plain `yaml.Unmarshal` and no `KnownFields(true)`. An unknown top-level key
-is dropped without comment — and so is a typo in a *known* key. Write
-`pool-grow` for `pool_grow`, or `renders:` for `render:`, and wet loads the file
-cleanly and quietly does nothing.
+**Unknown config keys are still silently ignored — mostly.**
+`LoadWetConfigWithLocal` decodes with plain `yaml.Unmarshal` and no
+`KnownFields(true)`. An unknown top-level key is dropped without comment — and
+so is a typo in a *known* key. Write `pool-grow` for `pool_grow`, or `output:`
+for `outputs:`, and wet loads the file cleanly and quietly does nothing.
 
-That is a live footgun regardless of this feature, and the failure it produces
-is the worst kind: a config that looks right, loads without error, and behaves
-as though half of it were not there. Unknown keys should fail at load, naming
-the key and the file it came from — which requires checking both halves of a
-merged `.wet.yaml` + `.wet.local.yaml` before they are marshalled back together
-and lose their provenance.
+`rejectRemovedKeys` has since closed exactly two holes: `render:` and
+`secrets.sections:` are named explicitly and fail the load with a migration
+message, because a config that still parses, generates nothing, and leaves a
+stale `.env.dev` on disk looking current is the worst possible outcome of a
+schema removal. That is the whole argument for general strictness, applied to
+two keys.
+
+The general footgun remains, and the failure it produces is the worst kind: a
+config that looks right, loads without error, and behaves as though half of it
+were not there. Unknown keys should fail at load, naming the key and the file it
+came from — which requires checking both halves of a merged `.wet.yaml` +
+`.wet.local.yaml` before they are marshalled back together and lose their
+provenance.
+
+**A generated output should be able to say it is client-facing.** The rejected
+design worried about values crossing a boundary they shouldn't; `outputs:` now
+makes the local half of that boundary explicit, since an output sees only the
+secrets it names. What it cannot yet do is *assert* that a given output must see
+none — the inline-outputs design proposes an optional `audience: client`
+classification, under which selecting any secret is an error rather than a thing
+a reviewer has to notice. Not implemented. Until it is, "the mobile output has
+no `secrets:` list" is a convention that holds only as long as everyone reading
+the diff is awake.
