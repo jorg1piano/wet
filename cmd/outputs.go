@@ -746,6 +746,7 @@ func PullOutputs(req PullRequest) error {
 	}
 
 	resolved := make([]*ResolvedOutput, 0, len(selected))
+	toWrite := make([]*ResolvedOutput, 0, len(selected))
 	for _, o := range selected {
 		r, err := ResolveOutput(o, req.Data, secrets)
 		if err != nil {
@@ -768,11 +769,57 @@ func PullOutputs(req PullRequest) error {
 			fmt.Fprintf(out, "  warning: %s carries %d secret(s) at mode %04o, readable beyond its owner\n",
 				r.Config.Out, len(r.Config.Secrets), r.Mode)
 		}
-		path := filepath.Join(req.TreePath, r.Config.Out)
 		if req.DryRun {
 			fmt.Fprintf(out, "  would write %s (%d keys)\n", r.Config.Out, len(r.Pairs))
 			continue
 		}
+		toWrite = append(toWrite, r)
+	}
+	if req.DryRun {
+		return nil
+	}
+	if err := writeOutputFiles(req.TreePath, toWrite); err != nil {
+		return err
+	}
+	for _, r := range toWrite {
+		fmt.Fprintf(out, "  Wrote %s (%d keys)\n", r.Config.Out, len(r.Pairs))
+	}
+	return nil
+}
+
+// writeOutputFiles publishes a whole pull's files in two phases: stage every
+// one to a temp file beside its target, and only once all of them are staged,
+// rename them into place.
+//
+// Per-file atomicity is not enough here. Resolution failures already touch
+// nothing, but an I/O failure — ENOSPC, a directory that turned read-only,
+// a permission wet cannot fix with MkdirAll — hits the second output after the
+// first has already been replaced, and the stale-but-current-looking first
+// file is what the next `docker compose up` boots from.
+//
+// This is not true multi-file atomicity, and POSIX offers none: rename N can
+// still fail after rename N-1 succeeded. What the split buys is that every
+// expensive and failure-prone step (mkdir, allocate blocks, write bytes,
+// chmod) happens while nothing is visible, so the residual exposure is a
+// handful of renames within already-created directories on a filesystem that
+// just accepted the data. Those fail essentially only if the filesystem is
+// coming apart, in which case a partial write is not the interesting problem.
+func writeOutputFiles(treePath string, outs []*ResolvedOutput) error {
+	staged := make([]stagedOutput, 0, len(outs))
+	// Every temp file is removed on any failure, including one partway
+	// through the rename loop, where the already-renamed entries are no
+	// longer temp files and the rest are still garbage on disk.
+	committed := false
+	defer func() {
+		if committed {
+			return
+		}
+		for _, s := range staged {
+			os.Remove(s.tmp)
+		}
+	}()
+
+	for _, r := range outs {
 		// A directory wet creates for a secret-bearing file need not be
 		// listable by anyone else. It only ever leaks the file's name, which
 		// .wet.yaml already publishes, so this is cheap rather than critical.
@@ -780,11 +827,18 @@ func PullOutputs(req PullRequest) error {
 		if len(r.Config.Secrets) > 0 {
 			dirMode = 0o700
 		}
-		if err := writeOutputFile(path, r.Content, r.Mode, dirMode); err != nil {
+		s, err := stageOutputFile(filepath.Join(treePath, r.Config.Out), r.Content, r.Mode, dirMode)
+		if err != nil {
 			return fmt.Errorf("outputs %s: %w", r.Config.Name, err)
 		}
-		fmt.Fprintf(out, "  Wrote %s (%d keys)\n", r.Config.Out, len(r.Pairs))
+		staged = append(staged, s)
 	}
+	for i, s := range staged {
+		if err := os.Rename(s.tmp, s.path); err != nil {
+			return fmt.Errorf("outputs %s: replace %s: %w", outs[i].Config.Name, s.path, err)
+		}
+	}
+	committed = true
 	return nil
 }
 
@@ -839,14 +893,23 @@ func reportSecretProvenance(w io.Writer, cfg *WetConfig, policy string, r *Resol
 	}
 }
 
-// writeOutputFile replaces a generated file atomically: write a sibling temp
-// file, then rename over the target.
+// stagedOutput is one output's content sitting in a temp file beside its
+// target, fully written and already at its final mode, awaiting the rename
+// that makes it visible.
+type stagedOutput struct {
+	path string
+	tmp  string
+}
+
+// stageOutputFile does everything a write needs except become visible: create
+// the parent, write a sibling temp file, and set the final mode on it.
 //
 // A truncate-and-write would leave a half-written env file on disk if the
 // process died mid-write, and the reader of that file is a booting app. The
 // temp file is created 0600 regardless of the final mode, so a secret is never
-// briefly world-readable between create and chmod.
-func writeOutputFile(path, content string, mode os.FileMode, dirMode os.FileMode) error {
+// briefly world-readable between create and chmod. The caller renames; on any
+// failure it removes the temp file instead.
+func stageOutputFile(path, content string, mode os.FileMode, dirMode os.FileMode) (stagedOutput, error) {
 	dir := filepath.Dir(path)
 	// A declared output may live in a directory nothing has created yet — a
 	// gitignored .vscode/, a build dir — and a bare ENOENT on a path the user
@@ -855,28 +918,27 @@ func writeOutputFile(path, content string, mode os.FileMode, dirMode os.FileMode
 	// MkdirAll leaves an existing directory's mode alone, so this only ever
 	// narrows a directory wet itself creates.
 	if err := os.MkdirAll(dir, dirMode); err != nil {
-		return fmt.Errorf("create parent of %s: %w", path, err)
+		return stagedOutput{}, fmt.Errorf("create parent of %s: %w", path, err)
 	}
 	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".wet-*")
 	if err != nil {
-		return fmt.Errorf("create temp beside %s: %w", path, err)
+		return stagedOutput{}, fmt.Errorf("create temp beside %s: %w", path, err)
 	}
 	tmpName := tmp.Name()
-	defer os.Remove(tmpName) // no-op once the rename succeeded
 	if _, err := tmp.WriteString(content); err != nil {
 		tmp.Close()
-		return fmt.Errorf("write %s: %w", path, err)
+		os.Remove(tmpName)
+		return stagedOutput{}, fmt.Errorf("write %s: %w", path, err)
 	}
 	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("write %s: %w", path, err)
+		os.Remove(tmpName)
+		return stagedOutput{}, fmt.Errorf("write %s: %w", path, err)
 	}
 	// Chmod the temp file rather than the target: the mode is then already
 	// correct at the instant the rename makes the content visible.
 	if err := os.Chmod(tmpName, mode); err != nil {
-		return fmt.Errorf("chmod %s: %w", path, err)
+		os.Remove(tmpName)
+		return stagedOutput{}, fmt.Errorf("chmod %s: %w", path, err)
 	}
-	if err := os.Rename(tmpName, path); err != nil {
-		return fmt.Errorf("replace %s: %w", path, err)
-	}
-	return nil
+	return stagedOutput{path: path, tmp: tmpName}, nil
 }

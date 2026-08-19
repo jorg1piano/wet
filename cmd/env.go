@@ -157,8 +157,22 @@ func runEnvExplain(cmd *cobra.Command, args []string) error {
 			fmt.Println()
 		}
 		fmt.Printf("%s — %s (%s)\n", o.Name, o.Out, o.Format)
-		ordinary := len(o.Include) + len(o.Values.Keys)
-		fmt.Printf("  ordinary: %d\n", ordinary)
+		// Literals are counted apart from ordinary values because they are a
+		// different kind of fact: an ordinary key varies per worktree and can
+		// go missing when a name is renamed, a literal is a constant that
+		// cannot. A client output that is mostly literals would otherwise
+		// report a large "ordinary" count and imply an environment coupling
+		// it does not have.
+		literals := 0
+		for _, key := range o.Values.Keys {
+			if o.Values.By[key].Literal != nil {
+				literals++
+			}
+		}
+		fmt.Printf("  ordinary: %d\n", len(o.Include)+len(o.Values.Keys)-literals)
+		if literals > 0 {
+			fmt.Printf("  literals: %d\n", literals)
+		}
 		// Sources are named plainly rather than as {{.NAME}}. There is no
 		// template any more, and showing one would invite a `from:` written
 		// as a Go template expression — which is not a thing wet accepts.

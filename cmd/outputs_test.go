@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -426,6 +427,96 @@ func TestPullIsAllOrNothing(t *testing.T) {
 	}
 	if after != before {
 		t.Errorf("backend changed despite the failed pull:\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+}
+
+// The all-or-nothing promise has to survive an I/O failure, not just a
+// resolution failure. Every output resolves cleanly here; the second one
+// simply cannot be written, because a regular file sits where its parent
+// directory must be. Staging every file before renaming any is what keeps the
+// first output out of it — writing as you go leaves a file that looks current
+// to whatever boots next while its sibling was never generated.
+func TestPullDoesNotWriteAnyOutputWhenALaterWriteFails(t *testing.T) {
+	blockMobile := func(t *testing.T, tree string) {
+		t.Helper()
+		// mobile/.env needs mobile/ to be a directory; a regular file there
+		// fails MkdirAll with ENOTDIR on every platform wet runs on. An
+		// earlier pull may have created the directory, so clear it first.
+		if err := os.RemoveAll(filepath.Join(tree, "mobile")); err != nil {
+			t.Fatalf("clear mobile: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(tree, "mobile"), []byte("not a directory\n"), 0o644); err != nil {
+			t.Fatalf("block mobile: %v", err)
+		}
+	}
+	newStore := func() SecretReader {
+		return newFakeStore(map[string]string{
+			"op://V/I/secret_key_base": "k", "op://V/I/admin_emails": "a", "op://V/I/shared_id": "s",
+		})
+	}
+
+	t.Run("first output did not exist", func(t *testing.T) {
+		cfg := loadTestConfig(t, fullConfig)
+		tree := t.TempDir()
+		blockMobile(t, tree)
+
+		_, _, err := pullInto(t, PullRequest{
+			Cfg: cfg, TreePath: tree, Data: worktreeData(t, cfg, 1, nil), Reader: newStore(),
+		})
+		if err == nil {
+			t.Fatal("expected the unwritable output to fail the pull")
+		}
+		if _, statErr := os.Stat(filepath.Join(tree, "backend/.env.dev")); !os.IsNotExist(statErr) {
+			t.Errorf("backend was created despite a later output failing to write (stat: %v)", statErr)
+		}
+		assertNoStagedLeftovers(t, tree)
+	})
+
+	t.Run("first output existed with different content", func(t *testing.T) {
+		cfg := loadTestConfig(t, fullConfig)
+		tree := t.TempDir()
+		store := newStore()
+		if _, _, err := pullInto(t, PullRequest{
+			Cfg: cfg, TreePath: tree, Data: worktreeData(t, cfg, 1, nil), Reader: store,
+		}); err != nil {
+			t.Fatalf("first pull: %v", err)
+		}
+		before := readOutput(t, tree, "backend/.env.dev")
+		blockMobile(t, tree)
+
+		// Slot 2 strides every port, so backend's content genuinely differs
+		// from the previous run: an unchanged file here proves it was not
+		// rewritten, rather than merely rewritten with identical bytes.
+		changed := worktreeData(t, cfg, 2, nil)
+		_, _, err := pullInto(t, PullRequest{
+			Cfg: cfg, TreePath: tree, Data: changed, Reader: newStore(),
+		})
+		if err == nil {
+			t.Fatal("expected the unwritable output to fail the pull")
+		}
+		after := readOutput(t, tree, "backend/.env.dev")
+		if after != before {
+			t.Errorf("backend was replaced despite a later output failing to write:\nbefore:\n%s\nafter:\n%s", before, after)
+		}
+		assertNoStagedLeftovers(t, tree)
+	})
+}
+
+// A failed pull must not leave its staged temp files behind, in a directory
+// the user is about to inspect to find out what wet actually generated.
+func assertNoStagedLeftovers(t *testing.T, tree string) {
+	t.Helper()
+	err := filepath.WalkDir(tree, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() && strings.Contains(d.Name(), ".wet-") {
+			t.Errorf("staged temp file left behind: %s", path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", tree, err)
 	}
 }
 
