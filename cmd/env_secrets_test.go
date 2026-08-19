@@ -35,7 +35,7 @@ if [ "${args[0]}" = "--account" ]; then args=("${args[@]:2}"); fi
 # TestPullFetchesEachItemOnce.
 echo "${args[*]}" >> "` + filepath.Join(binDir, "calls.log") + `"
 
-case "${args[0]} ${args[1]}" in
+case "${args[0]} ${args[1]:-}" in
   "item get")
       title="${args[2]}"
       jq -e --arg t "$title" '.[$t] // empty' "$state" >/dev/null || {
@@ -62,6 +62,20 @@ case "${args[0]} ${args[1]}" in
       done
       mv "$tmp" "$state"
       echo '{}'
+      ;;
+  "inject "|"inject")
+      # Substitute every {{ op://... }} the way the real inject does, leaving
+      # the surrounding template text alone.
+      while IFS= read -r line; do
+        while [[ "$line" =~ \{\{[[:space:]]*op://([^[:space:]}]+)[[:space:]]*\}\} ]]; do
+          ref="${BASH_REMATCH[1]}"
+          item="$(echo "$ref" | cut -d/ -f2)"; field="$(echo "$ref" | cut -d/ -f3-)"
+          value="$(jq -er --arg t "$item" --arg f "$field" '.[$t][$f] // empty' "$state")" || {
+            echo "could not resolve op://$ref" >&2; exit 1; }
+          line="${line/${BASH_REMATCH[0]}/$value}"
+        done
+        printf '%s\n' "$line"
+      done
       ;;
   "read --no-newline")
       ref="${args[2]}"; rest="${ref#op://}"
@@ -722,19 +736,21 @@ outputs:
 	}
 }
 
-// TestPullFetchesEachItemOnce pins the cost of a pull in processes, not just
-// in values.
+// TestPullMakesOneStoreProcess pins the cost of a pull in `op` processes.
 //
-// Correct output is not enough here. `op read op://vault/item/field` fetches
-// one field, so a per-field loop produces exactly the right file while
-// spawning one `op` per secret — and on macOS each of those is a process the
-// OS asks the user to authorize, so a nine-secret project meant nine identical
-// prompts for what is conceptually one read. Only counting invocations catches
-// a regression to that shape.
-func TestPullFetchesEachItemOnce(t *testing.T) {
+// Correct output is not enough to catch this. Every shape — one `op read` per
+// field, one `op item get` per item, one inject for the lot — writes exactly
+// the same file. What differs is the number of processes, and on macOS the
+// user is asked to authorize once per process: 26 secrets across 11 items
+// meant 11 identical prompts. Only counting invocations sees that.
+//
+// The secrets here sit on two different items precisely so a per-item
+// regression fails rather than passing on a single-item config.
+func TestPullMakesOneStoreProcess(t *testing.T) {
 	requireJQ(t)
-	binDir, _ := stubOP(t, `{"fantasy":{"secret_key_base":"real-key","google_client_id":"goog-123"}}`)
-	opRepo(t)
+	binDir, _ := stubOP(t, `{"fantasy":{"secret_key_base":"real-key"},"other":{"google_client_id":"goog-123"}}`)
+	repo := opRepo(t)
+	splitSecretsAcrossItems(t, repo)
 	resetEnvFlags(t)
 	worktreeEnv(t, 1)
 
@@ -742,19 +758,81 @@ func TestPullFetchesEachItemOnce(t *testing.T) {
 		t.Fatalf("pull: %v", err)
 	}
 
-	calls := strings.Split(strings.TrimSpace(readFileString(t, filepath.Join(binDir, "calls.log"))), "\n")
-	var gets int
-	for _, c := range calls {
-		if strings.HasPrefix(c, "item get") {
-			gets++
-		}
-		if strings.HasPrefix(c, "read ") {
-			t.Errorf("pull used per-field `op read`, which costs one process per secret: %q", c)
+	// Both values still have to arrive, or "one process" is trivially met by
+	// a pull that fetched nothing.
+	backend := readFileString(t, filepath.Join(repo, "backend/.env.dev"))
+	for _, want := range []string{"SECRET_KEY_BASE=real-key", "GOOGLE_CLIENT_ID=goog-123"} {
+		if !strings.Contains(backend, want) {
+			t.Errorf("backend missing %q:\n%s", want, backend)
 		}
 	}
-	// Two secrets are selected, both on item `fantasy`. One item, one fetch.
-	if gets != 1 {
-		t.Errorf("got %d `op item get` calls, want 1 (one per item, not per field):\n%s",
-			gets, strings.Join(calls, "\n"))
+
+	calls := opCalls(t, binDir)
+	if len(calls) != 1 {
+		t.Errorf("pull spawned %d op processes, want 1 — each one is a separate "+
+			"authorization prompt:\n%s", len(calls), strings.Join(calls, "\n"))
+	}
+}
+
+// TestPullFallsBackWhenBatchFails covers the other half of the batch: inject
+// is all-or-nothing, so one unresolvable reference must not fail the secrets
+// that do resolve. The per-item path reports absence one secret at a time,
+// which is what lets the policy answer this one name from its default.
+func TestPullFallsBackWhenBatchFails(t *testing.T) {
+	requireJQ(t)
+	// google_client_id is absent, so inject fails the whole template.
+	binDir, _ := stubOP(t, `{"fantasy":{"secret_key_base":"real-key"}}`)
+	repo := opRepo(t)
+	resetEnvFlags(t)
+	worktreeEnv(t, 1)
+
+	if err := runEnvPull(nil, nil); err != nil {
+		t.Fatalf("pull: %v", err)
+	}
+
+	backend := readFileString(t, filepath.Join(repo, "backend/.env.dev"))
+	if !strings.Contains(backend, "SECRET_KEY_BASE=real-key") {
+		t.Errorf("a failed batch lost a secret that resolves fine:\n%s", backend)
+	}
+	// Declared default for the one the store could not answer.
+	if !strings.Contains(backend, "GOOGLE_CLIENT_ID=\n") && !strings.HasSuffix(backend, "GOOGLE_CLIENT_ID=") {
+		t.Errorf("missing secret did not fall back to its empty default:\n%s", backend)
+	}
+	if calls := opCalls(t, binDir); len(calls) < 2 {
+		t.Errorf("expected a fallback to per-item reads after the batch failed, got:\n%s",
+			strings.Join(calls, "\n"))
+	}
+}
+
+// opCalls returns one entry per `op` invocation the stub saw.
+func opCalls(t *testing.T, binDir string) []string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(binDir, "calls.log"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		t.Fatal(err)
+	}
+	return strings.Split(strings.TrimSpace(string(raw)), "\n")
+}
+
+// splitSecretsAcrossItems moves one of opRepo's secrets onto a second item,
+// the shape a real project reaches as soon as its credentials come from more
+// than one vendor.
+func splitSecretsAcrossItems(t *testing.T, repo string) {
+	t.Helper()
+	path := filepath.Join(repo, ".wet.yaml")
+	cfg := readFileString(t, path)
+	old := `    GOOGLE_CLIENT_ID:
+      field: google_client_id`
+	if !strings.Contains(cfg, old) {
+		t.Fatalf("opRepo config changed shape; cannot split items:\n%s", cfg)
+	}
+	cfg = strings.Replace(cfg, old, `    GOOGLE_CLIENT_ID:
+      item: other
+      field: google_client_id`, 1)
+	if err := os.WriteFile(path, []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }

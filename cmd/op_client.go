@@ -3,6 +3,8 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -35,6 +37,15 @@ func (c opClient) run(args ...string) ([]byte, error) {
 // which never contains a value — without the argv going along with it. The
 // raw stderr is returned too so a caller can wrap it rather than restate it.
 func (c opClient) runReporting(what string, args ...string) ([]byte, string, error) {
+	return c.runInput(what, nil, args...)
+}
+
+// runInput is runReporting with a stdin to feed the command.
+//
+// A non-nil stdin displaces the terminal op would otherwise prompt on, so it
+// is only for calls whose caller can survive an unavailable session — inject
+// falls back to per-item reads, which do get a terminal.
+func (c opClient) runInput(what string, stdin []byte, args ...string) ([]byte, string, error) {
 	if c.account != "" {
 		args = append([]string{"--account", c.account}, args...)
 	}
@@ -49,7 +60,10 @@ func (c opClient) runReporting(what string, args ...string) ([]byte, string, err
 	// clone: op waited for an unlock nobody could give it, and the `fallback`
 	// policy — whose whole promise is to survive unavailable authentication —
 	// never got to see a failure, because there wasn't one yet.
-	if stdinIsTerminal() {
+	switch {
+	case stdin != nil:
+		cmd.Stdin = bytes.NewReader(stdin)
+	case stdinIsTerminal():
 		cmd.Stdin = os.Stdin
 	}
 	// Killing `op` is not enough on its own. Stdout here is a buffer, so exec
@@ -205,4 +219,82 @@ func (c opClient) read(uri string) (string, error) {
 		return "", err
 	}
 	return string(out), nil
+}
+
+// injectMarker brackets each reference in an inject template so the values can
+// be cut back out of one blob of output.
+//
+// The markers are not a parsing nicety, they are the reason multi-line values
+// survive: a line-oriented "KEY=ref" template cannot tell where a PEM ends and
+// the next key begins, and inject emits the value verbatim.
+// The nonce is what makes the marker safe rather than merely unlikely: a
+// secret whose value happened to contain the sentinel would otherwise truncate
+// the one after it, and vault contents are not wet's to predict.
+func injectMarker(nonce string, i int, closing bool) string {
+	if closing {
+		return fmt.Sprintf("[/wet-%s-%d]", nonce, i)
+	}
+	return fmt.Sprintf("[wet-%s-%d]", nonce, i)
+}
+
+// injectNonce returns the per-call marker salt.
+func injectNonce() (string, error) {
+	var b [12]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("generate inject marker: %w", err)
+	}
+	return hex.EncodeToString(b[:]), nil
+}
+
+// inject resolves many references in ONE `op` process.
+//
+// This is the difference between one authorization prompt and one per item.
+// `op read` takes a single field and `op item get` a single item, so a repo
+// whose secrets are spread over eleven items paid eleven prompts even after
+// fetching per item rather than per field. inject is the only op subcommand
+// that resolves an arbitrary set of references in a single invocation.
+//
+// It is all-or-nothing by design: op fails the whole template if any one
+// reference is unresolvable, so a caller must treat an error as "fall back to
+// per-item reads", never as "these secrets are missing". Per-secret absence is
+// exactly what the policy needs to see, and only the per-item path can report
+// it.
+func (c opClient) inject(refs []string) (map[string]string, error) {
+	if len(refs) == 0 {
+		return map[string]string{}, nil
+	}
+	nonce, err := injectNonce()
+	if err != nil {
+		return nil, err
+	}
+	var tpl bytes.Buffer
+	for i, ref := range refs {
+		fmt.Fprintf(&tpl, "%s{{ %s }}%s\n",
+			injectMarker(nonce, i, false), ref, injectMarker(nonce, i, true))
+	}
+	// The description deliberately omits the template: refs are not secret,
+	// but keeping the argv-shaped description free of them keeps every error
+	// path in this file uniformly value-free.
+	out, _, err := c.runInput(fmt.Sprintf("inject (%d references)", len(refs)), tpl.Bytes(), "inject")
+	if err != nil {
+		return nil, err
+	}
+	values := make(map[string]string, len(refs))
+	text := string(out)
+	for i, ref := range refs {
+		open, close := injectMarker(nonce, i, false), injectMarker(nonce, i, true)
+		start := strings.Index(text, open)
+		if start < 0 {
+			return nil, fmt.Errorf("op inject did not return a value for reference %d", i)
+		}
+		rest := text[start+len(open):]
+		end := strings.Index(rest, close)
+		if end < 0 {
+			return nil, fmt.Errorf("op inject returned an unterminated value for reference %d", i)
+		}
+		// Last write wins, matching the per-item path: two definitions may
+		// legitimately name one field.
+		values[ref] = rest[:end]
+	}
+	return values, nil
 }

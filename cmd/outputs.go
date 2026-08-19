@@ -335,6 +335,16 @@ type SecretReader interface {
 	Read(uri string) (string, error)
 }
 
+// prefetcher is the optional half of SecretReader: a store that can resolve a
+// whole reference set in one round trip says so by implementing it. Reads
+// still go through Read, so a reader without it — and a prefetch that failed —
+// behave identically, just at more round trips.
+type prefetcher interface {
+	// Prefetch returns the batch's error for the caller to classify, not to
+	// fail on: resolution continues through Read either way.
+	Prefetch(uris []string) error
+}
+
 // failingReader stands in for a store client that could not be built at all —
 // no CLI installed, an unsupported store name. Every read fails with the
 // reason, so the policy decides what happens next in exactly one place.
@@ -355,6 +365,29 @@ func (r failingReader) Read(string) (string, error) { return "", r.err }
 type latchingReader struct {
 	inner SecretReader
 	fatal error
+}
+
+// Prefetch forwards the batch to a wrapping-aware inner reader. Without this
+// the latch silently costs the optimisation it wraps: resolveSecrets type-
+// asserts on the reader it was handed, which is this one.
+// Prefetch forwards the batch to a wrapping-aware inner reader. Without this
+// the latch silently costs the optimisation it wraps: resolveSecrets type-
+// asserts on the reader it was handed, which is this one.
+//
+// A store-level failure latches here for the same reason it does in Read, and
+// it matters more: the batch is now the FIRST thing to touch the store, so an
+// unreachable one is discovered by inject. Without latching, a pull paid the
+// timeout twice — once for the batch, once for the read that rediscovered it.
+func (r *latchingReader) Prefetch(uris []string) error {
+	p, ok := r.inner.(prefetcher)
+	if !ok {
+		return nil
+	}
+	err := p.Prefetch(uris)
+	if err != nil && errors.Is(err, errStoreUnavailable) {
+		r.fatal = err
+	}
+	return err
 }
 
 func (r *latchingReader) Read(uri string) (string, error) {
@@ -386,6 +419,8 @@ type opSecretReader struct {
 	// missing records items the store does not have, so a second secret on an
 	// absent item does not re-pay the round trip that already answered.
 	missing map[string]bool
+	// values holds what Prefetch resolved, keyed by reference.
+	values map[string]string
 }
 
 func newOPSecretReader(client opClient) *opSecretReader {
@@ -393,10 +428,36 @@ func newOPSecretReader(client opClient) *opSecretReader {
 		client:  client,
 		items:   map[string]opItem{},
 		missing: map[string]bool{},
+		values:  map[string]string{},
 	}
 }
 
+// Prefetch resolves every reference this pull will need in one `op` process.
+//
+// Fetching per item was already an improvement on per field, but the unit the
+// user experiences is neither: it is the process. macOS asks for authorization
+// once per `op` invocation, so a repo spreading 26 secrets over 11 items still
+// asked 11 times. One inject call makes it one.
+//
+// A failure here is deliberately not returned. inject is all-or-nothing, so a
+// single unresolvable reference would otherwise fail secrets that resolve
+// perfectly well and rob the policy of its per-secret fallback. Read() then
+// answers from the per-item path, which reports absence one secret at a time.
+func (r *opSecretReader) Prefetch(uris []string) error {
+	values, err := r.client.inject(uris)
+	if err != nil {
+		return err
+	}
+	for uri, value := range values {
+		r.values[uri] = value
+	}
+	return nil
+}
+
 func (r *opSecretReader) Read(uri string) (string, error) {
+	if value, ok := r.values[uri]; ok {
+		return value, nil
+	}
 	ref, err := parseOPRef(uri)
 	if err != nil {
 		return "", err
@@ -525,6 +586,27 @@ func resolveSecrets(cfg *WetConfig, names []string, policy string, reader Secret
 	// legitimately point at one field.
 	byURI := map[string]string{}
 	sort.Strings(names)
+
+	// Give a reader that can batch the whole reference set before reading any
+	// of it. Only references that resolve are offered: an unconfigured vault
+	// is answered by the policy, not by the store.
+	if p, ok := reader.(prefetcher); ok && policy != SecretPolicyDisabled {
+		var uris []string
+		seen := map[string]bool{}
+		for _, name := range names {
+			ref, err := cfg.Secrets.ResolveSecretRef(name)
+			if err != nil || seen[ref.URI()] {
+				continue
+			}
+			seen[ref.URI()] = true
+			uris = append(uris, ref.URI())
+		}
+		if len(uris) > 0 {
+			// Deliberately ignored: a failed batch is a slower pull, not a
+			// failed one. Read answers per secret, and the policy decides.
+			_ = p.Prefetch(uris)
+		}
+	}
 	for _, name := range names {
 		def := cfg.Secrets.Definitions[name]
 
