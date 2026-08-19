@@ -7,8 +7,15 @@
 # `wet setup` applies it to whichever checkout you are in: the main repo at
 # slot 0 (the declared base ports), a worktree at slot N.
 #
-# Validate a config without touching a worktree:
-#   wet env populate <template> --dry-run
+# The point of this file is that it is the ONLY inventory. It answers, in one
+# place: which env files this repo generates, which keys each one carries,
+# which of those keys are secrets, where those secrets live, and which values
+# vary per worktree. There is no checked-in `.env.tpl` holding a second,
+# drifting copy of that list.
+#
+# Check a config without writing anything:
+#   wet env explain          # what each output contains, and where from
+#   wet env pull --dry-run   # resolve and validate everything, write nothing
 
 # ---------------------------------------------------------------------------
 # Identity (required)
@@ -31,9 +38,9 @@ main_branch: main
 # Paths are relative to the repo root. Missing files are skipped silently so
 # an optional file doesn't break the flow.
 #
-# Prefer `env populate` (below) over copying generated env files: a copy
-# snapshots one machine's values and then drifts, while a template re-renders
-# with this worktree's own ports every time.
+# Prefer an `outputs:` entry (below) over copying a generated env file: a copy
+# snapshots one machine's values and then drifts, while a declared output is
+# regenerated with this worktree's own ports every time.
 
 copy:
   files:
@@ -88,7 +95,8 @@ ports:
 # `wet worktree pop` this worktree away.
 #
 # Pool names must match [a-z_][a-z0-9_]*. Reachable as {{.Pools.devices}} /
-# {{.Handles.devices}} in templates and $POOL_DEVICES in hooks.
+# {{.Handles.devices}} in env: templates, as `from: Pools.devices` in an
+# output, and as $POOL_DEVICES in hooks.
 
 pools:
   # An emulator item names an AVD as `emulator:<AVD_NAME>`, never a runtime
@@ -120,6 +128,10 @@ pools:
 # env: — the derivation layer
 # ---------------------------------------------------------------------------
 #
+# Ordinary, non-secret values. Everything here is committed as written, so
+# nothing that must not be read from this file belongs in it — credentials go
+# under `secrets:` below, and a name may not appear in both.
+#
 # Values are Go text/template strings. Available fields: ProjectName, Branch,
 # BranchSafe (branch with slashes flattened — safe for Docker names), Slot,
 # every declared port, .Pools.<name>, and .Handles.<name>.
@@ -132,13 +144,16 @@ pools:
 #
 # Entries may reference each other in any order — they resolve to a fixed
 # point, not in sorted order. That is what makes this the single source of
-# truth for a monorepo: derive a URL from a port ONCE here, and every
-# package's template consumes the result instead of re-deriving it. A
-# reference cycle or a typo is reported by key name.
+# truth for a monorepo: derive a URL from a port ONCE here, and every output
+# consumes the result instead of re-deriving it. A reference cycle or a typo
+# is reported by key name.
 #
 # Anything here can be overridden per machine by a gitignored `.env.local` at
 # the repo root (KEY=value lines) — so the entries below act as defaults. Put
-# a LAN IP for physical-device testing there, not in this file.
+# a LAN IP for physical-device testing there, not in this file. `.env.local`
+# can NOT override a secret: a secret reaches a file only through the store or
+# its declared default, so a stray local line cannot quietly become the
+# credential your app runs with.
 
 env:
   DEV_HOST: "localhost" # override in .env.local for a physical device
@@ -146,134 +161,237 @@ env:
   CALLBACK_URL: "{{.APP_URL}}/auth/callback" # derived from a derived value
   COMPOSE_PROJECT_NAME: "{{.ProjectName}}-{{.BranchSafe}}"
   FLUTTER_DEVICE: "{{.Handles.devices}}" # the live serial, not `emulator:pixel-a`
+  SENTRY_ENV: "dev"
 
 # ---------------------------------------------------------------------------
-# render: — template → output pairs
+# outputs: — the env files this repo generates
 # ---------------------------------------------------------------------------
 #
-# One entry per env file the repo needs. A monorepo lists one per package;
-# each carries its own secret sources, because a backend needs the vault and a
-# mobile app usually needs nothing.
+# One entry per generated file. A monorepo lists one per package. There is no
+# template to write: for a dotenv file wet already knows every value, so the
+# only thing left to declare is which of them the file carries and under what
+# key — and declaring that here, rather than in a checked-in `.env.tpl`, is
+# what keeps a single inventory. A key not listed is simply not in the file.
 #
-# Rendered by `wet setup` (before hooks, so a hook that boots the stack finds
-# the files already written) and by `wet env populate --all`. Add --dry-run to
-# see every file that would be written for this slot without touching disk.
+# Written by `wet setup` (before hooks, so a hook that boots the stack finds
+# the files already there) and regenerated on demand by `wet env pull`, which
+# does no lifecycle work at all: no slot, no ports, no pools, no hooks.
 #
-# Each target renders against its own copy of the data, so one target's
-# secrets can never leak into another's output — a template that references a
-# key it wasn't given fails rather than silently picking up a sibling's.
+#   wet env pull              every output
+#   wet env pull mobile       only that one
+#   wet env pull --dry-run    resolve and validate, write nothing
+#   wet env explain           what each output holds, without the values
 #
-# secrets_from: takes files, or "-" for stdin (at most one target may use
-# stdin per run). Later sources win on a key collision.
+# Every requested output is resolved and validated before any of them is
+# written, so a typo in the second file cannot leave the first one updated and
+# the app half-configured.
+#
+# Per entry:
+#   name      required, unique, lowercase. The CLI identifier: `wet env pull
+#             <name>`, `wet env push <name>`.
+#   out       required, relative to the checkout, must not escape it. Missing
+#             parent directories are created. No two outputs may write the
+#             same path — the loser's keys would silently vanish.
+#   format    required. `dotenv` is the only encoder implemented.
+#   mode      optional octal string. Defaults to "0600": a generated env file
+#             may carry secrets and outlives the command that wrote it.
+#   include   ordinary values, ports, and reserved fields, keeping their own
+#             name as the output key.
+#   secrets   names from secrets.definitions below, keeping their own name.
+#             This list is the authorization boundary: a definition NOT named
+#             here is invisible to this file. That is why a mobile bundle
+#             cannot pick up a backend credential just because it is defined.
+#   values    renamed and literal keys, emitted in the order written here.
+#             `from:` reads an ordinary value, port, or Pools./Handles. entry;
+#             `literal:` emits a fixed scalar; the two are mutually exclusive.
+#
+# Secrets are deliberately NOT reachable through `values.from` — they are
+# emitted only under their own logical name, so a rename can never smuggle one
+# into a file that did not select it. Any key declared twice, by any
+# combination of the three lists, is a load error.
 
-render:
-  - template: .env.example.tpl
-    out: .env
-  # - template: backend/.env.tpl
-  #   out: backend/.env
-  #   secrets: backend            # a section of secrets: below
-  # - template: mobile/.env.tpl
-  #   out: mobile/.env
-  #   secrets: mobile
-  #   secrets_from: [/tmp/vault.json]
+outputs:
+  - name: backend
+    out: backend/.env.dev
+    format: dotenv
+    include:
+      - DEV_HOST
+      - APP_PORT
+      - DB_PORT
+      - APP_URL
+      - CALLBACK_URL
+      - SENTRY_ENV
+    # Uncomment together with the secrets: block below. Each name here must be
+    # defined there, and a definition NOT named here is invisible to this file.
+    # secrets:
+    #   - SECRET_KEY_BASE
+    #   - GOOGLE_CLIENT_ID
+    #   - GOOGLE_CLIENT_SECRET
+    #   - SENTRY_DSN
 
-  # Editor config usually needs NO render target. Point it at the env file
-  # wet already renders, and it stops varying per worktree:
+  - name: mobile
+    out: mobile/.env
+    format: dotenv
+    # Nothing secret in it, so the usual owner-only default is unhelpful here:
+    # mode: "0644"
+    #
+    # A client app's config is public by definition — it ships inside the
+    # bundle — so this output selects no secrets at all. `values:` renames
+    # wet's names into the ones the app expects.
+    values:
+      host:
+        from: DEV_HOST
+      port:
+        from: GRPC_PORT
+      webBaseUrl:
+        from: APP_URL
+      oidcClientId:
+        literal: myapp-mobile
+      oidcRedirectUri:
+        literal: "myapp://auth/callback"
+
+  # Editor config usually needs NO output of its own. Point it at the env file
+  # wet already writes, and it stops varying per worktree:
   #
   #   // .vscode/launch.json — plain, committed, identical everywhere
   #   {"configurations": [{
   #     "name": "app (dev)", "request": "launch", "type": "dart",
-  #     "args": ["--dart-define-from-file", ".env"]
+  #     "args": ["--dart-define-from-file", "mobile/.env"]
   #   }]}
   #
   # VS Code's node/python debuggers take `"envFile"` for the same job. One
-  # indirection, and the file with the per-worktree values is the rendered
+  # indirection, and the file with the per-worktree values is the generated
   # one — which is where they belong, since the app reads them too.
   #
   # Leave the host, port, and device OUT of launch.json entirely. A pinned
   # port is wrong in every worktree but one, and a committed device id sends
   # everyone else's run at hardware they don't have.
   #
-  # Render editor config only when the tool cannot read an env file and the
-  # value must sit in the JSON. Then the output must be gitignored: `wet
-  # setup` runs in the main checkout too, so a tracked out: is overwritten and
-  # left dirty on every run. Beware `.gitignore` with `.vscode/` — git cannot
-  # re-include a file under an excluded directory, so a committed template in
-  # there needs `.vscode/*` (not `.vscode/`) plus a `!` line, or `copy:` the
-  # directory instead.
+  # Declare an output for editor config only when the tool cannot read an env
+  # file. Then it must be gitignored: `wet setup` runs in the main checkout
+  # too, so a tracked out: is overwritten and left dirty on every run. Beware
+  # `.gitignore` with `.vscode/` — git cannot re-include a file under an
+  # excluded directory, so you need `.vscode/*` (not `.vscode/`) plus a `!`
+  # line, or `copy:` the directory instead.
 
 # ---------------------------------------------------------------------------
-# secrets: — the vault, and which keys each consumer needs
+# secrets: — every credential, declared once
 # ---------------------------------------------------------------------------
 #
-# Optional. Without this block wet talks to no secret store at all and secrets
-# arrive only through secrets_from / --secrets-from, which stays fully
-# supported — this block is for the case where you would rather not maintain a
-# producer script per repo.
+# Optional. Without this block wet talks to no secret store at all and every
+# output is made of ordinary values.
 #
-# `sections` is the second dimension, and it names CONSUMERS, not storage.
-# `backend` and `mobile` are labels: a render target picks one with `secrets:`,
-# and that target's template gets those keys and no others. Both sections may
-# name the same field — GOOGLE_CLIENT_ID is one credential whether the API or
-# the app reads it — so the vault holds no per-consumer duplicates and a
-# rotation is one edit in one place. Nothing in the vault records which section
-# uses a value; that mapping lives here.
+# A definition is a NAME plus a PLACE — never a value. No plaintext secret
+# belongs in this file. Each credential is defined once and shared by name:
+# GOOGLE_CLIENT_ID is one credential whether the API or a deployment reads it,
+# so the store holds no per-consumer duplicates and a rotation is one edit.
+# Who may see it is decided by the outputs above, not here.
 #
-# A value is a field on `item`, "Other Item/field" for another item in the same
-# vault, or a full "op://vault/item/field" when it lives somewhere else
-# entirely.
+# A definition name may not collide with a port, a reserved field, or an env:
+# key. That last one matters: if a value can come from either place the output
+# key is ambiguous, and worse, a store value could shadow an allocated port
+# and hand two worktrees the same one. So a provider key with a store field
+# lives ONLY here — its dev fallback goes in `default:`, not in env:.
 #
-# vault/item/account may be omitted: `wet op vault ...` asks (a picker over
+# Per definition:
+#   field     the field on `item`. Required unless `ref:` is given.
+#   default   the fallback used under `policy: fallback`. A pointer in spirit:
+#             an OMITTED default means "this must come from the store or fail",
+#             while `default: ''` means "this provider is deliberately not
+#             configured locally, and empty is the right value". They are
+#             different, and the empty one still renders as `KEY=`.
+#   vault     per-secret override of the block-level vault.
+#   item      per-secret override of the block-level item.
+#   ref       a full "op://vault/item/field" for a secret that lives somewhere
+#             else entirely. Mutually exclusive with vault/item/field.
+#
+# vault/item/account may be omitted here: `wet op vault` asks (a picker over
 # `op account list` / `op vault list`) and remembers the answer in the
 # gitignored .wet.local.yaml, since which account you are signed into is a fact
 # about your machine, not about the project.
 #
-#   wet op vault seed --input .env.development   # env file -> vault
-#   wet op vault read --output .env.development  # vault -> one env file per section
+# Moving values in the other direction — a dotenv file back into the store:
+#
+#   wet env push backend --from backend/secrets.import.env --dry-run
+#   wet env push backend --from backend/secrets.import.env
+#
+# Push is authorized by declaration: only names defined here AND selected by
+# the named output are written, everything else in the file is ignored, and a
+# value equal to that secret's `default:` is refused as a placeholder unless
+# you pass --include-defaults. There is no flag that lets an undeclared key
+# reach the store.
 
 # secrets:
+#   # The secret manager. `op` (1Password) is the only one implemented.
 #   store: op
-#   vault: fantasy_basketball_development
-#   item: fantasy
+#
+#   # What happens when the store cannot answer. Defaults to `fallback`.
+#   #
+#   #   required   the store must answer for every selected secret. A declared
+#   #              default does NOT paper over a store failure. For strict repos
+#   #              and for CI with an authenticated service account.
+#   #   fallback   try the store; on a missing client, missing auth, missing
+#   #              item, or missing field, use the secret's `default:`. A secret
+#   #              with neither is an error. wet names every fallback out loud —
+#   #              silence here would let an empty SENTRY_DSN read as "error
+#   #              reporting is configured" right up until it isn't.
+#   #   disabled   never contact the store; defaults must satisfy everything.
+#   #              For offline work and deterministic tests.
+#   #
+#   # Override for one run with:
+#   #   wet env pull --secrets=required|fallback|disabled
+#   policy: fallback
+#
+#   vault: myapp_development
+#   item: backend-development
 #   account: my.1password.com
-#   sections:
-#     backend:
-#       SECRET_KEY_BASE: secret_key_base
-#       GOOGLE_CLIENT_ID: google_client_id
-#       GOOGLE_CLIENT_SECRET: google_client_secret
-#     mobile:
-#       GOOGLE_CLIENT_ID: google_client_id
-#       APPLE_SERVICE_ID: apple_service_id
+#
+#   definitions:
+#     SECRET_KEY_BASE:
+#       field: secret_key_base
+#       default: 'dev-only-secret-key-base-do-not-use-outside-local-dev'
+#     GOOGLE_CLIENT_ID:
+#       field: google_client_id
+#       default: ''            # deliberately unset locally: sign-in is simply off
+#     GOOGLE_CLIENT_SECRET:
+#       field: google_client_secret
+#       default: ''
+#     SENTRY_DSN:
+#       field: sentry_dsn
+#       default: ''
+#     # No default at all: this one must come from the store, and a checkout
+#     # that cannot reach it fails loudly instead of booting misconfigured.
+#     # vault:/item: override the block-level destination for one secret.
+#     STRIPE_SECRET_KEY:
+#       field: stripe_secret_key
+#       vault: myapp_payments
+#       item: payments-development
+#     # A secret that lives somewhere else entirely is addressed whole, and
+#     # then field:/vault:/item: must be left off.
+#     RELEASE_COOKIE:
+#       ref: op://shared_infra/release/cookie
 
 # ---------------------------------------------------------------------------
 # Hooks
 # ---------------------------------------------------------------------------
 #
 # Each command is rendered as a template, then run through `sh -c` with cwd at
-# the worktree — so pipes, &&, and globs all work. Every value above is also
-# available as a real environment variable ($APP_PORT, $POOL_DEVICES, $SLOT,
-# $BRANCH_SAFE), which is what non-templatable scripts should read.
+# the worktree — so pipes, &&, and globs all work. Every ordinary value above
+# is also available as a real environment variable ($APP_PORT, $POOL_DEVICES,
+# $SLOT, $BRANCH_SAFE), which is what non-templatable scripts should read.
+# Secrets are not exported to hooks: they reach the files that selected them
+# and nothing else.
+#
+# Hooks run AFTER every declared output has been written, so a hook that boots
+# the stack finds the env files already on disk.
 #
 # A nonzero exit aborts the operation and prints the failing command.
 
 hooks:
   post_create:
-    # `render:` above already covers env files — hooks are for actions.
+    # `outputs:` above already covers env files — hooks are for actions.
     - echo "slot {{.Slot}} ready at {{.APP_URL}}"
-
-    # Same command, with secrets supplied. wet never talks to a secret store
-    # itself — any command emitting a flat JSON object works. The source is
-    # always explicit (`--secrets-from -`, or a path); wet never sniffs stdin,
-    # because a hook inherits its parent's and a wrong guess would hang:
-    #   ./scripts/wet-secrets.sh    | wet env populate ...
-    #   az keyvault secret list ... | jq '...' | wet env populate ...
-    # Keep that producer in a committed script rather than inline here: it is
-    # then runnable on its own (`./scripts/wet-secrets.sh | jq keys`) when a
-    # render fails. For 1Password there is no script to write — declare a
-    # secrets: block instead (above) and the render targets fetch their own.
-    # Piped keys override env: entries above, but may not override a declared
-    # port (that would defeat slot allocation, and is an error).
-    # - ./scripts/wet-secrets.sh | wet env populate .env.example.tpl -o .env --secrets-from -
+    - docker compose up -d
 
   pre_remove:
     - docker compose down -v

@@ -17,9 +17,10 @@ import (
 
 var secretsCmd = &cobra.Command{
 	Use:   "secrets",
-	Short: "Scaffold the env: and secrets: blocks of .wet.yaml",
-	Long: `Add a provider's keys to .wet.yaml: its env: defaults, and the
-secrets: entries saying which of them come from the vault.
+	Short: "Scaffold the env:, secrets:, and outputs: blocks of .wet.yaml",
+	Long: `Add a provider's keys to .wet.yaml: its derived env: values, the
+secrets.definitions: entries for the credentials that come from the store,
+and the outputs: entry that consumes them.
 
 The catalog of providers is built into wet — nothing is installed into your
 repo — so a group gains keys when you upgrade wet, not when you remember to
@@ -32,9 +33,17 @@ var secretsSetupCmd = &cobra.Command{
 	Long: `Scaffold one or more provider groups into .wet.yaml.
 
 With no arguments it opens a multi-select of the catalog, pre-checked with
-whatever is already scaffolded. Every key is written with an EMPTY default so a
-fresh clone still renders and boots without a vault; real values arrive over
-the secrets channel and win over the default.
+whatever is already scaffolded.
+
+A credential becomes a secrets.definitions: entry naming its store field, with
+the catalog's dev fallback in "default:" — under the default "fallback" policy
+that is what lets a clone with no vault still render and boot, while the real
+value from the store wins whenever there is one. A derived value like a
+redirect URI is computed per worktree, so it stays an ordinary env: entry and
+never reaches the store.
+
+Both halves are wired into the --output entry of outputs:, since a credential
+no generated file selects is one wet will never write.
 
 Existing keys are never touched, so it is safe to re-run when you add a
 provider — a value you have filled in stays filled in.`,
@@ -48,26 +57,25 @@ var secretsGroupsCmd = &cobra.Command{
 	RunE:  runSecretsGroups,
 }
 
-// defaultSecretsSection is where scaffolded vault keys land unless --section
-// says otherwise. Named once so `wet secrets setup` and the scaffold offer
-// made by `wet setup` cannot disagree about which section they wrote to.
-const defaultSecretsSection = "backend"
+// defaultScaffoldOutput is the outputs: entry scaffolded keys are wired into
+// unless --output says otherwise. Named once so `wet secrets setup` and the
+// scaffold offer made by `wet setup` cannot disagree about which file they
+// added keys to — two names would leave half the provider in an output nobody
+// generates.
+const defaultScaffoldOutput = "backend"
 
 var (
-	secretsSetupSection string
-	secretsSetupDryRun  bool
-	secretsSetupNoVault bool
+	secretsSetupOutput string
+	secretsSetupDryRun bool
 )
 
 func init() {
 	rootCmd.AddCommand(secretsCmd)
 	secretsCmd.AddCommand(secretsSetupCmd, secretsGroupsCmd)
-	secretsSetupCmd.Flags().StringVar(&secretsSetupSection, "section", defaultSecretsSection,
-		"secrets: section the vault-backed keys are added to")
+	secretsSetupCmd.Flags().StringVar(&secretsSetupOutput, "output", defaultScaffoldOutput,
+		"outputs: entry the scaffolded keys are added to (created if it does not exist)")
 	secretsSetupCmd.Flags().BoolVar(&secretsSetupDryRun, "dry-run", false,
 		"print the resulting .wet.yaml instead of writing it")
-	secretsSetupCmd.Flags().BoolVar(&secretsSetupNoVault, "no-vault", false,
-		"write only env: defaults, leaving the secrets: block alone")
 }
 
 func runSecretsGroups(cmd *cobra.Command, args []string) error {
@@ -142,11 +150,7 @@ func runSecretsSetup(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	section := secretsSetupSection
-	if secretsSetupNoVault {
-		section = ""
-	}
-	res, err := ScaffoldGroups(doc, catalog, groups, section)
+	res, err := ScaffoldGroups(doc, catalog, groups, ScaffoldOptions{Output: secretsSetupOutput})
 	if err != nil {
 		return err
 	}
@@ -168,25 +172,56 @@ func runSecretsSetup(cmd *cobra.Command, args []string) error {
 	if err := os.WriteFile(path, out, 0o644); err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
 	}
+	// An invented output is a file wet has just promised to generate, holding
+	// whatever credentials it selects. It has to be born gitignored: telling
+	// the user to do it is the version of this guard that gets skipped.
+	if res.CreatedOutput {
+		if err := ignoreGeneratedOutput(filepath.Dir(path), res.OutputPath); err != nil {
+			return err
+		}
+	}
 
+	printScaffoldSummary(res, groups)
+	return nil
+}
+
+// printScaffoldSummary reports what landed where. It names the created output
+// explicitly: an invented file is the one change the user did not ask for, and
+// finding out later that wet generates backend/.env.dev is worse than being
+// told now.
+func printScaffoldSummary(res *ScaffoldResult, groups []string) {
 	fmt.Printf("Scaffolded %s into %s\n", strings.Join(groups, ", "), wetConfigFileName)
 	if len(res.AddedEnv) > 0 {
-		fmt.Printf("  env:     +%d keys (%s)\n", len(res.AddedEnv), strings.Join(res.AddedEnv, ", "))
+		fmt.Printf("  env:     +%d key(s) (%s)\n", len(res.AddedEnv), strings.Join(res.AddedEnv, ", "))
 	}
 	if len(res.AddedSecrets) > 0 {
-		fmt.Printf("  secrets: +%d keys in section %q\n", len(res.AddedSecrets), section)
+		fmt.Printf("  secrets: +%d definition(s) (%s)\n", len(res.AddedSecrets), strings.Join(res.AddedSecrets, ", "))
 	}
 	if len(res.KeptEnv) > 0 {
 		fmt.Printf("  kept:    %d existing key(s) untouched (%s)\n", len(res.KeptEnv), strings.Join(res.KeptEnv, ", "))
 	}
-	if len(res.AddedSecrets) > 0 {
-		fmt.Println("\nNext: `wet op vault seed --input <env file>` to store real values,")
-		fmt.Println("or fill them in 1Password and `wet op vault read --output .env.development`.")
+	if res.CreatedOutput {
+		fmt.Printf("  outputs: created %q, writing %s/.env.dev — change its out: if that is not where it belongs\n",
+			res.Output, res.Output)
+	} else {
+		fmt.Printf("  outputs: wired into %q\n", res.Output)
 	}
-	return nil
+	if len(res.AddedSecrets) > 0 {
+		fmt.Printf("\nNext: `wet op vault` to point this machine at the right vault, then\n")
+		fmt.Printf("`wet env pull %s` to write the file, or `wet env push %s --from <dotenv>`\n", res.Output, res.Output)
+		fmt.Println("to store real values you already have.")
+	}
 }
 
-// validateScaffolded runs the freshly written bytes through the real loader.
+// validateScaffolded runs the freshly written bytes through the real loader
+// AND resolves the env: block against a real worktree's data.
+//
+// Loading is not enough. Validate() only PARSES an env: template, so a
+// catalog value like `{{.HYDRA_PUBLIC_URL}}/callback/google` scaffolded onto a
+// config that never declared HYDRA_PUBLIC_URL passes cleanly, gets written —
+// and then every `wet setup` and `wet env pull` in that repo fails on an
+// unresolvable key. The scaffolder would have bricked the config it was asked
+// to improve, so the resolution has to happen before the file is replaced.
 func validateScaffolded(out []byte, path string) error {
 	dir, err := os.MkdirTemp("", "wet-scaffold")
 	if err != nil {
@@ -196,8 +231,22 @@ func validateScaffolded(out []byte, path string) error {
 	if err := os.WriteFile(filepath.Join(dir, wetConfigFileName), out, 0o600); err != nil {
 		return err
 	}
-	if _, err := LoadWetConfigWithLocal(dir, ""); err != nil {
+	cfg, err := LoadWetConfigWithLocal(dir, "")
+	if err != nil {
 		return fmt.Errorf("the scaffolded config does not load (%s left unchanged): %w", path, err)
+	}
+	// Slot 0 with no .env.local: the values a main checkout would resolve.
+	pools := make(map[string]string, len(cfg.Pools))
+	for name, items := range cfg.Pools {
+		if len(items) > 0 {
+			pools[name] = items[0]
+		}
+	}
+	data := BuildTemplateData(cfg, cfg.MainBranchName(), 0, cfg.ResolvePorts(0), pools)
+	if _, err := ResolveEnvValues(cfg, data, nil); err != nil {
+		return fmt.Errorf("the scaffolded config would not resolve (%s left unchanged): %w\n"+
+			"  A group's derived values reference keys your config does not declare yet.\n"+
+			"  Add them under env:, or scaffold the group that provides them first", path, err)
 	}
 	return nil
 }

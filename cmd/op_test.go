@@ -4,8 +4,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // stubOP puts a fake `op` at the front of PATH. It is a real script rather
@@ -74,8 +76,9 @@ esac
 	return binDir, statePath
 }
 
-// opRepo builds a repo whose .wet.yaml has two sections sharing one key, which
-// is the arrangement the whole design turns on.
+// opRepo builds a repo whose .wet.yaml declares two outputs sharing one secret
+// definition, which is the arrangement the whole design turns on: one
+// credential in the store, and per-output selection deciding who sees it.
 func opRepo(t *testing.T) string {
 	t.Helper()
 	repo := t.TempDir()
@@ -87,25 +90,43 @@ port_stride: 10
 ports:
   - name: APP_PORT
     base: 4000
-render:
-  - template: backend/.env.tpl
-    out: backend/.env
-    secrets: backend
-  - template: mobile/.env.tpl
-    out: mobile/.env
-    secrets: mobile
+  - name: GRPC_PORT
+    base: 50051
+env:
+  DEV_HOST: localhost
+  AUTH_BASE_URL: "http://{{.DEV_HOST}}:{{.APP_PORT}}"
 secrets:
   store: op
+  policy: fallback
   vault: fbd
   item: fantasy
   account: my.1password.com
-  sections:
-    backend:
-      SECRET_KEY_BASE: secret_key_base
-      GOOGLE_CLIENT_ID: google_client_id
-    mobile:
-      GOOGLE_CLIENT_ID: google_client_id
-      APPLE_KEY_ID: apple_key_id
+  definitions:
+    SECRET_KEY_BASE:
+      field: secret_key_base
+      default: dev-only
+    GOOGLE_CLIENT_ID:
+      field: google_client_id
+      default: ""
+    APPLE_KEY_ID:
+      field: apple_key_id
+      default: ""
+outputs:
+  - name: backend
+    out: backend/.env.dev
+    format: dotenv
+    include: [AUTH_BASE_URL]
+    secrets: [SECRET_KEY_BASE, GOOGLE_CLIENT_ID]
+  - name: mobile
+    out: mobile/.env
+    format: dotenv
+    values:
+      host:
+        from: DEV_HOST
+      port:
+        from: GRPC_PORT
+      clientId:
+        literal: app-mobile
 `
 	if err := os.WriteFile(filepath.Join(repo, ".wet.yaml"), []byte(cfg), 0o644); err != nil {
 		t.Fatal(err)
@@ -114,258 +135,615 @@ secrets:
 	return repo
 }
 
-// resetOPFlags clears the package-level flag state cobra would otherwise carry
-// between tests in one process.
-func resetOPFlags(t *testing.T) {
+// worktreeEnv makes the commands resolvable without a .wet-worktrees.json:
+// buildWorktreeData prefers the hook environment, which is exactly the shape
+// BuildHookEnv exports.
+func worktreeEnv(t *testing.T, slot int) {
 	t.Helper()
-	opFlags = opTargetFlags{}
-	opSections, opSeedInput, opReadOutput = nil, "", ""
-	opSeedForce, opSeedDryRun, opReadDryRun, opReadStdout, opSeedUnknown = false, false, false, false, false
+	t.Setenv("SLOT", strconv.Itoa(slot))
+	t.Setenv("BRANCH", "feature/x")
+	t.Setenv("APP_PORT", strconv.Itoa(4000+slot*10))
+	t.Setenv("GRPC_PORT", strconv.Itoa(50051+slot*10))
+}
+
+// resetEnvFlags clears the package-level flag state cobra would otherwise
+// carry between tests in one process.
+func resetEnvFlags(t *testing.T) {
+	t.Helper()
+	restore := func() {
+		envPullDryRun, envPullSecrets = false, ""
+		envPushFrom = ""
+		envPushDryRun, envPushForce, envPushCreateItem = false, false, false
+		envPushRejectUnmapped, envPushIncludeDefaults = false, false
+		opFlags, opNoRemember = opTargetFlags{}, false
+	}
+	restore()
 	opNoRemember = true
-	t.Cleanup(func() { resetOPFlagsValues() })
+	t.Cleanup(restore)
 }
 
-func resetOPFlagsValues() {
-	opFlags = opTargetFlags{}
-	opSections, opSeedInput, opReadOutput = nil, "", ""
-	opSeedForce, opSeedDryRun, opReadDryRun, opReadStdout, opSeedUnknown = false, false, false, false, false
-	opNoRemember = false
-}
-
+// requireJQ skips when the `op` stub's dependencies are absent — but only on
+// a developer machine. In CI a skip is indistinguishable from a pass, and
+// these are the only tests covering the command that writes to a credential
+// store, so an image that quietly lost `jq` would report a green suite with
+// the whole push surface untested. Set WET_REQUIRE_OP_TESTS=1 there.
 func requireJQ(t *testing.T) {
 	t.Helper()
-	if _, err := exec.LookPath("jq"); err != nil {
-		t.Skip("jq not available")
-	}
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash not available")
+	for _, tool := range []string{"jq", "bash"} {
+		if _, err := exec.LookPath(tool); err == nil {
+			continue
+		}
+		if os.Getenv("WET_REQUIRE_OP_TESTS") != "" {
+			t.Fatalf("%s is not installed, and WET_REQUIRE_OP_TESTS is set — "+
+				"the secret-store tests must not be skipped here", tool)
+		}
+		t.Skipf("%s not available", tool)
 	}
 }
 
-// TestOPVaultSeedThenRead is the round trip the commands exist for: an env
-// file goes into the vault, and comes back out as one file per section, each
-// in the directory its render target writes to.
-func TestOPVaultSeedThenRead(t *testing.T) {
+// TestEnvPushThenPull is the round trip the commands exist for: real values go
+// into the store from a dotenv file, and come back out in the generated file
+// of the output that selected them — and only that output.
+func TestEnvPushThenPull(t *testing.T) {
 	requireJQ(t)
+	stubOP(t, `{"fantasy":{}}`)
 	repo := opRepo(t)
-	stubOP(t, `{}`)
-	resetOPFlags(t)
+	resetEnvFlags(t)
+	worktreeEnv(t, 1)
 
-	input := filepath.Join(repo, ".env.development")
-	body := "SECRET_KEY_BASE=base123\nGOOGLE_CLIENT_ID=gid\nAPPLE_KEY_ID='a key'\n"
-	if err := os.WriteFile(input, []byte(body), 0o600); err != nil {
+	src := filepath.Join(repo, "import.env")
+	if err := os.WriteFile(src, []byte(
+		"SECRET_KEY_BASE=real-key\nGOOGLE_CLIENT_ID=goog-123\nAUTH_BASE_URL=http://ignored\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-
-	opSeedInput = input
-	if err := runOPVaultSeed(nil, nil); err != nil {
-		t.Fatalf("seed: %v", err)
+	envPushFrom = src
+	envPushCreateItem = true
+	if err := runEnvPush(nil, []string{"backend"}); err != nil {
+		t.Fatalf("push: %v", err)
 	}
 
-	resetOPFlags(t)
-	opReadOutput = ".env.development"
-	if err := runOPVaultRead(nil, nil); err != nil {
-		t.Fatalf("read: %v", err)
+	if err := runEnvPull(nil, nil); err != nil {
+		t.Fatalf("pull: %v", err)
+	}
+	backend := readFileString(t, filepath.Join(repo, "backend/.env.dev"))
+	if !strings.Contains(backend, "SECRET_KEY_BASE=real-key") {
+		t.Errorf("backend missing the pushed secret:\n%s", backend)
+	}
+	if !strings.Contains(backend, "GOOGLE_CLIENT_ID=goog-123") {
+		t.Errorf("backend missing the pushed client id:\n%s", backend)
+	}
+	// Slot 1's strided port, derived in env: and consumed by include:.
+	if !strings.Contains(backend, "AUTH_BASE_URL=http://localhost:4010") {
+		t.Errorf("backend did not carry this worktree's port:\n%s", backend)
 	}
 
-	backend, _, err := ParseEnvFile(filepath.Join(repo, "backend", ".env.development"))
-	if err != nil {
-		t.Fatalf("backend file: %v", err)
-	}
-	if backend["SECRET_KEY_BASE"] != "base123" || backend["GOOGLE_CLIENT_ID"] != "gid" {
-		t.Errorf("backend = %v, want the seeded values", backend)
-	}
-	// The section boundary is the point: mobile's file must not carry the
-	// backend's secret even though both live in one vault item.
-	if _, leaked := backend["APPLE_KEY_ID"]; leaked {
-		t.Error("backend file carries mobile's APPLE_KEY_ID")
-	}
-
-	mobile, _, err := ParseEnvFile(filepath.Join(repo, "mobile", ".env.development"))
-	if err != nil {
-		t.Fatalf("mobile file: %v", err)
-	}
-	if mobile["APPLE_KEY_ID"] != "a key" {
-		t.Errorf("APPLE_KEY_ID = %q, want %q", mobile["APPLE_KEY_ID"], "a key")
-	}
-	if mobile["GOOGLE_CLIENT_ID"] != "gid" {
-		t.Errorf("shared key GOOGLE_CLIENT_ID = %q, want it in both sections", mobile["GOOGLE_CLIENT_ID"])
-	}
-	if _, leaked := mobile["SECRET_KEY_BASE"]; leaked {
-		t.Error("mobile file carries the backend's SECRET_KEY_BASE")
-	}
-
-	for _, p := range []string{"backend/.env.development", "mobile/.env.development"} {
-		info, err := os.Stat(filepath.Join(repo, p))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if info.Mode().Perm() != 0o600 {
-			t.Errorf("%s mode = %o, want 600", p, info.Mode().Perm())
+	mobile := readFileString(t, filepath.Join(repo, "mobile/.env"))
+	for _, leaked := range []string{"SECRET_KEY_BASE", "GOOGLE_CLIENT_ID", "real-key", "goog-123"} {
+		if strings.Contains(mobile, leaked) {
+			t.Errorf("mobile output leaked %q — it selects no secrets:\n%s", leaked, mobile)
 		}
 	}
+	if !strings.Contains(mobile, "port=50061") {
+		t.Errorf("mobile did not rename GRPC_PORT to port:\n%s", mobile)
+	}
+	if !strings.Contains(mobile, "clientId=app-mobile") {
+		t.Errorf("mobile lost its literal:\n%s", mobile)
+	}
 }
 
-// TestOPVaultSeedNeverClobbers pins the promise that re-running a seed cannot
-// undo a rotation done in the vault.
-func TestOPVaultSeedNeverClobbers(t *testing.T) {
+// A generated file is the normal push input, and it is full of ordinary
+// configuration and of fallback placeholders. Neither may reach the store: an
+// ordinary key has no destination at all, and a placeholder would overwrite a
+// real credential with a dev-only string.
+func TestEnvPushIgnoresOrdinaryKeysAndFallbacks(t *testing.T) {
 	requireJQ(t)
+	_, state := stubOP(t, `{"fantasy":{}}`)
 	repo := opRepo(t)
-	_, state := stubOP(t, `{"fantasy":{"secret_key_base":"rotated","google_client_id":"gid"}}`)
-	resetOPFlags(t)
+	resetEnvFlags(t)
+	worktreeEnv(t, 1)
 
-	input := filepath.Join(repo, ".env.development")
-	body := "SECRET_KEY_BASE=stale\nGOOGLE_CLIENT_ID=gid\nAPPLE_KEY_ID=new\n"
-	if err := os.WriteFile(input, []byte(body), 0o600); err != nil {
+	src := filepath.Join(repo, "generated.env")
+	if err := os.WriteFile(src, []byte(
+		// SECRET_KEY_BASE holds exactly the declared default, GOOGLE_CLIENT_ID
+		// the declared empty default, and AUTH_BASE_URL is not a secret at all.
+		"AUTH_BASE_URL=http://localhost:4010\nSECRET_KEY_BASE=dev-only\nGOOGLE_CLIENT_ID=\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	opSeedInput = input
-
-	err := runOPVaultSeed(nil, nil)
-	if err == nil || !strings.Contains(err.Error(), "--force") {
-		t.Fatalf("seed err = %v, want a conflict that names --force", err)
-	}
-	after, readErr := os.ReadFile(state)
-	if readErr != nil {
-		t.Fatal(readErr)
-	}
-	if !strings.Contains(string(after), "rotated") {
-		t.Errorf("the vault's rotated value was overwritten: %s", after)
-	}
-	// The non-conflicting key still lands — a conflict elsewhere must not
-	// block unrelated work.
-	if !strings.Contains(string(after), "new") {
-		t.Errorf("APPLE_KEY_ID was not written despite no conflict: %s", after)
+	envPushFrom = src
+	envPushCreateItem = true
+	if err := runEnvPush(nil, []string{"backend"}); err != nil {
+		t.Fatalf("push: %v", err)
 	}
 
-	// --force is the documented way through.
-	resetOPFlags(t)
-	opSeedInput, opSeedForce = input, true
-	if err := runOPVaultSeed(nil, nil); err != nil {
-		t.Fatalf("seed --force: %v", err)
-	}
-	after, readErr = os.ReadFile(state)
-	if readErr != nil {
-		t.Fatal(readErr)
-	}
-	if !strings.Contains(string(after), "stale") {
-		t.Errorf("--force did not overwrite: %s", after)
+	got := readFileString(t, state)
+	for _, leaked := range []string{"dev-only", "AUTH_BASE_URL", "http://localhost"} {
+		if strings.Contains(got, leaked) {
+			t.Errorf("store received %q, which must never be pushed:\n%s", leaked, got)
+		}
 	}
 }
 
-// TestOPVaultSeedRejectsUnmappedKeys covers the quiet failure: a key in the
-// env file that no section maps would otherwise never reach the vault, and
-// the run would still print success.
-func TestOPVaultSeedRejectsUnmappedKeys(t *testing.T) {
+// --reject-unmapped is the opt-in for a dedicated secrets file, where a typo
+// should be loud rather than silently ignored.
+func TestEnvPushRejectUnmapped(t *testing.T) {
 	requireJQ(t)
+	stubOP(t, `{"fantasy":{}}`)
 	repo := opRepo(t)
+	resetEnvFlags(t)
+	worktreeEnv(t, 1)
+
+	src := filepath.Join(repo, "import.env")
+	if err := os.WriteFile(src, []byte("SECRET_KEY_BASE=real\nAPPLE_KEY_ID=nope\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	envPushFrom, envPushRejectUnmapped = src, true
+	err := runEnvPush(nil, []string{"backend"})
+	if err == nil {
+		t.Fatal("expected --reject-unmapped to fail on a key the output does not select")
+	}
+	// APPLE_KEY_ID is a defined secret — just not one this output selects.
+	// Being defined must not make it pushable here.
+	if !strings.Contains(err.Error(), "APPLE_KEY_ID") {
+		t.Errorf("error should name the offending key, got: %v", err)
+	}
+}
+
+// Re-running a push must never undo a rotation done directly in the store.
+func TestEnvPushNeverClobbers(t *testing.T) {
+	requireJQ(t)
+	_, state := stubOP(t, `{"fantasy":{"secret_key_base":"rotated-in-vault"}}`)
+	repo := opRepo(t)
+	resetEnvFlags(t)
+	worktreeEnv(t, 1)
+
+	src := filepath.Join(repo, "import.env")
+	if err := os.WriteFile(src, []byte("SECRET_KEY_BASE=stale-local\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	envPushFrom = src
+	if err := runEnvPush(nil, []string{"backend"}); err == nil {
+		t.Fatal("expected a conflict error")
+	}
+	if got := readFileString(t, state); !strings.Contains(got, "rotated-in-vault") {
+		t.Errorf("push overwrote a rotated value:\n%s", got)
+	}
+
+	envPushForce = true
+	if err := runEnvPush(nil, []string{"backend"}); err != nil {
+		t.Fatalf("--force push: %v", err)
+	}
+	if got := readFileString(t, state); !strings.Contains(got, "stale-local") {
+		t.Errorf("--force did not overwrite:\n%s", got)
+	}
+}
+
+// A missing destination item is an error rather than a silent create: the
+// usual cause is a wrong `item:`, and creating it would leave the real item
+// untouched while the run reported success.
+func TestEnvPushRequiresCreateItem(t *testing.T) {
+	requireJQ(t)
 	stubOP(t, `{}`)
-	resetOPFlags(t)
+	repo := opRepo(t)
+	resetEnvFlags(t)
+	worktreeEnv(t, 1)
 
-	input := filepath.Join(repo, ".env.development")
-	if err := os.WriteFile(input, []byte("SECRET_KEY_BASE=b\nSTRIPE_KEY=sk_live\n"), 0o600); err != nil {
+	src := filepath.Join(repo, "import.env")
+	if err := os.WriteFile(src, []byte("SECRET_KEY_BASE=real\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	opSeedInput = input
-	err := runOPVaultSeed(nil, nil)
-	if err == nil || !strings.Contains(err.Error(), "STRIPE_KEY") {
-		t.Fatalf("err = %v, want it to name the unmapped key", err)
-	}
-
-	resetOPFlags(t)
-	opSeedInput, opSeedUnknown = input, true
-	if err := runOPVaultSeed(nil, nil); err != nil {
-		t.Fatalf("seed --allow-unmapped: %v", err)
+	envPushFrom = src
+	err := runEnvPush(nil, []string{"backend"})
+	if err == nil || !strings.Contains(err.Error(), "--create-item") {
+		t.Fatalf("expected a --create-item hint, got: %v", err)
 	}
 }
 
-// TestOPVaultReadRequiresADirectory covers a section no render target
-// consumes: there is no directory to write into, and guessing the repo root
-// would scatter env files.
-func TestOPVaultReadRequiresADirectory(t *testing.T) {
+// `wet env pull <name>` regenerates only the named file. Anything else is a
+// surprise edit to a file the user did not ask about.
+func TestEnvPullOnlyTouchesTheNamedOutput(t *testing.T) {
 	requireJQ(t)
+	stubOP(t, `{"fantasy":{"secret_key_base":"v","google_client_id":"g"}}`)
 	repo := opRepo(t)
-	stubOP(t, `{"fantasy":{"secret_key_base":"b","google_client_id":"g","apple_key_id":"k"}}`)
-	resetOPFlags(t)
+	resetEnvFlags(t)
+	worktreeEnv(t, 1)
 
-	cfg, err := os.ReadFile(filepath.Join(repo, ".wet.yaml"))
+	if err := runEnvPull(nil, nil); err != nil {
+		t.Fatalf("pull all: %v", err)
+	}
+	mobilePath := filepath.Join(repo, "mobile/.env")
+	if err := os.WriteFile(mobilePath, []byte("SENTINEL\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := runEnvPull(nil, []string{"backend"}); err != nil {
+		t.Fatalf("pull backend: %v", err)
+	}
+	if got := readFileString(t, mobilePath); got != "SENTINEL\n" {
+		t.Errorf("pulling backend rewrote mobile/.env:\n%s", got)
+	}
+}
+
+func readFileString(t *testing.T, path string) string {
+	t.Helper()
+	body, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("read %s: %v", path, err)
 	}
-	// Drop the render targets, keeping the sections.
-	stripped := strings.Replace(string(cfg), `render:
-  - template: backend/.env.tpl
-    out: backend/.env
-    secrets: backend
-  - template: mobile/.env.tpl
-    out: mobile/.env
-    secrets: mobile
-`, "", 1)
-	if err := os.WriteFile(filepath.Join(repo, ".wet.yaml"), []byte(stripped), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	return string(body)
+}
 
-	opReadOutput = ".env.development"
-	err = runOPVaultRead(nil, nil)
-	if err == nil || !strings.Contains(err.Error(), "render") {
-		t.Fatalf("err = %v, want it to explain that no render target claims the section", err)
+// --dry-run exists to preview conflicts, so it must report them AND fail.
+// Exiting 0 would make `push --dry-run && push` read as a safety gate that
+// walks straight into the failure it was supposed to catch.
+func TestEnvPushDryRunWritesNothingAndFailsOnConflict(t *testing.T) {
+	requireJQ(t)
+	_, state := stubOP(t, `{"fantasy":{"secret_key_base":"rotated-in-vault"}}`)
+	repo := opRepo(t)
+	resetEnvFlags(t)
+	worktreeEnv(t, 1)
+
+	src := filepath.Join(repo, "import.env")
+	if err := os.WriteFile(src, []byte("SECRET_KEY_BASE=stale\nGOOGLE_CLIENT_ID=goog\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	envPushFrom, envPushDryRun = src, true
+	err := runEnvPush(nil, []string{"backend"})
+	if err == nil {
+		t.Fatal("dry run reported success despite a conflict")
+	}
+	got := readFileString(t, state)
+	if strings.Contains(got, "stale") || strings.Contains(got, "goog") {
+		t.Errorf("dry run wrote to the store:\n%s", got)
+	}
+	if !strings.Contains(got, "rotated-in-vault") {
+		t.Errorf("dry run disturbed the store:\n%s", got)
 	}
 }
 
-// TestEnvPopulateUsesSectionSecrets closes the loop the whole feature exists
-// for: a render target naming a section gets those keys as template fields,
-// and a target naming a different section cannot see them.
-func TestEnvPopulateUsesSectionSecrets(t *testing.T) {
+// A generated file's placeholders are refused by default; --include-defaults
+// is the deliberate override, and an untested flag is one that can break
+// while the suite stays green.
+func TestEnvPushIncludeDefaults(t *testing.T) {
 	requireJQ(t)
+	_, state := stubOP(t, `{"fantasy":{}}`)
 	repo := opRepo(t)
-	stubOP(t, `{"fantasy":{"secret_key_base":"base123","google_client_id":"gid","apple_key_id":"akid"}}`)
-	resetOPFlags(t)
+	resetEnvFlags(t)
+	worktreeEnv(t, 1)
 
-	for dir, body := range map[string]string{
-		"backend": "SECRET_KEY_BASE={{.SECRET_KEY_BASE}}\nGOOGLE_CLIENT_ID={{.GOOGLE_CLIENT_ID}}\n",
-		"mobile":  "APPLE_KEY_ID={{.APPLE_KEY_ID}}\nGOOGLE_CLIENT_ID={{.GOOGLE_CLIENT_ID}}\n",
+	src := filepath.Join(repo, "generated.env")
+	if err := os.WriteFile(src, []byte("SECRET_KEY_BASE=dev-only\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	envPushFrom, envPushCreateItem = src, true
+	if err := runEnvPush(nil, []string{"backend"}); err != nil {
+		t.Fatalf("push: %v", err)
+	}
+	if strings.Contains(readFileString(t, state), "dev-only") {
+		t.Fatal("the fallback value was pushed without --include-defaults")
+	}
+
+	envPushIncludeDefaults = true
+	if err := runEnvPush(nil, []string{"backend"}); err != nil {
+		t.Fatalf("push --include-defaults: %v", err)
+	}
+	if !strings.Contains(readFileString(t, state), "dev-only") {
+		t.Fatal("--include-defaults did not push the value")
+	}
+}
+
+// An output that selects no secrets has nothing to push, and saying so beats
+// a run that reports success having written nothing.
+func TestEnvPushRefusesASecretlessOutput(t *testing.T) {
+	requireJQ(t)
+	stubOP(t, `{"fantasy":{}}`)
+	repo := opRepo(t)
+	resetEnvFlags(t)
+	worktreeEnv(t, 1)
+
+	src := filepath.Join(repo, "import.env")
+	if err := os.WriteFile(src, []byte("SECRET_KEY_BASE=real\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	envPushFrom = src
+	err := runEnvPush(nil, []string{"mobile"})
+	if err == nil || !strings.Contains(err.Error(), "mobile") {
+		t.Fatalf("err = %v, want it to name the secretless output", err)
+	}
+}
+
+// The one command whose contract is "values never are printed" must keep it on
+// the failure path too. `op item edit` takes the value in argv, and wet's
+// generic runner reports the command it ran — so a failed edit used to print
+// the real credential to the terminal and into any CI log.
+func TestEnvPushFailureNeverPrintsTheValue(t *testing.T) {
+	requireJQ(t)
+	// A stub that refuses every `item edit` is what an expired session or a
+	// revoked vault looks like.
+	binDir, _ := stubOP(t, `{"fantasy":{}}`)
+	failing := "#!/usr/bin/env bash\n" +
+		"for a in \"$@\"; do if [ \"$a\" = \"edit\" ]; then echo 'session expired' >&2; exit 1; fi; done\n" +
+		"exec \"" + filepath.Join(binDir, "op") + "\" \"$@\"\n"
+	shim := t.TempDir()
+	if err := os.WriteFile(filepath.Join(shim, "op"), []byte(failing), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", shim+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	repo := opRepo(t)
+	resetEnvFlags(t)
+	worktreeEnv(t, 1)
+	const secret = "sup3r-s3cret-value"
+	src := filepath.Join(repo, "import.env")
+	if err := os.WriteFile(src, []byte("SECRET_KEY_BASE="+secret+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	envPushFrom, envPushCreateItem = src, true
+
+	err := runEnvPush(nil, []string{"backend"})
+	if err == nil {
+		t.Fatal("expected the failing store write to be reported")
+	}
+	msg := err.Error()
+	if strings.Contains(msg, secret) || strings.Contains(msg, "[password]=") {
+		t.Fatalf("the error disclosed the credential: %s", msg)
+	}
+	// It still has to be diagnosable: the destination and the store's own
+	// reason are what the user needs.
+	for _, want := range []string{"secret_key_base", "session expired"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error should mention %q, got: %s", want, msg)
+		}
+	}
+}
+
+// Two definitions may legitimately name one field — one credential under two
+// names. Two DIFFERENT values for it is a config bug, and letting the map's
+// last write win would push whichever name sorted later, differently between
+// runs.
+func TestEnvPushRejectsTwoValuesForOneField(t *testing.T) {
+	requireJQ(t)
+	stubOP(t, `{"fantasy":{}}`)
+	repo := t.TempDir()
+	if out, err := execCommand("git", "-C", repo, "init", "-q"); err != nil {
+		t.Skipf("git unavailable: %v\n%s", err, out)
+	}
+	cfg := `project_name: app
+port_stride: 10
+ports:
+  - name: APP_PORT
+    base: 4000
+secrets:
+  store: op
+  vault: fbd
+  item: fantasy
+  account: my.1password.com
+  definitions:
+    ALIAS_ONE:
+      field: shared_field
+      default: ""
+    ALIAS_TWO:
+      field: shared_field
+      default: ""
+outputs:
+  - name: backend
+    out: backend/.env.dev
+    format: dotenv
+    secrets: [ALIAS_ONE, ALIAS_TWO]
+`
+	if err := os.WriteFile(filepath.Join(repo, ".wet.yaml"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(repo)
+	resetEnvFlags(t)
+	worktreeEnv(t, 1)
+
+	src := filepath.Join(repo, "import.env")
+	if err := os.WriteFile(src, []byte("ALIAS_ONE=first\nALIAS_TWO=second\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	envPushFrom, envPushCreateItem = src, true
+	err := runEnvPush(nil, []string{"backend"})
+	if err == nil {
+		t.Fatal("two values for one destination field were accepted")
+	}
+	if !strings.Contains(err.Error(), "shared_field") {
+		t.Errorf("err should name the contested field, got: %v", err)
+	}
+
+	// The same value under both names is the legitimate case and must work.
+	if err := os.WriteFile(src, []byte("ALIAS_ONE=same\nALIAS_TWO=same\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := runEnvPush(nil, []string{"backend"}); err != nil {
+		t.Fatalf("one credential under two names should push: %v", err)
+	}
+}
+
+// `wet op vault` writes the overlay to the checkout the LOADER reads it from —
+// the one holding the trunk, not the current worktree. Writing it beside a
+// worktree printed "Remembered" while writing a file nothing ever reads, and
+// the next pull still said "no vault".
+func TestOPVaultRemembersWhereTheLoaderReads(t *testing.T) {
+	requireJQ(t)
+	stubOP(t, `{"fantasy":{}}`)
+	repo := opRepo(t)
+	resetEnvFlags(t)
+	opNoRemember = false
+	// A value on the command line is remembered too: the user said which vault
+	// they want, and asking again next run is the same surprise.
+	opFlags = opTargetFlags{account: "my.1password.com", vault: "picked-vault"}
+
+	if err := runOPVault(nil, nil); err != nil {
+		t.Fatalf("op vault: %v", err)
+	}
+	// The assertion that matters: the loader must SEE it. Reading the file
+	// directly would pass even if it landed in a directory nothing reads.
+	cfg, err := LoadWetConfigWithLocal(repo, LocalConfigDir(repo, repo))
+	if err != nil {
+		t.Fatalf("load after remember: %v", err)
+	}
+	if cfg.Secrets.Vault != "picked-vault" {
+		t.Errorf("the loader does not see the remembered vault: %q", cfg.Secrets.Vault)
+	}
+}
+
+// The design makes this the authorization boundary in so many words:
+// "Presence in secrets.definitions plus selection by the named output is the
+// authorization boundary for every push." It had no guard, so a regression
+// that let any declared secret through — or any key in the file — would have
+// been silent.
+func TestEnvPushWritesOnlyWhatTheOutputSelects(t *testing.T) {
+	requireJQ(t)
+	_, state := stubOP(t, `{"fantasy":{}}`)
+	repo := opRepo(t)
+	resetEnvFlags(t)
+	worktreeEnv(t, 1)
+
+	src := filepath.Join(repo, "mixed.env")
+	if err := os.WriteFile(src, []byte(
+		// Selected by backend:
+		"SECRET_KEY_BASE=real-key\n"+
+			// A DEFINED secret that backend does not select (mobile's, in the
+			// fixture's terms). Being defined must not make it pushable here.
+			"APPLE_KEY_ID=apple-should-not-move\n"+
+			// An ordinary value, and a name wet has never heard of.
+			"AUTH_BASE_URL=http://localhost:4010\n"+
+			"TOTALLY_UNKNOWN=nope\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	envPushFrom, envPushCreateItem = src, true
+	if err := runEnvPush(nil, []string{"backend"}); err != nil {
+		t.Fatalf("push: %v", err)
+	}
+
+	got := readFileString(t, state)
+	if !strings.Contains(got, "real-key") {
+		t.Errorf("the selected secret was not written:\n%s", got)
+	}
+	for _, forbidden := range []string{
+		"apple-should-not-move", // defined, but not selected by this output
+		"apple_key_id",
+		"http://localhost:4010", // ordinary configuration
+		"nope",                  // undeclared entirely
+		"TOTALLY_UNKNOWN",
 	} {
-		if err := os.MkdirAll(filepath.Join(repo, dir), 0o755); err != nil {
-			t.Fatal(err)
+		if strings.Contains(got, forbidden) {
+			t.Errorf("push wrote %q, which the backend output does not select:\n%s", forbidden, got)
 		}
-		if err := os.WriteFile(filepath.Join(repo, dir, ".env.tpl"), []byte(body), 0o644); err != nil {
-			t.Fatal(err)
-		}
+	}
+}
+
+// A store read is now on the first-run path of every fresh clone, so an `op`
+// that never answers must not turn `wet setup` into a hang. This is the case
+// `policy: fallback` promises to survive ("authentication is unavailable"),
+// and it could not survive it while the read was unbounded — there was no
+// failure yet for the policy to act on.
+//
+// THREE secrets, and the assertion is on TOTAL wall clock, because a per-call
+// bound is not a bound on the run. The first version of this test declared one
+// secret: it proved a single read was bounded and was blind to a pull paying
+// the timeout once per secret, which is how "no longer hangs" came back as
+// twenty-one minutes for the design doc's own ten-secret example.
+//
+// The subtlety worth keeping: killing `op` is not enough. Its children inherit
+// the stdout pipe, so `Wait` blocks as long as the child lives regardless of
+// the context. Without cmd.WaitDelay this test hangs rather than fails.
+func TestStoreReadIsBoundedSoFallbackCanApply(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	stub := t.TempDir()
+	if err := os.WriteFile(filepath.Join(stub, "op"), []byte("#!/bin/sh\nsleep 600\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", stub+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv(opTimeoutEnv, "1")
+
+	cfg := loadTestConfig(t, `project_name: app
+port_stride: 10
+ports:
+  - { name: APP_PORT, base: 4000 }
+env:
+  DEV_HOST: localhost
+secrets:
+  store: op
+  policy: fallback
+  vault: V
+  item: I
+  definitions:
+    ONE:
+      field: one
+      default: 'd1'
+    TWO:
+      field: two
+      default: 'd2'
+    THREE:
+      field: three
+      default: 'd3'
+outputs:
+  - name: backend
+    out: backend/.env.dev
+    format: dotenv
+    include: [DEV_HOST]
+    secrets: [ONE, TWO, THREE]
+`)
+
+	type result struct {
+		tree string
+		err  error
+	}
+	done := make(chan result, 1)
+	start := time.Now()
+	go func() {
+		tree, _, err := pullInto(t, PullRequest{Cfg: cfg, Data: worktreeData(t, cfg, 1, nil)})
+		done <- result{tree, err}
+	}()
+
+	var got result
+	select {
+	case got = <-done:
+	case <-time.After(90 * time.Second):
+		t.Fatal("the pull never returned — an unresponsive store must not hang setup")
+	}
+	elapsed := time.Since(start)
+	if got.err != nil {
+		t.Fatalf("fallback should have carried the pull: %v", got.err)
 	}
 
-	cfg, err := LoadWetConfig(repo)
-	if err != nil {
-		t.Fatalf("load config: %v", err)
+	// One timeout plus one WaitDelay, not three of each. The bound is generous
+	// enough not to flake on a loaded machine and still far below the 3x cost
+	// of the defect (~18s here).
+	if elapsed > 12*time.Second {
+		t.Errorf("the pull paid the timeout more than once: %s for 3 secrets — "+
+			"an unreachable store must be discovered once, not per secret", elapsed)
 	}
-	for _, target := range cfg.Render {
-		values, err := readSectionSecrets(cfg, target.Secrets)
-		if err != nil {
-			t.Fatalf("readSectionSecrets(%s): %v", target.Secrets, err)
-		}
-		if target.Secrets == "backend" {
-			if values["SECRET_KEY_BASE"] != "base123" {
-				t.Errorf("backend SECRET_KEY_BASE = %q, want base123", values["SECRET_KEY_BASE"])
-			}
-			if _, leaked := values["APPLE_KEY_ID"]; leaked {
-				t.Error("the backend section resolved a mobile-only key")
-			}
-		}
-		if target.Secrets == "mobile" {
-			if values["APPLE_KEY_ID"] != "akid" {
-				t.Errorf("mobile APPLE_KEY_ID = %q, want akid", values["APPLE_KEY_ID"])
-			}
-			if _, leaked := values["SECRET_KEY_BASE"]; leaked {
-				t.Error("the mobile section resolved a backend-only key")
-			}
-		}
-		if values["GOOGLE_CLIENT_ID"] != "gid" {
-			t.Errorf("%s GOOGLE_CLIENT_ID = %q, want the shared value", target.Secrets, values["GOOGLE_CLIENT_ID"])
+	body := readOutput(t, got.tree, "backend/.env.dev")
+	for _, want := range []string{"ONE=d1", "TWO=d2", "THREE=d3"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("declared default missing after the store timed out (%s):\n%s", want, body)
 		}
 	}
+}
 
-	// A target with no section fetches nothing at all — no vault round trip
-	// for a repo that does not use secrets.
-	if values, err := readSectionSecrets(cfg, ""); err != nil || values != nil {
-		t.Errorf("readSectionSecrets(\"\") = %v, %v; want no values and no error", values, err)
+// Without the guard `resolveOPTarget` dereferences a nil cfg.Secrets. A repo
+// with no secrets: block is a normal repo, not a crash.
+func TestOPVaultWithoutASecretsBlock(t *testing.T) {
+	requireJQ(t)
+	stubOP(t, `{}`)
+	repo := t.TempDir()
+	if out, err := execCommand("git", "-C", repo, "init", "-q"); err != nil {
+		t.Skipf("git unavailable: %v\n%s", err, out)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".wet.yaml"),
+		[]byte("project_name: app\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(repo)
+	resetEnvFlags(t)
+	err := runOPVault(nil, nil)
+	if err == nil {
+		t.Fatal("expected an error for a config with no secrets: block")
+	}
+	if !strings.Contains(err.Error(), "secrets:") {
+		t.Errorf("err should say what is missing, got: %v", err)
 	}
 }

@@ -8,15 +8,19 @@ import (
 	"strings"
 )
 
-// starterConfigTemplate is the body of a scaffolded .wet.yaml, with one %s for
-// the derived project name.
+// starterConfigTemplate is the body of a scaffolded .wet.yaml, taking the
+// derived project name and the name of the outputs: entry `wet secrets setup`
+// scaffolds into. The output name is substituted rather than written literally
+// so the starter and the scaffolder cannot drift into naming two different
+// files, which would leave a provider's env: half in one and its secrets half
+// in another.
 //
 // It is deliberately NOT the bundled cmd/wet.example.yaml. That file
-// illustrates the whole schema against a fictional project — it renders
-// .env.example.tpl and claims emulator: pool items — so a repo seeded with it
-// verbatim fails its very next setup on a render target that does not exist.
-// The annotated example is for reading; this is for running, and every live
-// line here resolves against a fresh checkout.
+// illustrates the whole schema against a fictional project — it claims
+// emulator: pool items and declares secrets whose vault nobody has — so a repo
+// seeded with it verbatim fails its very next setup. The annotated example is
+// for reading; this is for running, and every live line here resolves against
+// a fresh checkout.
 //
 // The env: block is not arbitrary house style. The shipped secret catalog
 // already depends on it: the google group writes
@@ -30,7 +34,7 @@ const starterConfigTemplate = `# .wet.yaml — see the annotated schema for ever
 #   .claude/skills/wet/` + exampleConfigFileName + `  (after ` + "`wet install wet-skill`" + `)
 #   https://github.com/devda/wet/blob/main/cmd/` + exampleConfigFileName + `
 
-project_name: %s
+project_name: %[1]s
 
 # Each port advances by port_stride per worktree: slot N gets base + N*stride,
 # so slot 1 of PHX_PORT is 4010. Rename or drop the ones you do not listen on —
@@ -57,6 +61,31 @@ env:
   # them from PHX_PORT.
   AUTH_BASE_URL: "http://{{.DEV_HOST}}:{{.PHX_PORT}}"
   HYDRA_PUBLIC_URL: "http://{{.DEV_HOST}}:{{.HYDRA_PUBLIC_PORT}}"
+
+# The env files this repo generates, written by ` + "`wet setup`" + ` and regenerated on
+# demand with ` + "`wet env pull`" + `. Each output lists the keys it carries, so this file
+# alone answers what your app reads — there is no checked-in .env.tpl to keep
+# in sync, and a key not listed here simply is not in the file.
+#
+# ` + "`wet secrets setup`" + ` appends to the output named %[2]q, so keep that name if
+# you plan to scaffold provider keys. In a monorepo, point out: at the package
+# that reads it (backend/.env.dev) and add one entry per package; missing
+# parent directories are created.
+#
+# EVERY out: path must be gitignored. It is regenerated per worktree with that
+# worktree's own ports, and it is where secrets land once you declare any — a
+# committed one is both permanently wrong for everyone else and the leak this
+# whole model exists to prevent. wet added the path below to .gitignore when it
+# wrote this file; add the entry yourself for any output you add.
+outputs:
+  - name: %[2]s
+    out: ` + starterOutputFile + `
+    format: dotenv
+    include:
+      - DEV_HOST
+      - PHX_PORT
+      - AUTH_BASE_URL
+      - HYDRA_PUBLIC_URL
 
 # Uncomment for a Flutter project with emulators. Both halves are needed:
 # FLUTTER_DEVICE_ID reads the pool, so declaring it without the pool fails the
@@ -89,11 +118,70 @@ func scaffoldStarterConfig(dir string) (string, error) {
 		return "", fmt.Errorf("stat %s: %w", path, err)
 	}
 
-	body := fmt.Sprintf(starterConfigTemplate, defaultProjectName(dir))
+	body := fmt.Sprintf(starterConfigTemplate, defaultProjectName(dir), defaultScaffoldOutput)
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		return "", fmt.Errorf("write %s: %w", path, err)
 	}
+	if err := ignoreStarterOutputs(dir); err != nil {
+		return "", err
+	}
 	return path, nil
+}
+
+// starterOutputFile is the out: path the starter declares. It is a constant
+// because two things must agree on it — the config wet writes and the
+// .gitignore entry that keeps it out of the repo — and a comment asking the
+// user to keep them in sync is exactly the instruction that gets skipped.
+const starterOutputFile = ".env.dev"
+
+// ignoreStarterOutputs adds the starter's generated env file to .gitignore.
+//
+// This is not advice in a comment for a reason. The file holds this worktree's
+// ports, and every secret once any is declared; committing it is wrong for
+// every other checkout and leaks credentials to anyone with repo access. The
+// starter is the one config nobody reviews before the first `wet setup`, so
+// the guard has to be applied rather than described.
+//
+// A missing .gitignore is created; an entry already present is left alone, so
+// re-running changes nothing. Matching is line-exact rather than by substring:
+// a repo ignoring `.env.dev.sample` must not be read as already ignoring
+// `.env.dev`.
+func ignoreStarterOutputs(dir string) error {
+	return ignoreGeneratedOutput(dir, starterOutputFile)
+}
+
+// ignoreGeneratedOutput adds one generated path to .gitignore. See
+// ignoreStarterOutputs for why this is applied rather than described — and it
+// applies to every path wet invents, not just the starter's: `wet secrets
+// setup --output web` creates `web/.env.dev` carrying real credentials, and an
+// output born gitignored is the only version of that guard that holds.
+func ignoreGeneratedOutput(dir, out string) error {
+	path := filepath.Join(dir, ".gitignore")
+	existing, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+	content := string(existing)
+	for _, line := range strings.Split(content, "\n") {
+		if strings.TrimSpace(line) == out {
+			return nil
+		}
+	}
+
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", path, err)
+	}
+	defer f.Close()
+	if len(content) > 0 && !strings.HasSuffix(content, "\n") {
+		fmt.Fprintln(f)
+	}
+	fmt.Fprintf(f, "\n# Generated by wet — one per worktree, with this worktree's ports and\n"+
+		"# whatever secrets its output declares. Never commit it.\n%s\n", out)
+	// Worded to stand on its own: the caller prints its own narrative around
+	// this call, and this line lands before it.
+	fmt.Printf("  wet keeps generated env files out of git: added %s to .gitignore.\n", out)
+	return nil
 }
 
 var projectNameStripRE = regexp.MustCompile(`[^a-z0-9_-]+`)

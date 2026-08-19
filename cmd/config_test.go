@@ -472,11 +472,12 @@ func TestExampleConfigIsValid(t *testing.T) {
 	}
 }
 
-// The example template and the example config are two halves of one worked
-// example. If a hook in the config names a template that doesn't exist, or
-// the template references a port the config doesn't declare, anyone copying
-// the pair gets a broken setup on their first run.
-func TestExampleTemplateRendersAgainstExampleConfig(t *testing.T) {
+// The example config is now a complete worked example on its own: there is no
+// second half to keep in sync, because the outputs it declares carry their own
+// key list. What still has to hold is that the example generates real files
+// whose per-slot values actually differ — an example whose output is identical
+// in every worktree teaches the one thing wet exists to prevent.
+func TestExampleConfigGeneratesPerSlotOutputs(t *testing.T) {
 	dir := t.TempDir()
 	cfgBody, err := os.ReadFile("wet.example.yaml")
 	if err != nil {
@@ -489,69 +490,48 @@ func TestExampleTemplateRendersAgainstExampleConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load example config: %v", err)
 	}
-
-	tplPath := filepath.Join("..", ".env.example.tpl")
-	tplBody, err := os.ReadFile(tplPath)
-	if err != nil {
-		t.Fatalf("read example template: %v", err)
+	if len(cfg.Outputs) == 0 {
+		t.Fatal("example config declares no outputs:; the worked example lost its point")
 	}
 
-	// Every template the example declares must actually exist, relative to
-	// the repo root the pair ships in. This is the check that matters: the
-	// hook scan below covers only what a hook names inline, and the example's
-	// live post_create hook is an `echo`, so without this loop a `render:`
-	// entry pointing at a nonexistent template passed the whole suite.
-	if len(cfg.Render) == 0 {
-		t.Fatal("example config declares no render targets; the worked example lost its point")
-	}
-	for _, r := range cfg.Render {
-		if _, err := os.Stat(filepath.Join("..", r.Template)); err != nil {
-			t.Errorf("render target %q names template %q, which does not exist: %v", r.Out, r.Template, err)
-		}
-	}
-
-	// Every file the example's hooks render must actually exist, relative to
-	// the repo root the pair ships in.
-	for _, hook := range cfg.Hooks.PostCreate {
-		fields := strings.Fields(hook)
-		for i, f := range fields {
-			if f == "populate" && i+1 < len(fields) {
-				named := filepath.Join("..", fields[i+1])
-				if _, err := os.Stat(named); err != nil {
-					t.Errorf("hook renders %q, which does not exist: %v", fields[i+1], err)
-				}
-			}
-		}
-	}
-
-	// Render at slot 0 (main) and a worktree slot; both must succeed, and the
-	// ports must differ between them.
-	renderAt := func(slot int) string {
+	pullAt := func(slot int) string {
+		tree := t.TempDir()
 		ports := cfg.ResolvePorts(slot)
 		pools := map[string]string{}
 		for name, items := range cfg.Pools {
 			pools[name] = items[0]
 		}
 		data := BuildTemplateData(cfg, "feature/example", slot, ports, pools)
-		data, err := withRenderedEnv(cfg, data)
-		if err != nil {
-			t.Fatalf("slot %d: env: block does not render: %v", slot, err)
+		if _, err := ResolveEnvValues(cfg, data, nil); err != nil {
+			t.Fatalf("slot %d: env: block does not resolve: %v", slot, err)
 		}
-		out, err := renderWetTemplate("example.tpl", string(tplBody), data)
-		if err != nil {
-			t.Fatalf("slot %d: example template does not render: %v", slot, err)
+		var log strings.Builder
+		if err := PullOutputs(PullRequest{
+			Cfg: cfg, TreePath: tree, Data: data,
+			Policy: SecretPolicyDisabled, Out: &log,
+		}); err != nil {
+			t.Fatalf("slot %d: example outputs do not generate: %v", slot, err)
 		}
-		return out
+		var all strings.Builder
+		for _, o := range cfg.Outputs {
+			body, err := os.ReadFile(filepath.Join(tree, o.Out))
+			if err != nil {
+				t.Fatalf("slot %d: %s was not written: %v", slot, o.Out, err)
+			}
+			all.Write(body)
+		}
+		return all.String()
 	}
-	main, worktree := renderAt(0), renderAt(1)
+
+	main, worktree := pullAt(0), pullAt(1)
 	if main == worktree {
-		t.Error("slot 0 and slot 1 rendered identically — the template interpolates no per-slot value")
+		t.Error("slot 0 and slot 1 generated identical files — no output carries a per-slot value")
 	}
 	if !strings.Contains(main, "localhost:4000") {
-		t.Errorf("slot 0 should render the declared base port, got:\n%s", main)
+		t.Errorf("slot 0 should carry the declared base port, got:\n%s", main)
 	}
 	if !strings.Contains(worktree, "localhost:4010") {
-		t.Errorf("slot 1 should render base+stride, got:\n%s", worktree)
+		t.Errorf("slot 1 should carry base+stride, got:\n%s", worktree)
 	}
 }
 
@@ -789,8 +769,8 @@ func TestLocalConfigComesFromTheTrunkCheckout(t *testing.T) {
 // a `#` anywhere in the file, which meant a live key could rot into a comment
 // and still pass — commenting out `port_stride: 10` was undetectable. It was
 // also path-blind (it matched on the leaf name alone), so the commented
-// `render:` block vouched for a `template:` or `out:` leaf on any struct.
-// Now the escape hatch is a reviewable list of three paths, each pinned to
+// `outputs:` block vouched for an `out:` or `format:` leaf on any struct.
+// Now the escape hatch is a reviewable list of paths, each pinned to
 // the shape it is allowed to be documented as.
 func TestExampleConfigCoversSchema(t *testing.T) {
 	body, err := os.ReadFile("wet.example.yaml")
@@ -805,7 +785,7 @@ func TestExampleConfigCoversSchema(t *testing.T) {
 	collectYAMLPaths(&root, "", live)
 
 	for _, path := range schemaYAMLPaths(t, reflect.TypeOf(WetConfig{}), "") {
-		if live[path] {
+		if livePath(live, path) {
 			if _, exempt := commentedSchemaKeys[path]; exempt {
 				t.Errorf("schema key %q is now a live key in cmd/wet.example.yaml; "+
 					"drop it from commentedSchemaKeys so the strict check applies", path)
@@ -826,6 +806,33 @@ func TestExampleConfigCoversSchema(t *testing.T) {
 	}
 }
 
+// livePath reports whether a schema path is present in the parsed document,
+// treating a "*" segment as "any one user-chosen key" — that is how a map of
+// structs like secrets.definitions is expressed.
+func livePath(live map[string]bool, path string) bool {
+	if !strings.Contains(path, "*") {
+		return live[path]
+	}
+	want := strings.Split(path, ".")
+	for got := range live {
+		parts := strings.Split(got, ".")
+		if len(parts) != len(want) {
+			continue
+		}
+		match := true
+		for i := range want {
+			if want[i] != "*" && want[i] != parts[i] {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
+}
+
 // commentedSchemaKeys are the schema paths cmd/wet.example.yaml documents by
 // showing them commented out rather than live, mapped to the exact commented
 // line each must still have. Both halves matter: without the map the key
@@ -840,21 +847,27 @@ var commentedSchemaKeys = map[string]*regexp.Regexp{
 	"pool_grow": regexp.MustCompile(`(?m)^# pool_grow:$`),
 	// A PR body override; the default body is what most repos want.
 	"pr.body_template": regexp.MustCompile(`(?m)^\s+# body_template: \|$`),
-	// Secret sources belong to a specific render target, so they are
-	// illustrated inside the commented extra targets.
-	"render[].secrets_from": regexp.MustCompile(`(?m)^\s+#\s+secrets_from: \[`),
-	// Likewise the section a target consumes — meaningless without a
-	// secrets: block, so it is shown in the same commented targets.
-	"render[].secrets": regexp.MustCompile(`(?m)^\s+#\s+secrets: \w+`),
+	// A non-default file mode is the exception, so it is illustrated rather
+	// than applied to the example's own outputs.
+	"outputs[].mode": regexp.MustCompile(`(?m)^\s*#\s+mode: "0\d{3}"`),
 	// The whole secrets: block is optional and names a real vault, so a live
 	// example would send anyone running the example config at a vault that
 	// isn't theirs. Each leaf is pinned to the shape it is documented as.
-	"secrets":          regexp.MustCompile(`(?m)^# secrets:$`),
-	"secrets.store":    regexp.MustCompile(`(?m)^#\s+store: op$`),
-	"secrets.vault":    regexp.MustCompile(`(?m)^#\s+vault: \S+`),
-	"secrets.item":     regexp.MustCompile(`(?m)^#\s+item: \S+`),
-	"secrets.account":  regexp.MustCompile(`(?m)^#\s+account: \S+`),
-	"secrets.sections": regexp.MustCompile(`(?m)^#\s+sections:$`),
+	"secrets":                       regexp.MustCompile(`(?m)^# secrets:$`),
+	"secrets.store":                 regexp.MustCompile(`(?m)^#\s+store: op$`),
+	"secrets.policy":                regexp.MustCompile(`(?m)^#\s+policy: \w+`),
+	"secrets.vault":                 regexp.MustCompile(`(?m)^#\s+vault: \S+`),
+	"secrets.item":                  regexp.MustCompile(`(?m)^#\s+item: \S+`),
+	"secrets.account":               regexp.MustCompile(`(?m)^#\s+account: \S+`),
+	"secrets.definitions":           regexp.MustCompile(`(?m)^#\s+definitions:$`),
+	"secrets.definitions.*.field":   regexp.MustCompile(`(?m)^#\s+field: \S+`),
+	"secrets.definitions.*.default": regexp.MustCompile(`(?m)^#\s+default:`),
+	"secrets.definitions.*.vault":   regexp.MustCompile(`(?m)^#\s+vault: \S+`),
+	"secrets.definitions.*.item":    regexp.MustCompile(`(?m)^#\s+item: \S+`),
+	"secrets.definitions.*.ref":     regexp.MustCompile(`(?m)^#\s+ref: op://`),
+	// An output's secrets: list is meaningless without a secrets: block, so
+	// it is illustrated in the same commented example.
+	"outputs[].secrets": regexp.MustCompile(`(?m)^\s*#\s+secrets:$`),
 }
 
 // schemaYAMLPaths walks a config struct and returns the dotted path of every
@@ -891,10 +904,12 @@ func schemaYAMLPaths(t *testing.T, typ reflect.Type, prefix string) []string {
 			for elem.Kind() == reflect.Ptr || elem.Kind() == reflect.Slice {
 				elem = elem.Elem()
 			}
+			// A map of structs (secrets.definitions) carries schema under a
+			// user-chosen key, so the walk continues through a "*" segment
+			// that matches any one key. Stopping here instead would let a new
+			// SecretDefinition field go undocumented with nothing to notice.
 			if elem.Kind() == reflect.Struct {
-				t.Fatalf("%s is a map of structs; schemaYAMLPaths cannot walk it, "+
-					"so its nested keys would go undocumented unnoticed. Teach the "+
-					"walker to descend through map values before adding this field.", path)
+				out = append(out, schemaYAMLPaths(t, elem, path+".*")...)
 			}
 			continue
 		}

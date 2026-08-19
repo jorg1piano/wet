@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"text/template"
@@ -30,7 +31,7 @@ type WetConfig struct {
 	Ports       []PortConfig        `yaml:"ports"`
 	Env         map[string]string   `yaml:"env"`
 	Hooks       HooksConfig         `yaml:"hooks"`
-	Render      []RenderTarget      `yaml:"render,omitempty"`
+	Outputs     []OutputConfig      `yaml:"outputs,omitempty"`
 	Secrets     *SecretsConfig      `yaml:"secrets,omitempty"`
 	Pools       map[string][]string `yaml:"pools,omitempty"`
 	PoolGrow    map[string]string   `yaml:"pool_grow,omitempty"`
@@ -41,26 +42,104 @@ type WetConfig struct {
 	LocalKeys []string `yaml:"-"`
 }
 
-// RenderTarget is one template → output pair, rendered by `wet env populate`
-// (and by `wet setup`, before hooks run).
+// OutputConfig is one generated environment file, declared inline in
+// `.wet.yaml`.
 //
-// A monorepo has one per package: web_elixir/.env.tpl → web_elixir/.env.dev,
-// mobile_elixir/.env.tpl → mobile_elixir/.env. Each carries its own secret
-// sources, because packages don't need the same secrets — a backend needs the
-// vault, a mobile app usually needs nothing.
+// It replaces the old `render:` template pairs. A dotenv file needs no
+// free-form template: wet already knows every value, so the only thing left to
+// declare is which of them the file carries and under what key. Keeping that
+// list here rather than in a checked-in `.env.tpl` is what makes `.wet.yaml`
+// the single inventory — one file answers which files are generated, which
+// keys each holds, and which of those keys are secrets.
 //
-// Declaring targets here rather than as hook strings is what makes
-// `wet env populate --all --dry-run` possible: wet can report every file it
-// would write for this slot, which opaque `sh -c` lines can't.
-type RenderTarget struct {
-	Template    string   `yaml:"template"`
-	Out         string   `yaml:"out"`
-	SecretsFrom []string `yaml:"secrets_from,omitempty"`
-	// Secrets names a section of the top-level secrets: block, whose keys are
-	// fetched from the store and merged in like any other --secrets-from
-	// source. It is a label, not a path: the same section can feed two
-	// targets, and the vault never learns which directory consumes it.
-	Secrets string `yaml:"secrets,omitempty"`
+// Secrets are scoped per output, never global: a mobile app's `.env` cannot
+// pick up a backend credential just because the credential is defined.
+type OutputConfig struct {
+	// Name is the stable CLI identifier: `wet env pull backend`.
+	Name string `yaml:"name"`
+	// Out is the generated file, relative to the checkout being configured.
+	Out string `yaml:"out"`
+	// Format selects the encoder. Only "dotenv" is implemented.
+	Format string `yaml:"format"`
+	// Mode is the file mode as an octal string ("0644"). Empty means 0600,
+	// because a generated env file may carry secrets and outlives the command.
+	Mode string `yaml:"mode,omitempty"`
+	// Include names ordinary values, ports, or reserved fields, keeping their
+	// own name as the output key.
+	Include []string `yaml:"include,omitempty"`
+	// Secrets names entries of secrets.definitions. A definition not named
+	// here is invisible to this output.
+	Secrets []string `yaml:"secrets,omitempty"`
+	// Values carries renamed and literal keys, in declaration order.
+	Values OutputValues `yaml:"values,omitempty"`
+}
+
+// OutputValues is `values:` — an output key to a source, preserving the order
+// written in the YAML so the generated file reads the way the config does.
+type OutputValues struct {
+	Keys []string
+	By   map[string]OutputValue
+}
+
+// OutputValue is one `values:` entry. Exactly one of From and Literal is set.
+type OutputValue struct {
+	// From names an ordinary value, port, or reserved field. Secrets are
+	// deliberately not reachable: they are emitted only through `secrets:`
+	// and keep their logical name, so a rename can never smuggle one into an
+	// output that did not select it.
+	From string `yaml:"from,omitempty"`
+	// Literal is a fixed scalar. A pointer so an intentional empty literal is
+	// distinguishable from "no literal given".
+	Literal *string `yaml:"literal,omitempty"`
+}
+
+// UnmarshalYAML decodes `values:` while remembering key order. yaml.v3 decodes
+// a mapping into a Go map, which loses the order, and the order is what makes
+// the generated file readable.
+func (v *OutputValues) UnmarshalYAML(node *yaml.Node) error {
+	// An explicitly empty `values:` is a mapping the user is still filling
+	// in, not a broken config; the "declares no keys" check catches an output
+	// that ends up with nothing.
+	if node.Tag == "!!null" {
+		return nil
+	}
+	if node.Kind != yaml.MappingNode {
+		return fmt.Errorf("values: must be a mapping of output key to {from|literal}")
+	}
+	v.Keys = make([]string, 0, len(node.Content)/2)
+	v.By = make(map[string]OutputValue, len(node.Content)/2)
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		key := node.Content[i].Value
+		if key == "" {
+			return errors.New("values: output key must not be empty")
+		}
+		if _, dup := v.By[key]; dup {
+			return fmt.Errorf("values.%s: declared twice", key)
+		}
+		var val OutputValue
+		if err := node.Content[i+1].Decode(&val); err != nil {
+			return fmt.Errorf("values.%s: %w", key, err)
+		}
+		v.Keys = append(v.Keys, key)
+		v.By[key] = val
+	}
+	return nil
+}
+
+// MarshalYAML round-trips the ordered form, so a config wet rewrites (the
+// scaffolder, `wet op` remembering a vault) keeps its `values:` order.
+func (v OutputValues) MarshalYAML() (any, error) {
+	node := &yaml.Node{Kind: yaml.MappingNode}
+	for _, k := range v.Keys {
+		val := v.By[k]
+		valNode := &yaml.Node{}
+		if err := valNode.Encode(val); err != nil {
+			return nil, err
+		}
+		node.Content = append(node.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: k}, valNode)
+	}
+	return node, nil
 }
 
 // PRConfig optionally configures `wet pr create` behavior.
@@ -69,29 +148,92 @@ type PRConfig struct {
 	BodyTemplate string `yaml:"body_template,omitempty"` // Go text/template for PR body
 }
 
-// SecretsConfig describes where this repo's secrets live and which of them
-// each render target needs.
+// SecretsConfig declares where this repo's secrets live and what each one is
+// called, once, for the whole repo.
 //
-// Sections are the second dimension: `backend` and `mobile` are labels for
-// consumers, not for storage. Both can name the same field of the same item —
-// GOOGLE_CLIENT_ID is one credential whether the backend or the app reads it —
-// so the vault stays free of per-consumer duplicates, and a rotation is one
-// edit.
+// A definition is a name plus a place in the store, never a value. Which
+// outputs may see a definition is decided by the outputs — an output's
+// `secrets:` list is the authorization boundary, so defining a credential does
+// not hand it to every generated file.
+//
+// One definition per credential, shared by name: GOOGLE_CLIENT_ID is one
+// credential whether the backend or a deployment reads it, so the store stays
+// free of per-consumer duplicates and a rotation is one edit.
 type SecretsConfig struct {
 	// Store is the secret manager. Only "op" (1Password) is implemented; the
 	// field exists so a second store is a value here rather than a rewrite.
 	Store string `yaml:"store"`
-	// Vault and Item may be empty: `wet op vault` then asks, and writes the
-	// answer back, so a fresh clone is not a scavenger hunt for names.
+	// Policy decides what happens when the store cannot answer. See
+	// SecretPolicy* — the default is "fallback".
+	Policy string `yaml:"policy,omitempty"`
+	// Vault and Item are the default destination. Both may be empty: `wet op
+	// vault` then asks and writes the answer to .wet.local.yaml, so a fresh
+	// clone is not a scavenger hunt for names.
 	Vault string `yaml:"vault,omitempty"`
 	Item  string `yaml:"item,omitempty"`
 	// Account is the 1Password account (sign-in address or UUID). Empty means
 	// whichever account the shell is signed into, or ask when ambiguous.
 	Account string `yaml:"account,omitempty"`
-	// Sections maps a section name to its env keys: ENV_KEY -> field name on
-	// Item, "Other Item/field" for a different item in the same vault, or a
-	// full "op://vault/item/field".
-	Sections map[string]map[string]string `yaml:"sections"`
+	// Definitions maps a logical secret name to its place in the store.
+	Definitions map[string]SecretDefinition `yaml:"definitions"`
+}
+
+// SecretDefinition is one credential: what it is called here, where it lives
+// in the store, and what stands in for it when the store cannot be reached.
+type SecretDefinition struct {
+	// Field is the field on the item. Required unless Ref is given.
+	Field string `yaml:"field,omitempty"`
+	// Vault and Item override the block-level destination for this one secret.
+	Vault string `yaml:"vault,omitempty"`
+	Item  string `yaml:"item,omitempty"`
+	// Ref is a full "op://vault/item/field", mutually exclusive with the
+	// component fields above.
+	Ref string `yaml:"ref,omitempty"`
+	// Default stands in under the `fallback` policy. A pointer because an
+	// explicit empty string is a real, deliberate default ("this provider is
+	// simply not configured locally") and differs from having none at all,
+	// which is an error the developer must see.
+	Default *string `yaml:"default,omitempty"`
+}
+
+// HasDefault reports whether a usable fallback was declared, empty or not.
+func (d SecretDefinition) HasDefault() bool { return d.Default != nil }
+
+// DefaultValue returns the declared fallback, or "" when there is none.
+func (d SecretDefinition) DefaultValue() string {
+	if d.Default == nil {
+		return ""
+	}
+	return *d.Default
+}
+
+// Secret policies decide what wet does when the configured store cannot
+// answer. They exist because automatic secret loading must not make a fresh
+// clone ambiguous: silently substituting an empty string for SENTRY_DSN reads
+// as "error reporting is configured" right up until it isn't.
+const (
+	// SecretPolicyRequired: the store must answer for every selected secret.
+	// A declared default does not paper over a store failure.
+	SecretPolicyRequired = "required"
+	// SecretPolicyFallback: try the store, fall back to the declared default,
+	// and always say out loud which names fell back.
+	SecretPolicyFallback = "fallback"
+	// SecretPolicyDisabled: never contact the store. For offline work and
+	// deterministic tests.
+	SecretPolicyDisabled = "disabled"
+)
+
+// SecretPolicies lists every accepted policy, for validation and errors.
+var SecretPolicies = []string{SecretPolicyRequired, SecretPolicyFallback, SecretPolicyDisabled}
+
+// PolicyOrDefault is the effective policy: what the config says, or
+// "fallback". Fallback is the default because it is the only one under which a
+// fresh clone with no store access still boots, and it is not silent.
+func (s *SecretsConfig) PolicyOrDefault() string {
+	if s == nil || s.Policy == "" {
+		return SecretPolicyFallback
+	}
+	return s.Policy
 }
 
 // CopyConfig lists files and directories copied from the main repo into each
@@ -208,9 +350,18 @@ func LoadWetConfigWithLocal(configDir, localDir string) (*WetConfig, error) {
 		}
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
-	var base map[string]any
+	// The merge happens on the parsed node tree, not on a map[string]any.
+	// A map has no order, and `outputs[].values:` is order-sensitive by
+	// design — its declaration order IS the generated file's key order. A
+	// map round trip silently alphabetized it, which turned every pull into
+	// a file whose keys had nothing to do with the config it was read from.
+	var base yaml.Node
 	if err := yaml.Unmarshal(data, &base); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	baseRoot := documentRoot(&base)
+	if baseRoot == nil {
+		return nil, fmt.Errorf("%s: top level must be a mapping", path)
 	}
 
 	// An empty localDir means no overlay. Joining onto "" would produce a
@@ -220,18 +371,20 @@ func LoadWetConfigWithLocal(configDir, localDir string) (*WetConfig, error) {
 	localPath := ""
 	if localDir != "" {
 		localPath = filepath.Join(localDir, wetLocalConfigFileName)
-		overridden, err = mergeLocalConfig(base, localPath)
+		overridden, err = mergeLocalConfig(baseRoot, localPath)
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	merged, err := yaml.Marshal(base)
-	if err != nil {
-		return nil, fmt.Errorf("merge %s: %w", localPath, err)
+	// The overlay is checked inside mergeLocalConfig, against its own path, so
+	// this one only ever blames the file a removed key actually came from.
+	if err := rejectRemovedKeys(baseRoot, path); err != nil {
+		return nil, err
 	}
+
 	var cfg WetConfig
-	if err := yaml.Unmarshal(merged, &cfg); err != nil {
+	if err := baseRoot.Decode(&cfg); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 	cfg.LocalKeys = overridden
@@ -247,6 +400,44 @@ func LoadWetConfigWithLocal(configDir, localDir string) (*WetConfig, error) {
 	return &cfg, nil
 }
 
+// rejectRemovedKeys fails on the schema wet used to have.
+//
+// `render:` and `secrets.sections:` were the two halves of the old split
+// inventory: a checked-in `.env.tpl` decided an output's keys, and a section
+// decided its secrets. `outputs:` now declares both in one place. Silently
+// ignoring the old keys would be the worst outcome — a config that still
+// parses, generates nothing, and leaves a stale `.env.dev` on disk looking
+// current — so this is a hard error naming the replacement.
+func rejectRemovedKeys(root *yaml.Node, path string) error {
+	if mappingValue(root, "render") != nil {
+		return fmt.Errorf("%s uses the removed `render:` key; declare generated files under `outputs:` "+
+			"and delete the external dotenv templates (see `wet install skill` for the current schema)", path)
+	}
+	if secrets := mappingValue(root, "secrets"); secrets != nil {
+		if mappingValue(secrets, "sections") != nil {
+			return fmt.Errorf("%s uses the removed `secrets.sections:` key; declare each credential once under "+
+				"`secrets.definitions:` and select it per file with an output's `secrets:` list", path)
+		}
+	}
+	return nil
+}
+
+// documentRoot unwraps a parsed document down to its top-level mapping, or
+// returns nil when the file holds anything else.
+func documentRoot(doc *yaml.Node) *yaml.Node {
+	n := doc
+	if n.Kind == yaml.DocumentNode {
+		if len(n.Content) == 0 {
+			return nil
+		}
+		n = n.Content[0]
+	}
+	if n.Kind != yaml.MappingNode {
+		return nil
+	}
+	return n
+}
+
 // mergeLocalConfig overlays wetLocalConfigFileName onto base in place and
 // returns the top-level keys it touched. A missing file is not an error.
 //
@@ -254,7 +445,7 @@ func LoadWetConfigWithLocal(configDir, localDir string) (*WetConfig, error) {
 // restating the rest. Sequences replace wholesale — a local `pools.devices` is
 // *your* device list, not yours appended to a teammate's, and appending would
 // hand you items that don't exist on this machine.
-func mergeLocalConfig(base map[string]any, localPath string) ([]string, error) {
+func mergeLocalConfig(base *yaml.Node, localPath string) ([]string, error) {
 	data, err := os.ReadFile(localPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -262,36 +453,90 @@ func mergeLocalConfig(base map[string]any, localPath string) ([]string, error) {
 		}
 		return nil, fmt.Errorf("read %s: %w", localPath, err)
 	}
-	var local map[string]any
-	if err := yaml.Unmarshal(data, &local); err != nil {
+	var localDoc yaml.Node
+	if err := yaml.Unmarshal(data, &localDoc); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", localPath, err)
 	}
-	keys := make([]string, 0, len(local))
-	for k := range local {
-		keys = append(keys, k)
+	local := documentRoot(&localDoc)
+	if local == nil {
+		// An empty overlay is normal — a file someone created and has not
+		// filled in yet. Anything else at the top level is a mistake worth
+		// naming rather than ignoring.
+		if len(localDoc.Content) == 0 {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("%s: top level must be a mapping", localPath)
+	}
+	// Checked before merging, and against the overlay's own path: after the
+	// merge the key is indistinguishable from one in the committed file, and
+	// telling someone their .wet.yaml uses `render:` when the line is in their
+	// gitignored overlay sends them looking in the wrong file.
+	if err := rejectRemovedKeys(local, localPath); err != nil {
+		return nil, err
+	}
+	var keys []string
+	for i := 0; i+1 < len(local.Content); i += 2 {
+		keys = append(keys, local.Content[i].Value)
+		mergeYAMLNode(base, local.Content[i], local.Content[i+1])
 	}
 	sort.Strings(keys)
-	for _, k := range keys {
-		base[k] = mergeYAMLValue(base[k], local[k])
-	}
 	return keys, nil
 }
 
-// mergeYAMLValue merges one value: maps recurse, everything else replaces.
-func mergeYAMLValue(base, local any) any {
-	baseMap, baseOK := base.(map[string]any)
-	localMap, localOK := local.(map[string]any)
-	if !baseOK || !localOK {
-		return local
+// copyYAMLNode deep-copies a node so an edit to the copy cannot reach whatever
+// else shares the original.
+func copyYAMLNode(n *yaml.Node) *yaml.Node {
+	if n == nil {
+		return nil
 	}
-	out := make(map[string]any, len(baseMap)+len(localMap))
-	for k, v := range baseMap {
-		out[k] = v
+	out := *n
+	out.Content = make([]*yaml.Node, len(n.Content))
+	for i, c := range n.Content {
+		out.Content[i] = copyYAMLNode(c)
 	}
-	for k, v := range localMap {
-		out[k] = mergeYAMLValue(baseMap[k], v)
+	return &out
+}
+
+// mergeYAMLNode sets one key on a mapping: an existing mapping value merges
+// key by key, anything else replaces outright.
+func mergeYAMLNode(into *yaml.Node, key, value *yaml.Node) {
+	for i := 0; i+1 < len(into.Content); i += 2 {
+		if into.Content[i].Value != key.Value {
+			continue
+		}
+		existing := into.Content[i+1]
+		// An alias target would otherwise lose outright: it is not a
+		// MappingNode, so the branch below would replace the whole block
+		// rather than merge into it, and a .wet.local.yaml supplying just
+		// `vault:` would discard every definition behind `secrets: *shared`.
+		//
+		// The alias is resolved to a COPY, not to the anchored node itself.
+		// Merging into the anchor would edit every other alias to it, so
+		// overriding one block's vault would silently change another's.
+		if existing.Kind == yaml.AliasNode && value.Kind == yaml.MappingNode {
+			existing = copyYAMLNode(existing.Alias)
+			into.Content[i+1] = existing
+		} else if existing.Anchor != "" && value.Kind == yaml.MappingNode {
+			// The mirror image, and the more common way people write YAML:
+			// `&shared` sits on the key being overridden and the aliases are
+			// elsewhere. Merging in place edits the node every alias points
+			// at, so a machine-local `secrets.definitions.A.field` would
+			// silently rewrite B's field too — on that workstation only.
+			// Detach a copy and leave the anchor untouched.
+			existing = copyYAMLNode(existing)
+			existing.Anchor = ""
+			into.Content[i+1] = existing
+		}
+		if existing.Kind == yaml.MappingNode && value.Kind == yaml.MappingNode {
+			for j := 0; j+1 < len(value.Content); j += 2 {
+				mergeYAMLNode(existing, value.Content[j], value.Content[j+1])
+			}
+			return
+		}
+		into.Content[i+1] = value
+		return
 	}
-	return out
+	into.Content = append(into.Content, key, value)
 }
 
 // LoadWetConfigForWorktree loads `.wet.yaml` for an operation running against
@@ -406,40 +651,6 @@ func (c *WetConfig) Validate() error {
 		}
 	}
 
-	outs := make(map[string]int, len(c.Render))
-	for i, r := range c.Render {
-		if r.Template == "" || r.Out == "" {
-			return fmt.Errorf("render[%d]: both template and out are required", i)
-		}
-		if err := validateCopyPath(r.Template); err != nil {
-			return fmt.Errorf("render[%d].template: %w", i, err)
-		}
-		if err := validateCopyPath(r.Out); err != nil {
-			return fmt.Errorf("render[%d].out: %w", i, err)
-		}
-		if r.Template == r.Out {
-			return fmt.Errorf("render[%d]: template and out are the same file (%s)", i, r.Out)
-		}
-		// Two targets writing one file means the result depends on ordering,
-		// and the loser's secrets silently vanish.
-		if prev, dup := outs[r.Out]; dup {
-			return fmt.Errorf("render[%d]: out %q already written by render[%d]", i, r.Out, prev)
-		}
-		outs[r.Out] = i
-		stdin := 0
-		for _, src := range r.SecretsFrom {
-			if src == "" {
-				return fmt.Errorf("render[%d].secrets_from: empty source", i)
-			}
-			if src == "-" {
-				stdin++
-			}
-		}
-		if stdin > 1 {
-			return fmt.Errorf("render[%d].secrets_from: stdin listed more than once", i)
-		}
-	}
-
 	seen := make(map[string]bool, len(c.Ports))
 	for i, port := range c.Ports {
 		if !portNameRE.MatchString(port.Name) {
@@ -507,11 +718,20 @@ func (c *WetConfig) Validate() error {
 	if err := c.validateSecrets(); err != nil {
 		return err
 	}
+	if err := c.validateOutputs(); err != nil {
+		return err
+	}
 
 	// Parse env templates eagerly so syntax errors fail at load, not at apply.
 	for key, tmpl := range c.Env {
 		if key == "" {
 			return errors.New("env: key must not be empty")
+		}
+		// An env: entry can be `include:`d into a generated file under its own
+		// name, so it answers to the same shape as any other output key — an
+		// unchecked one could carry a newline and inject an extra assignment.
+		if !dotenvKeyRE.MatchString(key) {
+			return fmt.Errorf("env.%s: key must match %s", key, dotenvKeyRE.String())
 		}
 		if _, err := template.New("env:" + key).Parse(tmpl); err != nil {
 			return fmt.Errorf("env.%s: %w", key, err)
@@ -531,53 +751,64 @@ func (c *WetConfig) Validate() error {
 	return nil
 }
 
-// validateSecrets checks the secrets: block and every render target that names
-// a section of it. A render target pointing at a section that does not exist
-// is the failure mode worth catching at load: without this it would surface as
-// a template field that will not resolve, long after the typo.
+// validateSecrets checks the secrets: block on its own. Which outputs may see
+// which definition is checked in validateOutputs, where the output name is in
+// hand for the error.
 func (c *WetConfig) validateSecrets() error {
-	if c.Secrets != nil {
-		if c.Secrets.Store != secretsStoreOP {
-			return fmt.Errorf("secrets.store %q is not supported (known: %s)",
-				c.Secrets.Store, secretsStoreOP)
-		}
-		if len(c.Secrets.Sections) == 0 {
-			return errors.New("secrets: needs at least one section")
-		}
-		for section, keys := range c.Secrets.Sections {
-			if section == "" {
-				return errors.New("secrets.sections: section name must not be empty")
-			}
-			if len(keys) == 0 {
-				return fmt.Errorf("secrets.sections.%s: no keys", section)
-			}
-			for key, ref := range keys {
-				if key == "" {
-					return fmt.Errorf("secrets.sections.%s: key must not be empty", section)
-				}
-				if ref == "" {
-					return fmt.Errorf("secrets.sections.%s.%s: empty reference", section, key)
-				}
-				// The key becomes a template field, so the same names wet
-				// reserves for its own data are off limits — a secret named
-				// Branch would shadow it and render the wrong value.
-				if isReservedTemplateField(key) {
-					return fmt.Errorf("secrets.sections.%s.%s: %s is reserved by wet", section, key, key)
-				}
-			}
-		}
+	if c.Secrets == nil {
+		return nil
 	}
-
-	for i, r := range c.Render {
-		if r.Secrets == "" {
+	s := c.Secrets
+	if s.Store != secretsStoreOP {
+		return fmt.Errorf("secrets.store %q is not supported (known: %s)", s.Store, secretsStoreOP)
+	}
+	if s.Policy != "" && !slices.Contains(SecretPolicies, s.Policy) {
+		return fmt.Errorf("secrets.policy %q is not one of %s", s.Policy, strings.Join(SecretPolicies, ", "))
+	}
+	if len(s.Definitions) == 0 {
+		return errors.New("secrets: needs at least one entry under definitions:")
+	}
+	for _, name := range sortedKeys(s.Definitions) {
+		def := s.Definitions[name]
+		if name == "" {
+			return errors.New("secrets.definitions: name must not be empty")
+		}
+		// A secret becomes an output key, so it answers to the same shape as a
+		// port: an env-var name.
+		if !portNameRE.MatchString(name) {
+			return fmt.Errorf("secrets.definitions.%s: name must match %s", name, portNameRE.String())
+		}
+		if isReservedTemplateField(name) {
+			return fmt.Errorf("secrets.definitions.%s: %s is reserved by wet", name, name)
+		}
+		// A secret sharing a name with a port or an ordinary value makes the
+		// output key ambiguous — and worse, invites a store value to shadow an
+		// allocated port, which would hand two worktrees the same port.
+		for _, p := range c.Ports {
+			if p.Name == name {
+				return fmt.Errorf("secrets.definitions.%s: collides with the port of the same name", name)
+			}
+		}
+		if _, ok := c.Env[name]; ok {
+			return fmt.Errorf("secrets.definitions.%s: collides with the env: entry of the same name — "+
+				"a secret and an ordinary value cannot share a name; move the fallback into the definition's default:", name)
+		}
+		if def.Ref != "" {
+			if def.Field != "" || def.Vault != "" || def.Item != "" {
+				return fmt.Errorf("secrets.definitions.%s: ref: is the whole reference — "+
+					"drop field:/vault:/item: or drop ref:", name)
+			}
+			if _, err := parseOPRef(def.Ref); err != nil {
+				return fmt.Errorf("secrets.definitions.%s: %w", name, err)
+			}
 			continue
 		}
-		if c.Secrets == nil {
-			return fmt.Errorf("render[%d].secrets: %q named, but there is no secrets: block", i, r.Secrets)
+		if def.Field == "" {
+			return fmt.Errorf("secrets.definitions.%s: field: is required (or give a full ref:)", name)
 		}
-		if _, ok := c.Secrets.Sections[r.Secrets]; !ok {
-			return fmt.Errorf("render[%d].secrets: unknown section %q (known: %s)",
-				i, r.Secrets, strings.Join(sortedKeys(c.Secrets.Sections), ", "))
+		if strings.Contains(def.Field, "/") {
+			return fmt.Errorf("secrets.definitions.%s: field %q must be a bare field name — "+
+				"name another item with item:, or give a full ref:", name, def.Field)
 		}
 	}
 	return nil
@@ -901,6 +1132,25 @@ func SanitizeBranch(branch string) string {
 // can't live in the checked-in `.wet.yaml`.
 const envLocalFileName = ".env.local"
 
+// LoadEnvLocalForTree reads the machine's `.env.local` for an operation
+// running against treePath.
+//
+// This exists because taking a bare directory was a footgun that went off.
+// `.env.local` is gitignored and one per machine, so — exactly like
+// `.wet.local.yaml` — it lives beside the checkout holding the trunk, which
+// is NOT reliably git's main working tree. `wet setup` resolved it through
+// LocalConfigDir; `wet env pull` and `wet worktree pop` passed
+// getMainRepoRoot() straight in. The result was that a pull silently reverted
+// every override setup had just applied, and pre_remove hooks saw a different
+// value set than post_create did.
+//
+// Callers get this function rather than a directory so the wrong directory is
+// no longer reachable. LoadEnvLocal remains for tests that genuinely mean "read
+// the file in this exact directory".
+func LoadEnvLocalForTree(treePath, repoRoot string) (map[string]string, error) {
+	return LoadEnvLocal(LocalConfigDir(treePath, repoRoot))
+}
+
 // LoadEnvLocal reads `.env.local` from repoRoot. A missing file is not an
 // error: the file is optional by design.
 //
@@ -961,9 +1211,38 @@ func LoadEnvLocal(repoRoot string) (map[string]string, error) {
 //     overridden by a LAN IP without any per-machine edit to `.wet.yaml`.
 func ResolveEnvValues(cfg *WetConfig, data map[string]any, overrides map[string]string) (map[string]string, error) {
 	resolved := make(map[string]string, len(cfg.Env)+len(overrides))
-	for k, v := range overrides {
-		data[k] = v
-		resolved[k] = v
+	declaredPorts := make(map[string]bool, len(cfg.Ports))
+	for _, p := range cfg.Ports {
+		declaredPorts[p.Name] = true
+	}
+	for _, k := range sortedKeys(overrides) {
+		// A machine override may not take over an allocated port or a
+		// reserved field. Letting it would defeat the striding this whole
+		// tool exists for: one `DB_PORT=5433` in .env.local and every
+		// worktree generates the same port, while .env.worktree still
+		// carries the allocated one — two generated files disagreeing with
+		// the state file, and a "port is already allocated" nobody traces
+		// back to a one-line override.
+		if declaredPorts[k] {
+			return nil, fmt.Errorf("%s: %s is a port allocated per worktree and cannot be overridden — "+
+				"change its base: in .wet.yaml, or override ports: in .wet.local.yaml", envLocalFileName, k)
+		}
+		if isReservedTemplateField(k) {
+			return nil, fmt.Errorf("%s: %s is reserved by wet (%s)", envLocalFileName, k,
+				strings.Join(reservedTemplateFields, ", "))
+		}
+		// A secret set here would be silently ineffective in the one place it
+		// was meant for — outputs read secrets from the store, never from the
+		// value set — while still landing in .env.worktree, which is 0644 and
+		// which the docs promise carries no secrets. Both halves are wrong,
+		// and the developer sees their key in one generated file and not the
+		// other and debugs the wrong thing.
+		if cfg.isSecretName(k) {
+			return nil, fmt.Errorf("%s: %s is a declared secret and cannot be set here — "+
+				"put the real value in the store (`wet env push`) or change its default: in .wet.yaml", envLocalFileName, k)
+		}
+		data[k] = overrides[k]
+		resolved[k] = overrides[k]
 	}
 
 	pending := make(map[string]string, len(cfg.Env))
@@ -1027,7 +1306,12 @@ func RenderEnvFileContent(cfg *WetConfig, data map[string]any, ports []ResolvedP
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
-		fmt.Fprintf(&b, "%s=%s\n", k, values[k])
+		// Quoted for the same reason the generated outputs are: this file is
+		// SOURCED — `set -a; . ./.env.worktree` in a recipe, and
+		// `docker compose --env-file` — so an unquoted `&` in a URL forks a
+		// background job and hands the value back EMPTY, and an unquoted ` # `
+		// truncates it. Ports are integers and come out bare.
+		fmt.Fprintf(&b, "%s=%s\n", k, quoteEnvValue(values[k]))
 	}
 	return b.String(), nil
 }

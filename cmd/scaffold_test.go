@@ -30,9 +30,9 @@ func TestScaffoldStarterConfigLoadsAndValidates(t *testing.T) {
 	}
 }
 
-// It must NOT be a copy of the annotated example: that file renders
-// .env.example.tpl and claims emulator: pool items, neither of which exists in
-// a fresh repo, so a repo seeded with it fails its very next setup.
+// It must NOT be a copy of the annotated example: that file claims emulator:
+// pool items and declares secrets whose vault nobody has, so a repo seeded
+// with it fails its very next setup.
 func TestScaffoldStarterConfigIsNotTheAnnotatedExample(t *testing.T) {
 	dir := t.TempDir()
 	if _, err := scaffoldStarterConfig(dir); err != nil {
@@ -46,8 +46,8 @@ func TestScaffoldStarterConfigIsNotTheAnnotatedExample(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cfg.Render) != 0 {
-		t.Errorf("starter declares render targets %+v — they cannot exist in a fresh repo", cfg.Render)
+	if cfg.Secrets != nil {
+		t.Errorf("starter declares secrets %+v — a fresh repo has no vault to read them from", cfg.Secrets)
 	}
 	if len(cfg.Pools) != 0 {
 		t.Errorf("starter declares pools %+v — it would claim resources the user never asked for", cfg.Pools)
@@ -184,5 +184,211 @@ func TestDefaultProjectName(t *testing.T) {
 		if !projectNameRE.MatchString(got) {
 			t.Errorf("defaultProjectName(%q) = %q, which fails projectNameRE", c.dir, got)
 		}
+	}
+}
+
+// The starter's single output is the one file `wet setup` writes for a fresh
+// repo, so every part of it has to hold on a checkout that contains nothing
+// but the config: only ordinary keys (there is no store yet), and a path with
+// no package directory in it that the user never created.
+func TestScaffoldStarterConfigOutput(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := scaffoldStarterConfig(dir); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadWetConfig(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Outputs) != 1 {
+		t.Fatalf("starter declares %d outputs, want exactly 1", len(cfg.Outputs))
+	}
+	out := cfg.Outputs[0]
+	// The name has to match what `wet secrets setup` scaffolds into; otherwise
+	// scaffolding a provider invents a second output and the starter's file
+	// silently never gains the provider's keys.
+	if out.Name != defaultScaffoldOutput {
+		t.Errorf("output name = %q, want %q so `wet secrets setup` appends to it", out.Name, defaultScaffoldOutput)
+	}
+	if len(out.Secrets) != 0 {
+		t.Errorf("starter output selects secrets %v — none are defined", out.Secrets)
+	}
+	if strings.Contains(out.Out, "/") {
+		t.Errorf("output out = %q — a fresh repo has no package directory to write into", out.Out)
+	}
+	if out.Format != OutputFormatDotenv {
+		t.Errorf("output format = %q, want %q", out.Format, OutputFormatDotenv)
+	}
+}
+
+// Scaffolding a provider on top of the starter must produce a config that
+// still loads. This is the whole path a new user walks — `wet setup` writes
+// the starter, the picker adds a group — and the two halves are maintained in
+// different files, so nothing but this test notices when they stop fitting.
+func TestScaffoldGroupsOntoStarterConfig(t *testing.T) {
+	dir := t.TempDir()
+	path, err := scaffoldStarterConfig(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, _, err := LoadSecretGroups()
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc, err := ReadYAMLDocument(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := ScaffoldGroups(doc, catalog, []string{"core", "google"},
+		ScaffoldOptions{Output: defaultScaffoldOutput})
+	if err != nil {
+		t.Fatalf("ScaffoldGroups: %v", err)
+	}
+	if res.CreatedOutput {
+		t.Errorf("the scaffolder invented an output; the starter already declares %q", defaultScaffoldOutput)
+	}
+	body, err := MarshalYAMLDocument(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadWetConfig(dir)
+	if err != nil {
+		t.Fatalf("starter + scaffolded groups does not load: %v\n%s", err, body)
+	}
+	if _, ok := cfg.Secrets.Definitions["GOOGLE_CLIENT_ID"]; !ok {
+		t.Error("GOOGLE_CLIENT_ID was not declared under secrets.definitions")
+	}
+	if _, ok := cfg.Env["GOOGLE_REDIRECT_URI"]; !ok {
+		t.Error("the derived GOOGLE_REDIRECT_URI did not stay an ordinary env: value")
+	}
+}
+
+// The annotated example is documentation, but it is also a config people copy
+// to .wet.yaml. Its validity is asserted in config_test.go; what is checked
+// here is that it still teaches the CURRENT model — a schema rename that left
+// the prose behind would ship a file whose every example is wrong.
+func TestExampleConfigDeclaresOutputs(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, wetConfigFileName), []byte(wetExampleConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadWetConfigWithLocal(dir, "")
+	if err != nil {
+		t.Fatalf("%s is not a valid config: %v", exampleConfigFileName, err)
+	}
+	if len(cfg.Outputs) == 0 {
+		t.Fatalf("%s documents no outputs:, which is the block it exists to explain", exampleConfigFileName)
+	}
+	// Both ways of naming a key have to be shown somewhere, since include: and
+	// values: are the whole reason there is no .env.tpl any more.
+	var sawInclude, sawValues bool
+	for _, o := range cfg.Outputs {
+		sawInclude = sawInclude || len(o.Include) > 0
+		sawValues = sawValues || len(o.Values.Keys) > 0
+	}
+	if !sawInclude || !sawValues {
+		t.Errorf("%s illustrates include:=%v values:=%v, want both", exampleConfigFileName, sawInclude, sawValues)
+	}
+	for _, removed := range []string{"\nrender:", "secrets_from", "sections:", "env populate", ".env.example.tpl"} {
+		if strings.Contains(wetExampleConfig, removed) {
+			t.Errorf("%s still mentions the removed %q", exampleConfigFileName, removed)
+		}
+	}
+}
+
+// The starter declares an output, so the starter must also make sure that
+// output cannot be committed. A generated env file in git is wrong for every
+// checkout but the one that wrote it, and once secrets are declared it is a
+// leak — and the starter is the one config nobody reviews first.
+func TestScaffoldStarterConfigGitignoresItsOutput(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := scaffoldStarterConfig(dir); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadWetConfig(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
+	if err != nil {
+		t.Fatalf("no .gitignore was written: %v", err)
+	}
+	ignored := map[string]bool{}
+	for _, line := range strings.Split(string(body), "\n") {
+		ignored[strings.TrimSpace(line)] = true
+	}
+	for _, o := range cfg.Outputs {
+		if !ignored[o.Out] {
+			t.Errorf("output %q writes %q, which .gitignore does not cover:\n%s", o.Name, o.Out, body)
+		}
+	}
+}
+
+// Re-running must not restate the entry, and an unrelated .gitignore must
+// survive intact — the scaffolder appends to a file the repo owns.
+func TestIgnoreStarterOutputsIsIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".gitignore")
+	// No trailing newline, and a near-miss entry: a substring check would read
+	// this as "already ignored" and leave the real file committable.
+	if err := os.WriteFile(path, []byte("/build\n.env.dev.sample"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := ignoreStarterOutputs(dir); err != nil {
+		t.Fatal(err)
+	}
+	first, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(first), "/build\n.env.dev.sample\n") {
+		t.Errorf("the existing .gitignore was mangled:\n%s", first)
+	}
+	if strings.Count(string(first), "\n"+starterOutputFile+"\n") != 1 {
+		t.Errorf("%q was not added exactly once:\n%s", starterOutputFile, first)
+	}
+
+	if err := ignoreStarterOutputs(dir); err != nil {
+		t.Fatal(err)
+	}
+	second, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(first) != string(second) {
+		t.Errorf("a second run changed .gitignore:\n--- first ---\n%s\n--- second ---\n%s", first, second)
+	}
+}
+
+// An output wet invents is a file it has just promised to generate, holding
+// whatever credentials that output selects. It has to be born gitignored —
+// the starter path already does this, and a second call site that only
+// described the guard is the same defect in a different place.
+func TestScaffoldedOutputIsGitignored(t *testing.T) {
+	dir := t.TempDir()
+	if err := ignoreGeneratedOutput(dir, "web/.env.dev"); err != nil {
+		t.Fatalf("ignore: %v", err)
+	}
+	body := readFileText(t, filepath.Join(dir, ".gitignore"))
+	if !strings.Contains(body, "\nweb/.env.dev\n") {
+		t.Errorf(".gitignore missing the generated path:\n%s", body)
+	}
+	// Idempotent, and line-exact: a near-miss entry must not be read as
+	// already covering the path.
+	before := body
+	if err := ignoreGeneratedOutput(dir, "web/.env.dev"); err != nil {
+		t.Fatal(err)
+	}
+	if after := readFileText(t, filepath.Join(dir, ".gitignore")); after != before {
+		t.Errorf("second run changed the file:\n%s", after)
+	}
+	if err := ignoreGeneratedOutput(dir, "web/.env.dev.sample"); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFileText(t, filepath.Join(dir, ".gitignore")); !strings.Contains(got, "web/.env.dev.sample") {
+		t.Errorf("a near-miss path was treated as already ignored:\n%s", got)
 	}
 }

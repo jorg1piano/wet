@@ -2,12 +2,15 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // opClient is the thin 1Password CLI wrapper. Every call shells out to `op`:
@@ -20,23 +23,89 @@ type opClient struct {
 // opRun executes `op` with the account flag when one is set. Stderr is kept
 // separate so a failure reports what op said, not an empty exit code.
 func (c opClient) run(args ...string) ([]byte, error) {
+	out, _, err := c.runReporting(strings.Join(args, " "), args...)
+	return out, err
+}
+
+// runReporting is run with the command description decoupled from the argv.
+//
+// They are the same thing for every call but `item edit`, whose argv carries
+// plaintext secret values (see setFields). Passing the description separately
+// is what lets that one caller report a useful failure — op's own stderr,
+// which never contains a value — without the argv going along with it. The
+// raw stderr is returned too so a caller can wrap it rather than restate it.
+func (c opClient) runReporting(what string, args ...string) ([]byte, string, error) {
 	if c.account != "" {
 		args = append([]string{"--account", c.account}, args...)
 	}
-	cmd := exec.Command("op", args...)
+	ctx, cancel := context.WithTimeout(context.Background(), opTimeout())
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "op", args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	cmd.Stdin = os.Stdin // `op` may need to prompt for biometric unlock.
+	// Only hand `op` a stdin it can actually prompt on. Inheriting a
+	// non-terminal stdin is how `wet setup` came to block forever on a fresh
+	// clone: op waited for an unlock nobody could give it, and the `fallback`
+	// policy — whose whole promise is to survive unavailable authentication —
+	// never got to see a failure, because there wasn't one yet.
+	if stdinIsTerminal() {
+		cmd.Stdin = os.Stdin
+	}
+	// Killing `op` is not enough on its own. Stdout here is a buffer, so exec
+	// wires a pipe and Wait blocks until every writer closes it — and `op`'s
+	// own children inherit that write end, so a killed parent leaves Wait
+	// hanging exactly as long as the child lives. WaitDelay forces the pipes
+	// shut shortly after the context fires, which is what actually makes the
+	// timeout a timeout.
+	cmd.WaitDelay = 5 * time.Second
 	if err := cmd.Run(); err != nil {
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {
 			msg = err.Error()
 		}
-		return nil, fmt.Errorf("op %s: %s", strings.Join(args, " "), msg)
+		if ctx.Err() == context.DeadlineExceeded {
+			msg = fmt.Sprintf("timed out after %s waiting for the 1Password CLI "+
+				"(run `op signin`, or use --secrets=disabled)", opTimeout())
+			// Marked so callers can stop re-paying this cost. A deadline says
+			// the STORE is unreachable, not that one field is missing, and a
+			// pull that asks for ten secrets must not wait ten times.
+			return nil, msg, fmt.Errorf("op %s: %s: %w", what, msg, errStoreUnavailable)
+		}
+		return nil, msg, fmt.Errorf("op %s: %s", what, msg)
 	}
-	return stdout.Bytes(), nil
+	return stdout.Bytes(), "", nil
 }
+
+// opTimeoutEnv lets a slow machine or a CI runner raise the bound without a
+// rebuild. Seconds; anything unparseable falls back to the default.
+const opTimeoutEnv = "WET_OP_TIMEOUT_SECONDS"
+
+// opTimeout bounds every `op` call.
+//
+// Unbounded was not a neutral default: a store read is now on the first-run
+// path of every fresh clone, so an `op` that never answers turned `wet setup`
+// from "boots on declared defaults" into "hangs". The two bounds differ
+// because the thing being waited for differs — a human touching a fingerprint
+// reader deserves minutes, while a non-interactive run has nobody to wait for
+// and should fail fast so the policy can apply its fallback.
+func opTimeout() time.Duration {
+	if raw := os.Getenv(opTimeoutEnv); raw != "" {
+		if n, err := strconv.Atoi(strings.TrimSpace(raw)); err == nil && n > 0 {
+			return time.Duration(n) * time.Second
+		}
+	}
+	if stdinIsTerminal() {
+		return 2 * time.Minute
+	}
+	return 15 * time.Second
+}
+
+// errStoreUnavailable marks a failure that means the store itself cannot be
+// reached, as opposed to one secret being absent from it. The difference
+// matters for cost: an unreachable store is a fact about the whole run, so it
+// is answered once, while a missing field says nothing about the next secret.
+var errStoreUnavailable = errors.New("secret store unavailable")
 
 // requireOP fails with the fix rather than "executable file not found".
 func requireOP() error {
@@ -151,15 +220,23 @@ func (c opClient) createItem(vault, title string) (opItem, error) {
 // other processes on Linux — acceptable because the alternative (a temp file)
 // puts them on disk instead, and the user already has read access to these
 // secrets by definition.
+//
+// What is NOT acceptable is wet echoing that argv back. run() reports the
+// command it ran, so an expired session or a revoked vault would print the
+// real credential to the terminal and into whatever CI log captured it —
+// from the one command whose contract is that it never prints a value. So the
+// error is rewritten here to name the destination and the field labels only.
 func (c opClient) setFields(vault, title string, fields map[string]string) error {
 	if len(fields) == 0 {
 		return nil
 	}
+	labels := sortedKeys(fields)
 	args := []string{"item", "edit", title, "--vault", vault, "--format", "json"}
-	for _, label := range sortedKeys(fields) {
+	for _, label := range labels {
 		args = append(args, fmt.Sprintf("%s[password]=%s", label, fields[label]))
 	}
-	_, err := c.run(args...)
+	what := fmt.Sprintf("item edit %s --vault %s (fields: %s)", title, vault, strings.Join(labels, ", "))
+	_, _, err := c.runReporting(what, args...)
 	return err
 }
 

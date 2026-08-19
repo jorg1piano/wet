@@ -129,9 +129,10 @@ func runWorktreePop(cmd *cobra.Command, args []string) error {
 			}
 			data := BuildTemplateData(cfg, found.Branch, found.Index, ports, found.Pools)
 			// pre_remove hooks tear down what setup brought up, so they need
-			// the same machine overrides setup used — a compose project named
-			// after a DEV_HOST from .env.local won't come down without them.
-			local, err := LoadEnvLocal(repoRoot)
+			// the same machine overrides setup used — resolved the same way,
+			// or a compose project named after a DEV_HOST from .env.local
+			// won't come down.
+			local, err := LoadEnvLocalForTree(worktreePath, repoRoot)
 			if err != nil {
 				return err
 			}

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -53,7 +54,8 @@ func offerSecretGroups(configPath string) error {
 		return nil
 	}
 
-	res, err := ScaffoldGroups(doc, catalog, groups, defaultSecretsSection)
+	res, err := ScaffoldGroups(doc, catalog, groups,
+		ScaffoldOptions{Output: defaultScaffoldOutput})
 	if err != nil {
 		return err
 	}
@@ -70,11 +72,22 @@ func offerSecretGroups(configPath string) error {
 	if err := os.WriteFile(configPath, out, 0o644); err != nil {
 		return fmt.Errorf("write %s: %w", configPath, err)
 	}
+	// Same reason as in `wet secrets setup`: a file wet has promised to
+	// generate, holding whatever credentials it selects, is born gitignored.
+	if res.CreatedOutput {
+		if err := ignoreGeneratedOutput(filepath.Dir(configPath), res.OutputPath); err != nil {
+			return err
+		}
+	}
 
 	fmt.Printf("  Added %d env key(s) for: %s\n", len(res.AddedEnv), strings.Join(groups, ", "))
 	if len(res.AddedSecrets) > 0 {
-		fmt.Printf("  Recorded %d key(s) under secrets.%s — fill them in with `wet op vault seed`.\n",
-			len(res.AddedSecrets), defaultSecretsSection)
+		fmt.Printf("  Declared %d credential(s) under secrets.definitions:, each with the dev\n", len(res.AddedSecrets))
+		fmt.Println("  fallback it boots on until `wet op vault` points at a real vault.")
+	}
+	if res.CreatedOutput {
+		fmt.Printf("  Generating %s/.env.dev from the %q output — move it if that is not\n", res.Output, res.Output)
+		fmt.Println("  where your app reads its env file from.")
 	}
 	return nil
 }

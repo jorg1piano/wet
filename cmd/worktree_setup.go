@@ -121,12 +121,15 @@ func runSetupCore(repoRoot, worktreePath, branchName string, headless, isMain bo
 		if repoRoot != worktreePath {
 			searched = fmt.Sprintf("%s or %s", worktreePath, repoRoot)
 		}
+		// Announce the search before scaffolding, not after: the scaffolder
+		// prints its own lines (the .gitignore entry it added), and a summary
+		// that arrives after the details it summarizes reads as a non-sequitur.
+		fmt.Printf("  No %s found in %s.\n", wetConfigFileName, searched)
 		path, writeErr := scaffoldStarterConfig(repoRoot)
 		if writeErr != nil {
 			return fmt.Errorf("no %s found in %s, and writing a starter one failed: %w",
 				wetConfigFileName, searched, writeErr)
 		}
-		fmt.Printf("  No %s found in %s.\n", wetConfigFileName, searched)
 		fmt.Printf("  Wrote a starter one: %s\n", path)
 
 		// Offering the catalog here rather than leaving it to a second
@@ -292,7 +295,7 @@ func runSetupCore(repoRoot, worktreePath, branchName string, headless, isMain bo
 		}
 	}
 
-	local, err := LoadEnvLocal(localRoot)
+	local, err := LoadEnvLocalForTree(worktreePath, repoRoot)
 	if err != nil {
 		return err
 	}
@@ -318,19 +321,30 @@ func runSetupCore(repoRoot, worktreePath, branchName string, headless, isMain bo
 	if err != nil {
 		return fmt.Errorf("build hook env: %w", err)
 	}
-	// Render declared targets before hooks run — a hook that boots the
-	// stack needs the env files to already exist.
-	for i, target := range cfg.Render {
-		overrides, err := readAllSecrets(worktreePath, target.SecretsFrom)
-		if err != nil {
-			return fmt.Errorf("render[%d] (%s): %w", i, target.Out, err)
+	// Generate the declared outputs before hooks run — a hook that boots the
+	// stack needs its env files to already exist.
+	//
+	// `data` already carries every resolved `env:` value at this point:
+	// RenderEnvFileContent above resolved them into it in place. That is a
+	// real dependency and not an incidental one — reordering these two calls
+	// would silently produce outputs missing every derived value, which is
+	// why ResolveEnvValues is called explicitly here rather than relied on.
+	//
+	// This is the same pipeline `wet env pull` runs, called once lifecycle
+	// allocation is done and .env.worktree is on disk. Setup owns the
+	// lifecycle; it owns no second way to write an env file. The previous
+	// design had setup render targets itself, which is how setup and populate
+	// came to disagree about whether a target's secrets were fetched at all.
+	if len(cfg.Outputs) > 0 {
+		if _, err := ResolveEnvValues(cfg, data, local); err != nil {
+			return fmt.Errorf("resolve env: %w", err)
 		}
-		perTarget := make(map[string]any, len(data))
-		for k, v := range data {
-			perTarget[k] = v
-		}
-		if err := renderSetupTarget(cfg, perTarget, worktreePath, target, overrides); err != nil {
-			return fmt.Errorf("render[%d] (%s): %w", i, target.Out, err)
+		if err := PullOutputs(PullRequest{
+			Cfg:      cfg,
+			TreePath: worktreePath,
+			Data:     data,
+		}); err != nil {
+			return err
 		}
 	}
 

@@ -2,11 +2,10 @@ package cmd
 
 import (
 	"bufio"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
+	"regexp"
 	"strings"
 )
 
@@ -17,108 +16,15 @@ const secretsStoreOP = "op"
 
 // SecretRef is one env key resolved to a place in the store.
 type SecretRef struct {
-	Key     string // env key, e.g. GOOGLE_CLIENT_ID
-	Vault   string
-	Item    string
-	Field   string
-	Section string
+	Key   string // env key, e.g. GOOGLE_CLIENT_ID
+	Vault string
+	Item  string
+	Field string
 }
 
 // URI renders the reference in `op read` syntax.
 func (r SecretRef) URI() string {
 	return fmt.Sprintf("op://%s/%s/%s", r.Vault, r.Item, r.Field)
-}
-
-// ResolveSection turns one section's key -> reference map into concrete
-// SecretRefs against the block's vault and item.
-//
-// Three reference forms, cheapest first: a bare "field" on the default item,
-// "Other Item/field" for another item in the same vault, and a full
-// "op://vault/item/field" that overrides both. The short forms are what keep
-// per-consumer duplication out of the config — a section names the field, not
-// where the file that consumes it lives.
-func (s *SecretsConfig) ResolveSection(section string) ([]SecretRef, error) {
-	keys, ok := s.Sections[section]
-	if !ok {
-		return nil, fmt.Errorf("unknown secrets section %q (known: %s)",
-			section, strings.Join(sortedKeys(s.Sections), ", "))
-	}
-	refs := make([]SecretRef, 0, len(keys))
-	for _, key := range sortedKeys(keys) {
-		ref, err := s.resolveRef(section, key, keys[key])
-		if err != nil {
-			return nil, err
-		}
-		refs = append(refs, ref)
-	}
-	return refs, nil
-}
-
-func (s *SecretsConfig) resolveRef(section, key, raw string) (SecretRef, error) {
-	ref := SecretRef{Key: key, Section: section, Vault: s.Vault, Item: s.Item}
-	switch {
-	case strings.HasPrefix(raw, "op://"):
-		parts := strings.SplitN(strings.TrimPrefix(raw, "op://"), "/", 3)
-		if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
-			return ref, fmt.Errorf("secrets.sections.%s.%s: %q is not op://vault/item/field", section, key, raw)
-		}
-		ref.Vault, ref.Item, ref.Field = parts[0], parts[1], parts[2]
-	case strings.Contains(raw, "/"):
-		item, field, _ := strings.Cut(raw, "/")
-		if item == "" || field == "" || strings.Contains(field, "/") {
-			return ref, fmt.Errorf("secrets.sections.%s.%s: %q is not \"Item/field\"", section, key, raw)
-		}
-		ref.Item, ref.Field = item, field
-	default:
-		ref.Field = raw
-	}
-	if ref.Vault == "" {
-		return ref, errors.New("no vault: set secrets.vault or pass --vault")
-	}
-	if ref.Item == "" {
-		return ref, errors.New("no item: set secrets.item or pass --item")
-	}
-	return ref, nil
-}
-
-// SectionNames returns the sections to act on: the ones named, or all of them
-// in a stable order.
-func (s *SecretsConfig) SectionNames(only []string) ([]string, error) {
-	if len(only) == 0 {
-		return sortedKeys(s.Sections), nil
-	}
-	for _, name := range only {
-		if _, ok := s.Sections[name]; !ok {
-			return nil, fmt.Errorf("unknown secrets section %q (known: %s)",
-				name, strings.Join(sortedKeys(s.Sections), ", "))
-		}
-	}
-	out := append([]string(nil), only...)
-	sort.Strings(out)
-	return out, nil
-}
-
-// SectionOutputDirs reports the directories a section's secrets are consumed
-// in, taken from the render targets that name it. That is the whole reason a
-// section never carries a path: the config already says where the target
-// writes, and duplicating it would let the two disagree.
-//
-// Order follows the render list, deduplicated — two targets in one directory
-// are one place to write.
-func (c *WetConfig) SectionOutputDirs(section string) []string {
-	var dirs []string
-	seen := map[string]bool{}
-	for _, r := range c.Render {
-		if r.Secrets != section {
-			continue
-		}
-		dir := filepath.Dir(r.Out)
-		if !seen[dir] {
-			seen[dir] = true
-			dirs = append(dirs, dir)
-		}
-	}
-	return dirs
 }
 
 // ParseEnvFile reads KEY=value lines. It is deliberately small: `export`
@@ -164,26 +70,20 @@ func ParseEnvFile(path string) (map[string]string, []string, error) {
 	return out, order, nil
 }
 
-// FormatEnvFile renders refs and their values as an env file. Values are
-// quoted when they hold anything a reader would otherwise mangle, and a value
-// spanning lines (a PEM key, say) is escaped so the file keeps exactly one
-// assignment per line.
-func FormatEnvFile(refs []SecretRef, values map[string]string, header string) string {
-	var b strings.Builder
-	if header != "" {
-		b.WriteString("# " + header + "\n")
-	}
-	for _, ref := range refs {
-		b.WriteString(ref.Key)
-		b.WriteString("=")
-		b.WriteString(quoteEnvValue(values[ref.Key]))
-		b.WriteString("\n")
-	}
-	return b.String()
-}
+// safeUnquotedEnvValue is the set of values that may be written bare.
+//
+// It is an ALLOWLIST, and that is the whole point. The previous version
+// denied a handful of characters it thought were special and let everything
+// else through — so `AUTH_BASE_URL=http://host/cb?a=b&c=d` was emitted
+// unquoted, and `set -a; . ./.env` (what a compose stack and every `just`
+// recipe do) read the `&` as "background this command" and gave the app an
+// EMPTY url. A denylist of shell metacharacters is a list nobody keeps
+// complete; an allowlist fails safe by quoting one value too many.
+var safeUnquotedEnvValue = regexp.MustCompile(`^[A-Za-z0-9_./:@%+,=-]*$`)
 
 // quoteEnvValue quotes a value so that unquoteEnvValue — and the dotenv
-// readers these files are written for — give back exactly what went in.
+// readers these files are written for, which all model themselves on `sh` —
+// give back exactly what went in.
 //
 // Single quotes for the common case, because their contents are literal: no
 // expansion of $VAR, no escape sequences to get wrong. A value containing a
@@ -194,7 +94,7 @@ func quoteEnvValue(v string) string {
 	if v == "" {
 		return ""
 	}
-	if !strings.ContainsAny(v, " \t\n\"'$`\\#") {
+	if safeUnquotedEnvValue.MatchString(v) {
 		return v
 	}
 	// A newline has to go through the double-quoted form as \n: the file is
