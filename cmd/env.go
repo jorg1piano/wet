@@ -176,13 +176,6 @@ func renderSetupTarget(cfg *WetConfig, data map[string]any, treePath string, tar
 		return err
 	}
 	out := filepath.Join(treePath, target.Out)
-	// A target may render into a directory that doesn't exist yet — .vscode/
-	// is gitignored in most repos, so a fresh worktree has no such directory
-	// until something makes one. Without this, such a target fails with a
-	// bare ENOENT naming a path the user can see is right.
-	if err := os.MkdirAll(filepath.Dir(out), 0755); err != nil {
-		return fmt.Errorf("create parent of %s: %w", out, err)
-	}
 	if err := os.WriteFile(out, []byte(rendered), 0600); err != nil {
 		return fmt.Errorf("write %s: %w", out, err)
 	}
@@ -221,11 +214,6 @@ func renderTarget(cfg *WetConfig, data map[string]any, treePath string, target R
 		}
 		fmt.Print(rendered)
 		return nil
-	}
-	// Same reason as renderSetupTarget: the output's directory may not exist
-	// yet, and ENOENT on a correct-looking path is a bad way to say so.
-	if err := os.MkdirAll(filepath.Dir(outPath), 0755); err != nil {
-		return fmt.Errorf("create parent of %s: %w", outPath, err)
 	}
 	// 0600: the whole point of the secrets channel is that this file may hold
 	// secrets, and it lands in a tree that outlives the command.
@@ -541,13 +529,31 @@ func worktreeStateForPath(state *WorktreeConfig, worktreePath string) *WorktreeS
 	return nil
 }
 
+// resolvePath makes a path absolute and resolves its symlinks, including when
+// the path does not exist yet: it resolves the deepest ancestor that does and
+// re-appends the rest.
+//
+// Plain EvalSymlinks fails outright on a missing leaf. A caller that falls back
+// to the unresolved path is then comparing one resolved path against one
+// unresolved — which on macOS means /private/var/... against /var/... for the
+// same directory, so an equality or containment test silently answers
+// "different". For samePath that would mean truncating a file it meant to
+// protect.
 func resolvePath(p string) string {
 	abs, err := filepath.Abs(p)
 	if err != nil {
-		return p
+		return filepath.Clean(p)
 	}
-	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+	return resolveExisting(abs)
+}
+
+func resolveExisting(p string) string {
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
 		return resolved
 	}
-	return abs
+	parent := filepath.Dir(p)
+	if parent == p {
+		return p // reached the root; nothing left to resolve
+	}
+	return filepath.Join(resolveExisting(parent), filepath.Base(p))
 }

@@ -272,7 +272,24 @@ remaining post_create commands from .wet.yaml by hand).
 // Missing sources are silently skipped — the `.wet.yaml` author may list
 // optional files (e.g., `.claude/settings.local.json`) that not every
 // developer has locally.
-func copyFromConfig(cfg *WetConfig, srcRoot, dstRoot string) []string {
+// copyFromConfig copies the declared files and dirs, returning what it copied.
+// The second return is a reason the copy was skipped entirely, for the caller
+// to surface — a silent no-op reads as "nothing was declared".
+func copyFromConfig(cfg *WetConfig, srcRoot, dstRoot string) ([]string, string) {
+	// Copying a checkout onto itself destroys it: copyFile truncates the
+	// destination before reading the source, so with src == dst every file
+	// becomes zero bytes — including files wet only copies and never renders.
+	//
+	// This is reachable without the main checkout being involved. LocalConfigDir
+	// resolves to whichever checkout holds main_branch, so a worktree standing
+	// on that branch (e.g. `main_branch: development` in a checkout of
+	// development) gets srcRoot == dstRoot even under `wet worktree setup`,
+	// where isMain is false. Guarding on "which command ran" cannot catch that;
+	// only comparing the resolved paths can.
+	if samePath(srcRoot, dstRoot) {
+		return nil, fmt.Sprintf(
+			"source and destination are the same checkout (%s)", srcRoot)
+	}
 	var copied []string
 	for _, f := range cfg.Copy.Files {
 		if ok := copyOneFile(srcRoot, dstRoot, f); ok {
@@ -284,9 +301,52 @@ func copyFromConfig(cfg *WetConfig, srcRoot, dstRoot string) []string {
 			copied = append(copied, dir+"/")
 		}
 	}
-	return copied
+	return copied, ""
 }
 
+// samePath reports whether two paths denote the same file or directory.
+//
+// It guards a truncating copy, so it fails CLOSED: anything it cannot resolve
+// is reported as "same", which costs a skipped copy, while a wrong "different"
+// costs the file's contents. That asymmetry is the whole reason this exists.
+//
+// os.SameFile is the real predicate when both paths exist — it compares inode
+// identity, so it also catches hardlinks and bind mounts that string equality
+// misses. When one side is absent (the normal case: dst not yet created) that
+// is a genuine "different", and only then do we fall back to comparing
+// symlink-resolved paths, which keeps /tmp and /private/tmp from looking like
+// distinct trees.
+func samePath(a, b string) bool {
+	fa, errA := os.Stat(a)
+	fb, errB := os.Stat(b)
+	switch {
+	case errA == nil && errB == nil:
+		return os.SameFile(fa, fb)
+	case os.IsNotExist(errA) || os.IsNotExist(errB):
+		// At least one side does not exist yet, so they cannot be the same
+		// file. Fall through to the path comparison below, which still catches
+		// a dst whose parent is a symlink to src's parent.
+	default:
+		// Permission denied, ELOOP, ENOTDIR: the path exists in some form we
+		// cannot inspect. Refuse rather than truncate on a guess.
+		return true
+	}
+
+	return resolvePath(a) == resolvePath(b)
+}
+
+// containsPath reports whether dir contains other, so a directory copy cannot
+// be asked to write into its own source. filepath.Walk reads each directory's
+// entries as it enters it, so a dst nested under src is copied again as Walk
+// reaches it — deeper each time.
+func containsPath(dir, other string) bool {
+	rd, ro := resolvePath(dir), resolvePath(other)
+	return strings.HasPrefix(ro, rd+string(os.PathSeparator))
+}
+
+// copyOneFile needs no self-copy guard of its own: every file write in this
+// file goes through copyFile, which refuses one. copyOneDir does need its own,
+// because containment is a directory-only hazard that copyFile cannot see.
 func copyOneFile(srcRoot, dstRoot, rel string) bool {
 	src := filepath.Join(srcRoot, rel)
 	if _, err := os.Stat(src); err != nil {
@@ -305,6 +365,11 @@ func copyOneDir(srcRoot, dstRoot, rel string) bool {
 		return false
 	}
 	dst := filepath.Join(dstRoot, rel)
+	// Equality is not enough for a directory: a dst nested inside src (or the
+	// reverse) makes Walk copy the tree into itself, growing as it goes.
+	if samePath(src, dst) || containsPath(src, dst) || containsPath(dst, src) {
+		return false
+	}
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return false
 	}
@@ -327,6 +392,12 @@ func copyDir(src, dst string) error {
 }
 
 func copyFile(src, dst string) error {
+	// os.Create below truncates, so a src == dst call would erase the file
+	// rather than copy it. Callers guard too; this is the last line of defence
+	// for any future caller that forgets.
+	if samePath(src, dst) {
+		return fmt.Errorf("refusing to copy %s onto itself", src)
+	}
 	in, err := os.Open(src)
 	if err != nil {
 		return err

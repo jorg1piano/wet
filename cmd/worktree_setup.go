@@ -167,6 +167,7 @@ func runSetupCore(repoRoot, worktreePath, branchName string, headless, isMain bo
 	var slot int
 	var pools map[string]string
 	var copiedFiles []string
+	var copySkipped string
 	if err := withStateLock(func() error {
 		state, err := loadConfig()
 		if err != nil {
@@ -223,9 +224,11 @@ func runSetupCore(repoRoot, worktreePath, branchName string, headless, isMain bo
 		pools = allocated
 
 		// In the main repo there is nowhere to copy from — source and
-		// destination are the same tree.
+		// destination are the same tree. This is a fast path, not the guard:
+		// copyFromConfig refuses a self-copy on its own, because localRoot can
+		// equal worktreePath in a worktree too (see samePath).
 		if !isMain {
-			copiedFiles = copyFromConfig(cfg, localRoot, worktreePath)
+			copiedFiles, copySkipped = copyFromConfig(cfg, localRoot, worktreePath)
 		}
 
 		// CreatedAt is preserved on update so `wet worktree list`'s "age"
@@ -261,6 +264,11 @@ func runSetupCore(repoRoot, worktreePath, branchName string, headless, isMain bo
 
 	if len(copiedFiles) > 0 {
 		fmt.Printf("  Copied: %s\n", strings.Join(copiedFiles, ", "))
+	}
+	// Say so when copy: was declared but did nothing. Silence here is what
+	// made the self-copy bug hard to spot: the step appeared not to exist.
+	if copySkipped != "" && (len(cfg.Copy.Files) > 0 || len(cfg.Copy.Dirs) > 0) {
+		fmt.Printf("  Skipped copy: %s\n", copySkipped)
 	}
 
 	// Bring claimed emulators up before anything renders: FLUTTER_DEVICE_ID
