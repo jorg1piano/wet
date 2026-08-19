@@ -32,8 +32,6 @@ args=("$@")
 if [ "${args[0]}" = "--account" ]; then args=("${args[@]:2}"); fi
 
 case "${args[0]} ${args[1]}" in
-  "account list") jq -n '[{url:"my.1password.com",email:"a@b.c",account_uuid:"U"}]' ;;
-  "vault list")   jq -n '[{id:"V1",name:"fbd"}]' ;;
   "item get")
       title="${args[2]}"
       jq -e --arg t "$title" '.[$t] // empty' "$state" >/dev/null || {
@@ -155,10 +153,8 @@ func resetEnvFlags(t *testing.T) {
 		envPushFrom = ""
 		envPushDryRun, envPushForce, envPushCreateItem = false, false, false
 		envPushRejectUnmapped, envPushIncludeDefaults = false, false
-		opFlags, opNoRemember = opTargetFlags{}, false
 	}
 	restore()
-	opNoRemember = true
 	t.Cleanup(restore)
 }
 
@@ -314,6 +310,32 @@ func TestEnvPushNeverClobbers(t *testing.T) {
 	}
 	if got := readFileString(t, state); !strings.Contains(got, "stale-local") {
 		t.Errorf("--force did not overwrite:\n%s", got)
+	}
+}
+
+// Conflict detection is a validation phase for the whole push. A command that
+// exits with a conflict must not quietly apply the other fields first.
+func TestEnvPushConflictLeavesOtherFieldsUnchanged(t *testing.T) {
+	requireJQ(t)
+	_, state := stubOP(t, `{"fantasy":{"secret_key_base":"rotated-in-vault"}}`)
+	repo := opRepo(t)
+	resetEnvFlags(t)
+	worktreeEnv(t, 1)
+
+	src := filepath.Join(repo, "import.env")
+	if err := os.WriteFile(src, []byte("SECRET_KEY_BASE=stale\nGOOGLE_CLIENT_ID=new-client\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	envPushFrom = src
+	if err := runEnvPush(nil, []string{"backend"}); err == nil {
+		t.Fatal("expected a conflict error")
+	}
+	got := readFileString(t, state)
+	if strings.Contains(got, "new-client") {
+		t.Errorf("failed push partially wrote a non-conflicting field:\n%s", got)
+	}
+	if !strings.Contains(got, "rotated-in-vault") {
+		t.Errorf("failed push disturbed the conflicting field:\n%s", got)
 	}
 }
 
@@ -558,34 +580,6 @@ outputs:
 	}
 }
 
-// `wet op vault` writes the overlay to the checkout the LOADER reads it from —
-// the one holding the trunk, not the current worktree. Writing it beside a
-// worktree printed "Remembered" while writing a file nothing ever reads, and
-// the next pull still said "no vault".
-func TestOPVaultRemembersWhereTheLoaderReads(t *testing.T) {
-	requireJQ(t)
-	stubOP(t, `{"fantasy":{}}`)
-	repo := opRepo(t)
-	resetEnvFlags(t)
-	opNoRemember = false
-	// A value on the command line is remembered too: the user said which vault
-	// they want, and asking again next run is the same surprise.
-	opFlags = opTargetFlags{account: "my.1password.com", vault: "picked-vault"}
-
-	if err := runOPVault(nil, nil); err != nil {
-		t.Fatalf("op vault: %v", err)
-	}
-	// The assertion that matters: the loader must SEE it. Reading the file
-	// directly would pass even if it landed in a directory nothing reads.
-	cfg, err := LoadWetConfigWithLocal(repo, LocalConfigDir(repo, repo))
-	if err != nil {
-		t.Fatalf("load after remember: %v", err)
-	}
-	if cfg.Secrets.Vault != "picked-vault" {
-		t.Errorf("the loader does not see the remembered vault: %q", cfg.Secrets.Vault)
-	}
-}
-
 // The design makes this the authorization boundary in so many words:
 // "Presence in secrets.definitions plus selection by the named output is the
 // authorization boundary for every push." It had no guard, so a regression
@@ -721,29 +715,5 @@ outputs:
 		if !strings.Contains(body, want) {
 			t.Errorf("declared default missing after the store timed out (%s):\n%s", want, body)
 		}
-	}
-}
-
-// Without the guard `resolveOPTarget` dereferences a nil cfg.Secrets. A repo
-// with no secrets: block is a normal repo, not a crash.
-func TestOPVaultWithoutASecretsBlock(t *testing.T) {
-	requireJQ(t)
-	stubOP(t, `{}`)
-	repo := t.TempDir()
-	if out, err := execCommand("git", "-C", repo, "init", "-q"); err != nil {
-		t.Skipf("git unavailable: %v\n%s", err, out)
-	}
-	if err := os.WriteFile(filepath.Join(repo, ".wet.yaml"),
-		[]byte("project_name: app\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	t.Chdir(repo)
-	resetEnvFlags(t)
-	err := runOPVault(nil, nil)
-	if err == nil {
-		t.Fatal("expected an error for a config with no secrets: block")
-	}
-	if !strings.Contains(err.Error(), "secrets:") {
-		t.Errorf("err should say what is missing, got: %v", err)
 	}
 }

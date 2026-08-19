@@ -85,42 +85,28 @@ func ensureGitignoreEntries() error {
 	if err != nil {
 		return err
 	}
-	gitignorePath := filepath.Join(repoRoot, ".gitignore")
 
 	// The lock file is listed separately from the state file rather than as a
-	// .wet-worktrees.* glob so the substring check below stays exact: a repo
-	// installed before the lock existed gets just the missing entry appended.
-	entries := []string{".wet-worktrees.json", ".wet-worktrees.lock", ".env.worktree"}
+	// .wet-worktrees.* glob so a repo installed before the lock existed gets
+	// just the missing entry appended.
+	//
+	// The two machine-local files are here because wet asks the user to write
+	// them by hand — .wet.local.yaml holds the 1Password account and vault
+	// this workstation reads from, and .env.local holds its overrides. Neither
+	// is a fact about the repo, and committing the first one publishes a
+	// sign-in address. Telling people to ignore them is the version of this
+	// that gets skipped.
+	entries := []string{".wet-worktrees.json", ".wet-worktrees.lock", ".env.worktree",
+		wetLocalConfigFileName, envLocalFileName}
 
-	existing, _ := os.ReadFile(gitignorePath)
-	content := string(existing)
-
-	var added []string
-	for _, entry := range entries {
-		if !strings.Contains(content, entry) {
-			added = append(added, entry)
-		}
-	}
-
-	if len(added) == 0 {
-		return nil
-	}
-
-	f, err := os.OpenFile(gitignorePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	added, err := ensureGitignored(repoRoot,
+		"# wet: shared worktree state, and the per-machine files it reads.", entries...)
 	if err != nil {
-		return fmt.Errorf("open .gitignore: %w", err)
+		return err
 	}
-	defer f.Close()
-
-	// Ensure we start on a new line
-	if len(content) > 0 && content[len(content)-1] != '\n' {
-		fmt.Fprintln(f)
+	if len(added) > 0 {
+		fmt.Printf("  Added to .gitignore: %s\n", strings.Join(added, ", "))
 	}
-	for _, entry := range added {
-		fmt.Fprintln(f, entry)
-	}
-
-	fmt.Printf("  Added to .gitignore: %s\n", strings.Join(added, ", "))
 	return nil
 }
 

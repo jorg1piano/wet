@@ -172,8 +172,9 @@ func scaffoldSecretDefinitions(root *yaml.Node, catalog map[string]SecretGroup, 
 		key.HeadComment = "Every credential this repo has, declared once. `policy: fallback` reads\n" +
 			"the store and falls back to a definition's `default:` when it cannot —\n" +
 			"naming which ones fell back, so an empty placeholder never passes for a\n" +
-			"configured provider. vault/item/account may be omitted: `wet op vault`\n" +
-			"asks and remembers the answer in the gitignored .wet.local.yaml."
+			"configured provider. Add `item:` here — which item the fields sit on is\n" +
+			"a fact about the project. vault and account are machine-local and go\n" +
+			"in the gitignored " + wetLocalConfigFileName + " instead."
 		root.Content = append(root.Content, key, secretsNode)
 	}
 	if secretsNode.Kind != yaml.MappingNode {
@@ -261,17 +262,22 @@ func scaffoldOutput(root *yaml.Node, name string, includeKeys, secretKeys []stri
 		}
 	}
 	if target == nil {
+		// One literal: the path written into `out:` and the path reported as
+		// OutputPath are the same file, and OutputPath is what the caller
+		// gitignores and prints. Two copies means a change to one of them
+		// leaves wet ignoring — and naming — a file it does not generate.
+		outPath := name + "/.env.dev"
 		target = &yaml.Node{Kind: yaml.MappingNode}
 		target.Content = append(target.Content,
 			&yaml.Node{Kind: yaml.ScalarNode, Value: "name"},
 			&yaml.Node{Kind: yaml.ScalarNode, Value: name},
 			&yaml.Node{Kind: yaml.ScalarNode, Value: "out"},
-			&yaml.Node{Kind: yaml.ScalarNode, Value: name + "/.env.dev"},
+			&yaml.Node{Kind: yaml.ScalarNode, Value: outPath},
 			&yaml.Node{Kind: yaml.ScalarNode, Value: "format"},
 			&yaml.Node{Kind: yaml.ScalarNode, Value: OutputFormatDotenv})
 		outputsNode.Content = append(outputsNode.Content, target)
 		res.CreatedOutput = true
-		res.OutputPath = name + "/.env.dev"
+		res.OutputPath = outPath
 	}
 
 	if err := appendUnique(target, "include", includeKeys); err != nil {

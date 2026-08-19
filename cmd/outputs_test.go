@@ -987,7 +987,7 @@ outputs:
 	}
 }
 
-// A fresh clone has never run `wet op vault`, so `secrets.vault` is empty and
+// A fresh clone has no .wet.local.yaml yet, so `secrets.vault` is empty and
 // no reference can be resolved at all. Under `fallback` that is a store
 // failure like any other and the declared defaults must carry the setup —
 // otherwise the first `wet setup` on a new machine dies on a config the repo
@@ -1845,5 +1845,95 @@ outputs:
 	reportUnusedSecrets(&quiet, loadTestConfig(t, fullConfig))
 	if quiet.Len() != 0 {
 		t.Errorf("a fully-consumed config produced a diagnostic:\n%s", quiet.String())
+	}
+}
+
+// The overlay is now the ONLY way a machine names its account and vault, so
+// the merge that carries them into the loaded config is load-bearing on its
+// own: get it wrong and every secret in the repo silently falls back to its
+// default: under `policy: fallback`, with a generated file that looks
+// configured. The assertion that matters is end-to-end — not that the keys
+// parsed, but that a reference actually RESOLVES to them afterwards, which is
+// the thing the store call needs.
+func TestLocalOverlayNamesTheVaultAndResolvesReferences(t *testing.T) {
+	repo := t.TempDir()
+	stripped := strings.Replace(fullConfig, "  vault: V\n  item: I\n", "", 1)
+	if err := os.WriteFile(filepath.Join(repo, wetConfigFileName), []byte(stripped), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, wetLocalConfigFileName),
+		[]byte("secrets:\n  account: my.1password.com\n  vault: Development\n  item: backend-development\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadWetConfigWithLocal(repo, repo)
+	if err != nil {
+		t.Fatalf("load with overlay: %v", err)
+	}
+	if cfg.Secrets.Vault != "Development" || cfg.Secrets.Account != "my.1password.com" {
+		t.Errorf("overlay did not reach the loader: account=%q vault=%q",
+			cfg.Secrets.Account, cfg.Secrets.Vault)
+	}
+	// The committed half has to survive the merge intact. A count alone would
+	// not catch a merge that kept the mapping but emptied a definition, and
+	// the field name is what the store call is actually built from.
+	if def, ok := cfg.Secrets.Definitions["SECRET_KEY_BASE"]; !ok || def.Field != "secret_key_base" {
+		t.Fatalf("overlay damaged the committed definitions: %+v", cfg.Secrets.Definitions)
+	}
+	// The whole point of naming a vault: references now resolve.
+	ref, err := cfg.Secrets.ResolveSecretRef("SECRET_KEY_BASE")
+	if err != nil {
+		t.Fatalf("reference still unresolvable with a vault: %v", err)
+	}
+	if ref.Vault != "Development" || ref.Item != "backend-development" {
+		t.Errorf("resolved to %s/%s/%s", ref.Vault, ref.Item, ref.Field)
+	}
+}
+
+// `wet env explain` is the command you run to find out WHY nothing resolves,
+// so a missing destination must be reported as the gap it is rather than
+// failing the command — and it must name the RIGHT gap. A missing item and a
+// missing vault are fixed in different files, so one summary message for both
+// sends half the readers to edit the wrong one.
+func TestEnvExplainReportsAMissingDestination(t *testing.T) {
+	for _, tc := range []struct {
+		name, strip, wantKey, wantFile string
+		alsoWant                       []string
+	}{
+		{"no vault", "  vault: V\n", "secrets.vault", wetConfigFileName,
+			[]string{wetLocalConfigFileName, "vault: Development", "secrets.definitions.SECRET_KEY_BASE.vault"}},
+		{"no item", "  item: I\n", "secrets.item", wetConfigFileName, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := t.TempDir()
+			if out, err := execCommand("git", "-C", repo, "init", "-q"); err != nil {
+				t.Skipf("git unavailable: %v\n%s", err, out)
+			}
+			stripped := strings.Replace(fullConfig, tc.strip, "", 1)
+			if stripped == fullConfig {
+				t.Fatalf("fixture no longer contains %q", tc.strip)
+			}
+			if err := os.WriteFile(filepath.Join(repo, wetConfigFileName), []byte(stripped), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			t.Chdir(repo)
+
+			out := captureStdout(t, func() {
+				if err := runEnvExplain(nil, nil); err != nil {
+					t.Fatalf("explain must report the gap, not fail on it: %v", err)
+				}
+			})
+			if !strings.Contains(out, "no destination:") {
+				t.Fatalf("explain did not report the gap:\n%s", out)
+			}
+			if !strings.Contains(out, tc.wantKey) || !strings.Contains(out, tc.wantFile) {
+				t.Errorf("explain should send the reader to %s in %s:\n%s", tc.wantKey, tc.wantFile, out)
+			}
+			for _, want := range tc.alsoWant {
+				if !strings.Contains(out, want) {
+					t.Errorf("explain should include %q:\n%s", want, out)
+				}
+			}
+		})
 	}
 }

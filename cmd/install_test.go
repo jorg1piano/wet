@@ -199,12 +199,19 @@ func TestConfirmOverwriteNonInteractive(t *testing.T) {
 // appending must add only what is missing, and must not re-add the entry that
 // is already there.
 func TestEnsureGitignoreEntries(t *testing.T) {
-	want := []string{".wet-worktrees.json", ".wet-worktrees.lock", ".env.worktree"}
+	want := []string{".wet-worktrees.json", ".wet-worktrees.lock", ".env.worktree",
+		wetLocalConfigFileName, envLocalFileName}
 
 	cases := map[string]string{
 		"no gitignore":    "",
 		"partial":         ".wet-worktrees.json\n",
 		"missing newline": "node_modules/\n.wet-worktrees.json",
+		// Matching is line-exact for a reason. Every one of these MENTIONS a
+		// wanted entry without ignoring it: a longer filename that contains
+		// it, an un-ignore, and a comment. Substring matching read all three
+		// as "already covered" and left the file — including the one holding
+		// a 1Password sign-in address — tracked.
+		"near misses": ".env.local.example\n!.wet.local.yaml\n# .env.worktree is generated\n",
 	}
 	for name, initial := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -278,7 +285,7 @@ func TestInstallProjectFilesLayout(t *testing.T) {
 	}
 
 	files := []skillFile{
-		{name: "wet.op.json", content: "{}\n"},
+		{name: "wet.project.json", content: "{}\n"},
 		{name: filepath.Join("scripts", "wet-secrets.sh"), content: "#!/usr/bin/env bash\n", mode: 0o755},
 	}
 	if err := installProjectFiles(files); err != nil {
@@ -297,8 +304,8 @@ func TestInstallProjectFilesLayout(t *testing.T) {
 
 	// It must not also leave a copy in the skill directory — two copies of an
 	// editable file is exactly the drift this move removes.
-	if _, err := os.Stat(filepath.Join(root, ".claude", "skills", "wet", "wet.op.json")); !os.IsNotExist(err) {
-		t.Errorf("wet.op.json is still being written into the skill directory (stat err: %v)", err)
+	if _, err := os.Stat(filepath.Join(root, ".claude", "skills", "wet", "wet.project.json")); !os.IsNotExist(err) {
+		t.Errorf("wet.project.json is still being written into the skill directory (stat err: %v)", err)
 	}
 
 	// Re-running is a no-op, not a prompt: installForce is false here, so a

@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"fmt"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -142,18 +141,4 @@ func unquoteEnvValue(v string) string {
 		return b.String()
 	}
 	return v
-}
-
-// WriteFile0600 writes a file that may hold secrets. The mode is applied on
-// overwrite too — os.WriteFile only sets it when creating.
-func WriteFile0600(path string, content []byte) error {
-	if dir := filepath.Dir(path); dir != "" {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return fmt.Errorf("mkdir %s: %w", dir, err)
-		}
-	}
-	if err := os.WriteFile(path, content, 0o600); err != nil {
-		return err
-	}
-	return os.Chmod(path, 0o600)
 }

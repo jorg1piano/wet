@@ -116,48 +116,6 @@ func requireOP() error {
 	return nil
 }
 
-type opAccount struct {
-	URL         string `json:"url"`
-	Email       string `json:"email"`
-	AccountUUID string `json:"account_uuid"`
-}
-
-func (a opAccount) label() string {
-	if a.Email != "" {
-		return fmt.Sprintf("%s (%s)", a.URL, a.Email)
-	}
-	return a.URL
-}
-
-func (c opClient) accounts() ([]opAccount, error) {
-	out, err := c.run("account", "list", "--format", "json")
-	if err != nil {
-		return nil, err
-	}
-	var accounts []opAccount
-	if err := json.Unmarshal(out, &accounts); err != nil {
-		return nil, fmt.Errorf("parse op account list: %w", err)
-	}
-	return accounts, nil
-}
-
-type opVault struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-}
-
-func (c opClient) vaults() ([]opVault, error) {
-	out, err := c.run("vault", "list", "--format", "json")
-	if err != nil {
-		return nil, err
-	}
-	var vaults []opVault
-	if err := json.Unmarshal(out, &vaults); err != nil {
-		return nil, fmt.Errorf("parse op vault list: %w", err)
-	}
-	return vaults, nil
-}
-
 type opField struct {
 	ID    string `json:"id"`
 	Label string `json:"label"`

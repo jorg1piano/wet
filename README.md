@@ -18,7 +18,6 @@ wet secrets setup [group…]      # scaffold a provider's keys into .wet.yaml
 wet env pull [output]           # regenerate the env files declared under outputs:
 wet env explain [output]        # what each output contains, and where its secrets live
 wet env push <output> --from …  # write that output's declared secrets back to the store
-wet op vault                    # pick this machine's 1Password account + vault
 wet pr create                   # push branch + open a GitHub PR (via gh)
 wet install wet-skill           # install the Claude Code helper skill
 ```
@@ -102,9 +101,13 @@ it:
 
 - `.claude/skills/wet/wet.example.yaml` — the annotated schema, alongside the
   skill, so Claude (and you) have it locally.
-- `.gitignore` — appends `.wet-worktrees.json`, `.wet-worktrees.lock` and
-  `.env.worktree` if they aren't already mentioned, and prints what it added.
-  An existing file is appended to, never rewritten.
+- `.gitignore` — appends `.wet-worktrees.json`, `.wet-worktrees.lock`,
+  `.env.worktree`, `.wet.local.yaml` and `.env.local` if they aren't already
+  listed, matching whole lines so `.env.local.example` isn't mistaken for
+  `.env.local`. The last two are per-machine files you
+  write by hand — `.wet.local.yaml` carries your 1Password sign-in address —
+  so wet ignores them for you. An existing file is appended to, never
+  rewritten.
 - `.claude/settings.json` — sets `env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`,
   merging into the existing settings and leaving every other key alone. Already
   set is a no-op.
@@ -388,7 +391,8 @@ wet env explain
 wet env explain backend
 ```
 
-Reads `.wet.yaml` only: no worktree, no store, no values. It prints each
+Reads the config only — `.wet.yaml` plus the `.wet.local.yaml` overlay that
+names the vault. No worktree, no store, no values. It prints each
 output's keys and where each comes from, and for every selected secret the
 vault/item/field it resolves to and whether it has a declared default.
 
@@ -401,8 +405,8 @@ called and where it lives. It holds no values.
 secrets:
   store: op                 # only 1Password is implemented
   policy: fallback          # required | fallback | disabled — default fallback
-  vault: myapp_development  # may come from .wet.local.yaml instead
-  item: backend-development
+  item: backend-development # the item the fields sit on — a project fact
+  # vault: and account: are NOT here: see .wet.local.yaml below
   definitions:
     SECRET_KEY_BASE:
       field: secret_key_base
@@ -524,24 +528,24 @@ actually wrote empty strings, debugs the wrong thing for an hour.
 Each distinct reference is fetched **once** per run, across every requested
 output — one round trip, and more importantly one authorization prompt.
 
-### `wet op vault` — this machine's account and vault
-
-```
-wet op vault                  # pick, and remember in .wet.local.yaml
-wet op vault --no-remember    # resolve and print, write nothing
-```
+### Where the account and vault come from
 
 The map lives in `.wet.yaml` and is shared by everyone. Which 1Password account
 you are signed into and which vault you keep the project's item in are facts
-about *your workstation*, so they are the only parts that live in the
-gitignored overlay. `wet op vault` resolves them — from flags, from the config,
-or by asking with a picker over `op account list` / `op vault list` — and
-writes the answer to `.wet.local.yaml` so nothing asks again. With no terminal
-(a hook, CI) it fails and names the flag rather than hanging.
+about *your workstation*, so those two keys are the only parts that belong in
+the gitignored `.wet.local.yaml`:
 
-The provider is never named on the command line anywhere else: `secrets.store:`
-decides, and `wet op vault` moves no secrets at all. That is what `wet env
-pull` and `wet env push` are for.
+```yaml
+secrets:
+  account: my.1password.com
+  vault: Development
+```
+
+`wet env pull`, `wet env push` and `wet env explain` read that overlay
+themselves; no separate command sets it, and the provider is never named on the
+command line — `secrets.store:` decides. Until the vault is set, `pull` under
+`policy: fallback` writes each secret's declared `default:` and says so, and
+`explain` reports the missing destination rather than failing.
 
 ### `wet env push` — declared secrets, back to the store
 

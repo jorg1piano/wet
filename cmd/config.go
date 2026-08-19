@@ -127,7 +127,7 @@ func (v *OutputValues) UnmarshalYAML(node *yaml.Node) error {
 }
 
 // MarshalYAML round-trips the ordered form, so a config wet rewrites (the
-// scaffolder, `wet op` remembering a vault) keeps its `values:` order.
+// scaffolder) keeps its `values:` order.
 func (v OutputValues) MarshalYAML() (any, error) {
 	node := &yaml.Node{Kind: yaml.MappingNode}
 	for _, k := range v.Keys {
@@ -166,9 +166,12 @@ type SecretsConfig struct {
 	// Policy decides what happens when the store cannot answer. See
 	// SecretPolicy* — the default is "fallback".
 	Policy string `yaml:"policy,omitempty"`
-	// Vault and Item are the default destination. Both may be empty: `wet op
-	// vault` then asks and writes the answer to .wet.local.yaml, so a fresh
-	// clone is not a scavenger hunt for names.
+	// Vault and Item are the default destination, and they live in DIFFERENT
+	// files. Item belongs in the committed .wet.yaml — which item the fields
+	// sit on is a fact about the project, and everyone needs the same answer.
+	// Vault belongs in the gitignored .wet.local.yaml, since which vault a
+	// machine reads from (and which account it is signed into) is a fact
+	// about that machine.
 	Vault string `yaml:"vault,omitempty"`
 	Item  string `yaml:"item,omitempty"`
 	// Account is the 1Password account (sign-in address or UUID). Empty means
@@ -759,6 +762,17 @@ func (c *WetConfig) validateSecrets() error {
 		return nil
 	}
 	s := c.Secrets
+	// An overlay-only secrets: block is the shape a user lands in by
+	// following the instructions: .wet.local.yaml is where the vault goes, so
+	// someone writes one against a .wet.yaml that has no secrets: block at
+	// all. The merge then synthesizes a block with an empty store, and the
+	// resulting `secrets.store "" is not supported` names a key they never
+	// wrote and does not say what is actually missing.
+	if (s.Vault != "" || s.Item != "" || s.Account != "") && s.Store == "" && len(s.Definitions) == 0 {
+		return fmt.Errorf("secrets: names a destination (vault/item/account) but declares no store: or definitions: — "+
+			"the credentials themselves belong in %s; %s carries only the machine-local vault and account",
+			wetConfigFileName, wetLocalConfigFileName)
+	}
 	if s.Store != secretsStoreOP {
 		return fmt.Errorf("secrets.store %q is not supported (known: %s)", s.Store, secretsStoreOP)
 	}

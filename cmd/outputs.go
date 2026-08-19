@@ -426,10 +426,16 @@ func (s *SecretsConfig) ResolveSecretRef(name string) (SecretRef, error) {
 		ref.Item = def.Item
 	}
 	if ref.Vault == "" {
-		return ref, fmt.Errorf("secrets.definitions.%s: no vault — set secrets.vault (run `wet op vault` to pick one) or give this secret its own vault:", name)
+		return ref, fmt.Errorf("secrets.definitions.%s: no vault configured\n"+
+			"  Add a shared secrets.vault to %s:\n"+
+			"    secrets:\n"+
+			"      vault: Development\n"+
+			"  Or put the same block in %s when the vault differs by machine.\n"+
+			"  To override only this secret, set secrets.definitions.%s.vault instead.",
+			name, wetConfigFileName, wetLocalConfigFileName, name)
 	}
 	if ref.Item == "" {
-		return ref, fmt.Errorf("secrets.definitions.%s: no item — set secrets.item or give this secret its own item:", name)
+		return ref, fmt.Errorf("secrets.definitions.%s: no item — set secrets.item in %s (which item the fields sit on is a project fact) or give this secret its own item", name, wetConfigFileName)
 	}
 	return ref, nil
 }
@@ -465,7 +471,7 @@ func resolveSecrets(cfg *WetConfig, names []string, policy string, reader Secret
 		// An unresolvable reference is treated as a store failure, not as a
 		// config error. The only way to get here is a missing vault or item,
 		// and both are machine-local facts that live in .wet.local.yaml — a
-		// fresh clone that has never run `wet op vault` must still generate
+		// fresh clone with no .wet.local.yaml yet must still generate
 		// its files from declared defaults, which is exactly what `fallback`
 		// promises. A malformed ref: was already rejected at load.
 		ref, readErr := cfg.Secrets.ResolveSecretRef(name)

@@ -363,6 +363,30 @@ func TestIgnoreStarterOutputsIsIdempotent(t *testing.T) {
 	}
 }
 
+// The announcement is the whole point of the `added` return value, and it has
+// to be as idempotent as the write is. A second run that still says "added
+// .env.dev to .gitignore" reports a change wet did not make, which is how a
+// user starts looking for a diff that is not there.
+func TestIgnoreGeneratedOutputAnnouncesOnlyWhatItWrote(t *testing.T) {
+	dir := t.TempDir()
+	first := captureStdout(t, func() {
+		if err := ignoreGeneratedOutput(dir, "web/.env.dev"); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(first, "web/.env.dev") {
+		t.Errorf("adding an entry must name it, got: %q", first)
+	}
+	second := captureStdout(t, func() {
+		if err := ignoreGeneratedOutput(dir, "web/.env.dev"); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if strings.TrimSpace(second) != "" {
+		t.Errorf("a no-op run must stay silent, got: %q", second)
+	}
+}
+
 // An output wet invents is a file it has just promised to generate, holding
 // whatever credentials that output selects. It has to be born gitignored —
 // the starter path already does this, and a second call site that only

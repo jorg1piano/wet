@@ -131,6 +131,14 @@ func runEnvPush(cmd *cobra.Command, args []string) error {
 		fields map[string]string
 	}
 	edits := map[string]*edit{}
+	// Fetch each destination item once. Several definitions normally share an
+	// item, and re-reading it once per field is both slow and capable of showing
+	// an inconsistent snapshot if the item changes during validation.
+	type itemState struct {
+		item   opItem
+		exists bool
+	}
+	items := map[string]itemState{}
 	conflicts := 0
 
 	for _, name := range output.Secrets {
@@ -149,16 +157,22 @@ func runEnvPush(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
-		item, exists, err := client.item(ref.Vault, ref.Item)
-		if err != nil {
-			return err
+		itemKey := ref.Vault + "\x00" + ref.Item
+		state, fetched := items[itemKey]
+		if !fetched {
+			item, exists, err := client.item(ref.Vault, ref.Item)
+			if err != nil {
+				return err
+			}
+			state = itemState{item: item, exists: exists}
+			items[itemKey] = state
 		}
-		if !exists && !envPushCreateItem {
+		if !state.exists && !envPushCreateItem {
 			return fmt.Errorf("item %q does not exist in vault %s (needed by %s)\n"+
 				"pass --create-item to create it", ref.Item, ref.Vault, name)
 		}
-		if exists {
-			if current, has := item.value(ref.Field); has && current != "" {
+		if state.exists {
+			if current, has := state.item.value(ref.Field); has && current != "" {
 				if current == value {
 					report = append(report, pushStatus{name, ref, "unchanged"})
 					continue
@@ -170,7 +184,7 @@ func runEnvPush(cmd *cobra.Command, args []string) error {
 				}
 			}
 		}
-		key := ref.Vault + "\x00" + ref.Item
+		key := itemKey
 		if edits[key] == nil {
 			edits[key] = &edit{vault: ref.Vault, item: ref.Item, fields: map[string]string{}}
 		}
@@ -187,7 +201,7 @@ func runEnvPush(cmd *cobra.Command, args []string) error {
 		if !envPushDryRun {
 			what = "write"
 		}
-		if !exists {
+		if !state.exists {
 			what += " (creating item)"
 		}
 		report = append(report, pushStatus{name, ref, what})
@@ -211,6 +225,12 @@ func runEnvPush(cmd *cobra.Command, args []string) error {
 		}
 		return nil
 	}
+	// Conflict detection is part of validation. Do not apply the unrelated
+	// non-conflicting edits and then return an error: a failed push must leave
+	// the store unchanged unless --force explicitly authorizes overwrites.
+	if conflicts > 0 {
+		return fmt.Errorf("%d field(s) already hold a different value; rerun with --force to overwrite", conflicts)
+	}
 	// Every conflict and every missing item was detected above, so the writes
 	// below are the only step that can partially apply.
 	for _, key := range sortedKeys(edits) {
@@ -226,9 +246,6 @@ func runEnvPush(cmd *cobra.Command, args []string) error {
 		if err := client.setFields(e.vault, e.item, e.fields); err != nil {
 			return err
 		}
-	}
-	if conflicts > 0 {
-		return fmt.Errorf("%d field(s) already hold a different value; rerun with --force to overwrite", conflicts)
 	}
 	return nil
 }

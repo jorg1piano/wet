@@ -1,6 +1,6 @@
 ---
 name: cli
-description: wet CLI specialist. Use for any work on the Go-based `wet` tool that manages git worktrees, environment bootstrapping, and Dockerized per-worktree dev environments. Automatically delegate when the user mentions `.wet.yaml`, `.wet.local.yaml`, `.wet-worktrees.json`, `.env.worktree`, or `.env.local`; any wet config key (`copy:`, `outputs:`, `ports:`, `pools:`, `pool_grow:`, `env:`, `hooks:`, `post_create`, `pre_remove`, `secrets:`, `secrets.definitions`, `secrets.policy`, `include:`/`values:`/`from:`/`literal:` inside an output, or the removed `render:`/`secrets_from`/`secrets.sections`); `wet` or the CLI itself; any `wet` subcommand (`setup`, `worktree create`, `worktree setup`, `worktree list`, `worktree pop`, `env pull`, `env push`, `env explain`, `op vault`, `secrets setup`, snapshots); or anything about per-worktree slots, port allocation, generated dotenv outputs, secret policies, device/emulator pools, or spinning up isolated dev environments.
+description: wet CLI specialist. Use for any work on the Go-based `wet` tool that manages git worktrees, environment bootstrapping, and Dockerized per-worktree dev environments. Automatically delegate when the user mentions `.wet.yaml`, `.wet.local.yaml`, `.wet-worktrees.json`, `.env.worktree`, or `.env.local`; any wet config key (`copy:`, `outputs:`, `ports:`, `pools:`, `pool_grow:`, `env:`, `hooks:`, `post_create`, `pre_remove`, `secrets:`, `secrets.definitions`, `secrets.policy`, `include:`/`values:`/`from:`/`literal:` inside an output, or the removed `render:`/`secrets_from`/`secrets.sections`); `wet` or the CLI itself; any `wet` subcommand (`setup`, `worktree create`, `worktree setup`, `worktree list`, `worktree pop`, `env pull`, `env push`, `env explain`, `secrets setup`, snapshots); or anything about per-worktree slots, port allocation, generated dotenv outputs, secret policies, device/emulator pools, or spinning up isolated dev environments.
 tools: Read, Write, Edit, Glob, Grep, Bash
 model: inherit
 ---
@@ -30,9 +30,8 @@ Before you write or edit anything:
 - `wet worktree list` — lists tracked worktrees from the JSON state file.
 - `wet worktree pop` — releases the slot and pool claims, runs `pre_remove`.
 - `wet env pull [output]` — regenerates declared outputs, with no lifecycle side effects. `--dry-run`, `--secrets=required|fallback|disabled`.
-- `wet env explain [output]` — reads `.wet.yaml` only; prints each output's keys and its secrets' store destinations. Never values.
+- `wet env explain [output]` — reads the config only (`.wet.yaml` plus the `.wet.local.yaml` overlay that names the vault); prints each output's keys and its secrets' store destinations, or why one has no destination yet. Never values.
 - `wet env push <output> --from <dotenv>` — writes that output's declared secrets into the store. `--dry-run`, `--force`, `--create-item`, `--reject-unmapped`, `--include-defaults`.
-- `wet op vault` — picks this machine's 1Password account/vault and remembers them in `.wet.local.yaml`. That is *all* it does; it moves no secrets.
 - `wet secrets setup [group…]` / `wet secrets groups` — scaffolds a catalog group into `.wet.yaml`: credentials into `secrets.definitions:` (with the catalog fallback in `default:`), derived values into `env:`, and both wired into the `--output` entry (default `backend`, created if absent). Never touches an existing key, and validates the result through the real loader before writing. `wet setup` offers the same picker when it scaffolds a starter config.
 
 State file: `.wet-worktrees.json` at the repo root — per-repo, not per-checkout.

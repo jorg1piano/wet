@@ -849,25 +849,47 @@ var commentedSchemaKeys = map[string]*regexp.Regexp{
 	"pr.body_template": regexp.MustCompile(`(?m)^\s+# body_template: \|$`),
 	// A non-default file mode is the exception, so it is illustrated rather
 	// than applied to the example's own outputs.
-	"outputs[].mode": regexp.MustCompile(`(?m)^\s*#\s+mode: "0\d{3}"`),
+	"outputs[].mode": regexp.MustCompile(`(?m)^    # mode: "0\d{3}"`),
 	// The whole secrets: block is optional and names a real vault, so a live
 	// example would send anyone running the example config at a vault that
 	// isn't theirs. Each leaf is pinned to the shape it is documented as.
-	"secrets":                       regexp.MustCompile(`(?m)^# secrets:$`),
-	"secrets.store":                 regexp.MustCompile(`(?m)^#\s+store: op$`),
-	"secrets.policy":                regexp.MustCompile(`(?m)^#\s+policy: \w+`),
-	"secrets.vault":                 regexp.MustCompile(`(?m)^#\s+vault: \S+`),
-	"secrets.item":                  regexp.MustCompile(`(?m)^#\s+item: \S+`),
-	"secrets.account":               regexp.MustCompile(`(?m)^#\s+account: \S+`),
-	"secrets.definitions":           regexp.MustCompile(`(?m)^#\s+definitions:$`),
-	"secrets.definitions.*.field":   regexp.MustCompile(`(?m)^#\s+field: \S+`),
-	"secrets.definitions.*.default": regexp.MustCompile(`(?m)^#\s+default:`),
-	"secrets.definitions.*.vault":   regexp.MustCompile(`(?m)^#\s+vault: \S+`),
-	"secrets.definitions.*.item":    regexp.MustCompile(`(?m)^#\s+item: \S+`),
-	"secrets.definitions.*.ref":     regexp.MustCompile(`(?m)^#\s+ref: op://`),
+	//
+	// The indentation is part of the pin and `\s+` is not good enough. These
+	// keys repeat at three depths — block level, per-definition override, and
+	// the .wet.local.yaml snippet — so a loose regex lets one illustration
+	// vouch for a different key at a different depth. It did: deleting the
+	// only per-definition `vault:` override left the test green, because the
+	// block-level line matched its regex. Depths, in this file:
+	//
+	//   "#   key:"        block level, inside the commented secrets: block
+	//   "#       key:"    a definition's own override
+	//   "#     key:"      the .wet.local.yaml snippet in the prose above it
+	//
+	// The cost is real and accepted: reindenting cmd/wet.example.yaml fails
+	// this test with "not documented", which points at the wrong problem. The
+	// file is hand-maintained and its indentation is part of how it reads, so
+	// a reindent is a deliberate edit — and re-pinning the regex beside it is
+	// cheaper than the alternative, which is a guard that passes while the
+	// illustration it vouches for has been deleted.
+	"secrets":             regexp.MustCompile(`(?m)^# secrets:$`),
+	"secrets.store":       regexp.MustCompile(`(?m)^#   store: op$`),
+	"secrets.policy":      regexp.MustCompile(`(?m)^#   policy: \w+`),
+	"secrets.item":        regexp.MustCompile(`(?m)^#   item: \S+`),
+	"secrets.definitions": regexp.MustCompile(`(?m)^#   definitions:$`),
+	// vault and account are machine-local, so the example documents them
+	// where they actually belong: the .wet.local.yaml snippet, NOT the
+	// commented .wet.yaml block. Pinning to that depth is what keeps the two
+	// from drifting back together.
+	"secrets.vault":                 regexp.MustCompile(`(?m)^#     vault: \S+`),
+	"secrets.account":               regexp.MustCompile(`(?m)^#     account: \S+`),
+	"secrets.definitions.*.field":   regexp.MustCompile(`(?m)^#       field: \S+`),
+	"secrets.definitions.*.default": regexp.MustCompile(`(?m)^#       default:`),
+	"secrets.definitions.*.vault":   regexp.MustCompile(`(?m)^#       vault: \S+`),
+	"secrets.definitions.*.item":    regexp.MustCompile(`(?m)^#       item: \S+`),
+	"secrets.definitions.*.ref":     regexp.MustCompile(`(?m)^#       ref: op://`),
 	// An output's secrets: list is meaningless without a secrets: block, so
 	// it is illustrated in the same commented example.
-	"outputs[].secrets": regexp.MustCompile(`(?m)^\s*#\s+secrets:$`),
+	"outputs[].secrets": regexp.MustCompile(`(?m)^    # secrets:$`),
 }
 
 // schemaYAMLPaths walks a config struct and returns the dotted path of every
@@ -1041,5 +1063,34 @@ func TestValidateRejectsUnknownPoolGrowBeforeExhaustion(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "exhausted") {
 		t.Fatalf("error should not be the misleading exhaustion message, got %q", err)
+	}
+}
+
+// Writing a .wet.local.yaml is now the ONLY documented way to name a vault,
+// so someone will write one against a .wet.yaml that has no secrets: block —
+// following the instructions exactly. The merge synthesizes a secrets: block
+// with an empty store, and the generic store error named a key the user never
+// wrote. The message has to say which file is missing what.
+func TestOverlayOnlySecretsBlockSaysWhatIsMissing(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repo, wetConfigFileName),
+		[]byte("project_name: demo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, wetLocalConfigFileName),
+		[]byte("secrets:\n  vault: V\n  account: a@b.c\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadWetConfigWithLocal(repo, repo)
+	if err == nil {
+		t.Fatal("a secrets: block with no store and no definitions must not load")
+	}
+	if strings.Contains(err.Error(), `secrets.store ""`) {
+		t.Errorf("error blames a key the user never wrote: %v", err)
+	}
+	for _, want := range []string{"declares no store: or definitions:", wetConfigFileName, wetLocalConfigFileName} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should mention %q, got: %v", want, err)
+		}
 	}
 }

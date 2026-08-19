@@ -1,6 +1,6 @@
 ---
 name: wet
-description: "wet parallel-worktree helper: write/edit .wet.yaml configs AND boot the stack + spawn an agent team. Detects worktree context automatically. Triggers on: wet, wet.yaml, worktree create, parallel worktrees, port allocator, worktree hooks, wet outputs, wet env pull, wet env push, wet env explain, wet op vault, wet secrets, secrets policy, wet pr, pull request, start team, spawn team, boot team, wet team."
+description: "wet parallel-worktree helper: write/edit .wet.yaml configs AND boot the stack + spawn an agent team. Detects worktree context automatically. Triggers on: wet, wet.yaml, worktree create, parallel worktrees, port allocator, worktree hooks, wet outputs, wet env pull, wet env push, wet env explain, wet secrets, secrets policy, wet pr, pull request, start team, spawn team, boot team, wet team."
 allowed-tools: [Bash, Read, Glob]
 context: inherit
 ---
@@ -138,17 +138,21 @@ wet writes two files at the **main repo root** that must never be committed:
   scratch; it appears the first time anyone runs `wet worktree create` and
   otherwise just clutters `git status`.
 
-Make sure the repo's `.gitignore` covers both. A single entry does it:
+`wet install wet-skill` adds both by name. List them the same way if you are
+writing the `.gitignore` by hand:
 
 ```gitignore
-.wet-worktrees.*
+.wet-worktrees.json
+.wet-worktrees.lock
 ```
 
-If the `.gitignore` already lists `.wet-worktrees.json` on its own, add
-`.wet-worktrees.lock` beside it rather than leaving the lock file untracked.
+A `.wet-worktrees.*` glob ignores them just as well, but wet matches whole
+lines when it checks, so it will not recognise the glob as covering them and
+will append both names underneath it.
 
-Also gitignore **every `out:` path in `outputs:`**, plus `.env.worktree`, and
-`.env.local` / `.wet.local.yaml` if the project uses those overlays. Generated
+`wet install wet-skill` already adds `.env.worktree`, `.env.local` and
+`.wet.local.yaml`, and every output wet invents is born gitignored. What is
+left for you is **every `out:` path in `outputs:` that you wrote by hand**. Generated
 outputs must be gitignored without exception: `wet setup` generates them in the
 main checkout at slot 0 too, so a *tracked* `out:` is rewritten and left dirty
 on every run — and if it carries secrets, one `git commit -a` puts them in the
@@ -394,8 +398,9 @@ carry ordinary values only.
 secrets:
   store: op                 # only 1Password is implemented
   policy: fallback          # required | fallback | disabled — default fallback
-  vault: myapp_development  # may instead come from .wet.local.yaml
-  item: backend-development
+  item: backend-development # the item the fields sit on — a project fact
+  # vault: and account: are NOT here — they are machine-local, and belong in
+  # the gitignored .wet.local.yaml under this same secrets: key.
   definitions:
     SECRET_KEY_BASE:
       field: secret_key_base
@@ -433,9 +438,9 @@ Rules worth stating to a user before writing this block:
   a reserved field, and must not collide with a declared port or an `env:` key.
   If the user has a development fallback sitting in `env:` under the same name,
   move it into the definition's `default:` — that collision is a hard error.
-- **`vault` / `account` may be omitted** — `wet op vault` asks and remembers the
-  answer in the gitignored `.wet.local.yaml`. Do not put an account in
-  `.wet.yaml` unless the whole team signs into the same one.
+- **`vault` / `account` belong in `.wet.local.yaml`** — which account you sign
+  into and which vault you keep the item in are facts about one machine. Do not
+  put an account in `.wet.yaml` unless the whole team signs into the same one.
 - **`.env.local` cannot override a secret.** Secret values reach a generated
   file only from the store or from a declared `default:`.
 
@@ -504,18 +509,22 @@ gets a provenance line, names only, never values:
 Each distinct reference is fetched once per run across all outputs — one round
 trip, and one authorization prompt.
 
-### `wet op vault` — machine-local account and vault
+### Where the account and vault come from
 
-```bash
-wet op vault                # pick, and remember in .wet.local.yaml
-wet op vault --no-remember  # resolve and print, write nothing
+No command sets them. The credential map is committed in `.wet.yaml`; which
+account you are signed into and which vault you use are facts about your
+workstation, so they are the two keys the gitignored overlay carries:
+
+```yaml
+# .wet.local.yaml
+secrets:
+  account: my.1password.com
+  vault: Development
 ```
 
-That is all it does. It moves no secrets. The credential map is committed in
-`.wet.yaml`; which account you are signed into and which vault you use are facts
-about your workstation, so they are the only parts in the gitignored overlay.
-With no terminal (a hook, CI) the picker fails and names the flag rather than
-hanging.
+Until the vault is set, `policy: fallback` writes each secret's declared
+`default:` and names which ones fell back; `wet env explain` reports the
+missing destination instead of failing.
 
 ### `wet env push` — declared secrets, back into the store
 
@@ -829,7 +838,5 @@ Team — ready
 - `wet env --help`, `wet env pull --help`, `wet env push --help` — the generated
   env files and the secret flow, driven entirely by `outputs:` and `secrets:` in
   `.wet.yaml` rather than a per-repo `op` pipeline.
-- `wet op vault --help` — picking and remembering this machine's 1Password
-  account and vault. It moves no secrets.
 - `wet --help`, `wet worktree --help` — the installed CLI's own reference,
   always matching the installed version.

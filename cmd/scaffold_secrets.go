@@ -83,10 +83,13 @@ func offerSecretGroups(configPath string) error {
 	fmt.Printf("  Added %d env key(s) for: %s\n", len(res.AddedEnv), strings.Join(groups, ", "))
 	if len(res.AddedSecrets) > 0 {
 		fmt.Printf("  Declared %d credential(s) under secrets.definitions:, each with the dev\n", len(res.AddedSecrets))
-		fmt.Println("  fallback it boots on until `wet op vault` points at a real vault.")
+		fmt.Println("  fallback it boots on until the store can answer.")
+		fmt.Println()
+		printSecretDestinationSteps("  ", res.Output)
+		fmt.Println()
 	}
 	if res.CreatedOutput {
-		fmt.Printf("  Generating %s/.env.dev from the %q output — move it if that is not\n", res.Output, res.Output)
+		fmt.Printf("  Generating %s from the %q output — move it if that is not\n", res.OutputPath, res.Output)
 		fmt.Println("  where your app reads its env file from.")
 	}
 	return nil

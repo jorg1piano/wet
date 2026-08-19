@@ -203,7 +203,12 @@ func runEnvExplain(cmd *cobra.Command, args []string) error {
 			// missing — so it reports the gap instead of failing on it.
 			ref, err := cfg.Secrets.ResolveSecretRef(name)
 			if err != nil {
-				fmt.Printf("    %s -> (no destination: run `wet op vault`) (%s)\n", name, fallback)
+				// The resolver's own error is printed rather than one
+				// summary for all of them. A missing item and a missing
+				// vault are fixed in DIFFERENT files, and a message that
+				// named only the vault sent half the readers to edit the
+				// wrong one. The errors already say which key is missing.
+				fmt.Printf("    %s -> (no destination: %s) (%s)\n", name, whyNoDestination(name, err), fallback)
 				continue
 			}
 			fmt.Printf("    %s -> %s/%s/%s (%s)\n", name, ref.Vault, ref.Item, ref.Field, fallback)
@@ -368,4 +373,16 @@ func resolveExisting(p string) string {
 		return p // reached the root; nothing left to resolve
 	}
 	return filepath.Join(resolveExisting(parent), filepath.Base(p))
+}
+
+// whyNoDestination trims the resolver's `secrets.definitions.<NAME>: ` prefix
+// off an error explain is about to print.
+//
+// explain lists one line per secret and has already printed the name, so the
+// prefix repeats it — and a config missing its vault is missing it for EVERY
+// secret, so the listing became ten near-identical long lines with the one
+// word that differs buried in the middle. The rest of the message is the part
+// worth reading, and it is the resolver's wording either way.
+func whyNoDestination(name string, err error) string {
+	return strings.TrimPrefix(err.Error(), "secrets.definitions."+name+": ")
 }

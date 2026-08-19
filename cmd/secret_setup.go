@@ -201,16 +201,39 @@ func printScaffoldSummary(res *ScaffoldResult, groups []string) {
 		fmt.Printf("  kept:    %d existing key(s) untouched (%s)\n", len(res.KeptEnv), strings.Join(res.KeptEnv, ", "))
 	}
 	if res.CreatedOutput {
-		fmt.Printf("  outputs: created %q, writing %s/.env.dev — change its out: if that is not where it belongs\n",
-			res.Output, res.Output)
+		fmt.Printf("  outputs: created %q, writing %s — change its out: if that is not where it belongs\n",
+			res.Output, res.OutputPath)
 	} else {
 		fmt.Printf("  outputs: wired into %q\n", res.Output)
 	}
 	if len(res.AddedSecrets) > 0 {
-		fmt.Printf("\nNext: `wet op vault` to point this machine at the right vault, then\n")
-		fmt.Printf("`wet env pull %s` to write the file, or `wet env push %s --from <dotenv>`\n", res.Output, res.Output)
-		fmt.Println("to store real values you already have.")
+		fmt.Println()
+		printSecretDestinationSteps("", res.Output)
 	}
+}
+
+// printSecretDestinationSteps tells the user the two things that still have to
+// be named before a declared secret can actually be read.
+//
+// Both halves matter, and naming only one is worse than naming neither. A
+// resolvable reference needs an item AND a vault: leave the item out and
+// `policy: fallback` swallows the unresolvable reference as a store failure
+// and writes the dev placeholders, so the user believes they wired up the
+// store and got `dev-only-…` instead. They also live in different files —
+// the item is a project fact and belongs in the committed config, while the
+// vault and account are facts about one workstation.
+//
+// One function because this is printed from two scaffolders, and the version
+// of this that drifts is the one written twice.
+// indent is the caller's own left margin: `wet secrets setup` narrates at
+// column 0 and `wet setup` two spaces in, and a shared block that ignored
+// that outdented mid-paragraph and then re-indented.
+func printSecretDestinationSteps(indent, output string) {
+	fmt.Printf("%sBefore these resolve, name where they live:\n", indent)
+	fmt.Printf("%s  secrets.item          in %s — the item every field sits on (a project fact)\n", indent, wetConfigFileName)
+	fmt.Printf("%s  secrets.vault/account in %s — this machine's sign-in (gitignored)\n", indent, wetLocalConfigFileName)
+	fmt.Printf("%sThen `wet env pull %s` writes the file, or `wet env push %s --from <dotenv>`\n", indent, output, output)
+	fmt.Printf("%sstores real values you already have.\n", indent)
 }
 
 // validateScaffolded runs the freshly written bytes through the real loader
@@ -320,6 +343,10 @@ func (m multiSelectModel) View() string {
 		Render("  space toggles · enter confirms · q cancels")
 	return m.list.View() + "\n" + help
 }
+
+// errPickerCancelled distinguishes "the user pressed q" from a real failure,
+// so a cancelled picker exits quietly instead of printing a stack of context.
+var errPickerCancelled = errors.New("cancelled")
 
 // pickGroups runs the multi-select, pre-checking what is already scaffolded.
 //

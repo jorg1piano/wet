@@ -288,8 +288,8 @@ unshareable.
 The same reasoning puts the 1Password account and vault there. Which account you
 are signed into is a fact about you; which credentials the project needs and
 what each one is called is a fact about the project. So `secrets.definitions:`
-is committed and `wet op vault` writes only `secrets.account` and
-`secrets.vault` into the overlay.
+is committed, while `secrets.account` and `secrets.vault` are the two keys the
+overlay carries.
 
 It is read from the checkout that has `main_branch:` checked out — not
 necessarily git's "main working tree". A machine often carries several checkouts
