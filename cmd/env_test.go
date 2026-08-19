@@ -499,3 +499,30 @@ func TestMergeOverridesWarnsOnEnvShadow(t *testing.T) {
 		t.Errorf("a key with no env: entry must not warn, got %q", out)
 	}
 }
+
+// A render target may point into a directory that doesn't exist yet — the
+// .vscode/launch.json case, where .vscode is gitignored and absent from a
+// fresh worktree. Before MkdirAll this failed with a bare ENOENT.
+func TestRenderSetupTargetCreatesMissingParentDir(t *testing.T) {
+	tree := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tree, "launch.json.tpl"),
+		[]byte(`{"port": {{.APP_PORT}}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &WetConfig{ProjectName: "app"}
+	data := map[string]any{"APP_PORT": 4010}
+	target := RenderTarget{Template: "launch.json.tpl", Out: ".vscode/launch.json"}
+
+	if err := renderSetupTarget(cfg, data, tree, target, nil); err != nil {
+		t.Fatalf("render into missing parent dir: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(tree, ".vscode", "launch.json"))
+	if err != nil {
+		t.Fatalf("read rendered output: %v", err)
+	}
+	if want := `{"port": 4010}`; string(got) != want {
+		t.Errorf("rendered %q, want %q", got, want)
+	}
+}

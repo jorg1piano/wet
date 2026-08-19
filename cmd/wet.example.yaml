@@ -177,6 +177,18 @@ render:
   #   secrets: mobile
   #   secrets_from: [/tmp/vault.json]
 
+  # Editor config is a render target too, not just env files. A debugger has
+  # to attach to *this* slot's port and *this* worktree's device, so a copied
+  # launch.json is wrong the moment a second worktree exists. Missing parent
+  # directories are created, so .vscode/ need not already be in the worktree.
+  #
+  # Render it rather than patching a tracked launch.json in place: `sed` plus
+  # `git update-index --assume-unchanged` also hides every later edit the user
+  # makes to that file. Add the rendered output to .gitignore, keep the .tpl
+  # in git.
+  # - template: .vscode/launch.json.tpl
+  #   out: .vscode/launch.json
+
 # ---------------------------------------------------------------------------
 # secrets: — the vault, and which keys each consumer needs
 # ---------------------------------------------------------------------------

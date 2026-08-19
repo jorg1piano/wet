@@ -176,6 +176,13 @@ func renderSetupTarget(cfg *WetConfig, data map[string]any, treePath string, tar
 		return err
 	}
 	out := filepath.Join(treePath, target.Out)
+	// A target may render into a directory that doesn't exist yet — .vscode/
+	// is gitignored in most repos, so a fresh worktree has no such directory
+	// until something makes one. Without this, such a target fails with a
+	// bare ENOENT naming a path the user can see is right.
+	if err := os.MkdirAll(filepath.Dir(out), 0755); err != nil {
+		return fmt.Errorf("create parent of %s: %w", out, err)
+	}
 	if err := os.WriteFile(out, []byte(rendered), 0600); err != nil {
 		return fmt.Errorf("write %s: %w", out, err)
 	}
@@ -214,6 +221,11 @@ func renderTarget(cfg *WetConfig, data map[string]any, treePath string, target R
 		}
 		fmt.Print(rendered)
 		return nil
+	}
+	// Same reason as renderSetupTarget: the output's directory may not exist
+	// yet, and ENOENT on a correct-looking path is a bad way to say so.
+	if err := os.MkdirAll(filepath.Dir(outPath), 0755); err != nil {
+		return fmt.Errorf("create parent of %s: %w", outPath, err)
 	}
 	// 0600: the whole point of the secrets channel is that this file may hold
 	// secrets, and it lands in a tree that outlives the command.
