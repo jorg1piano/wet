@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -194,7 +195,27 @@ func runEnvExplain(cmd *cobra.Command, args []string) error {
 			fmt.Printf("    %s -> %s/%s/%s (%s)\n", name, ref.Vault, ref.Item, ref.Field, fallback)
 		}
 	}
+
+	// Only when explaining the whole config: with one output named, "unused"
+	// would mean "unused by this output", which is not a problem at all.
+	if len(args) == 0 {
+		reportUnusedSecrets(os.Stdout, cfg)
+	}
 	return nil
+}
+
+// reportUnusedSecrets prints definitions no output selects. Non-fatal: a
+// credential used only by a deployment is legitimate — so this names them and
+// leaves the judgement to the reader.
+func reportUnusedSecrets(w io.Writer, cfg *WetConfig) {
+	unused := cfg.UnusedSecrets()
+	if len(unused) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "\nunused: %d secret(s) no output selects — %s\n",
+		len(unused), strings.Join(unused, ", "))
+	fmt.Fprintln(w, "  A definition nothing selects is inert: it is never fetched and never")
+	fmt.Fprintln(w, "  written, which reads as wet ignoring a provider you configured.")
 }
 
 // buildWorktreeData assembles the ordinary value set for an env command.

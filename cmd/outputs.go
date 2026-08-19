@@ -281,6 +281,49 @@ func (c *WetConfig) SelectOutputs(only []string) ([]OutputConfig, error) {
 	return out, nil
 }
 
+// UnusedSecrets reports secret definitions no output selects.
+//
+// This is the drift the redesign was written to prevent, seen from the other
+// side. The old split inventory allowed "a secret can be mapped but never
+// consumed"; collapsing the inventory into one file does not by itself make
+// that visible — a definition nothing selects is never fetched and never
+// written, which reads as wet ignoring a provider you thought you configured.
+//
+// Non-fatal by design: a credential used only by a deployment is legitimate,
+// so this names it and leaves the judgement to the reader.
+//
+// The spec pairs this with a second diagnostic — `env:` values "used by
+// neither outputs nor hooks" — which is deliberately NOT implemented, because
+// it is wrong for wet. Every `env:` value is written to `.env.worktree`, and
+// that file is consumed by docker compose and by anything a developer sources.
+// COMPOSE_PROJECT_NAME is the clearest case: no output includes it, no hook
+// names it, and it is load-bearing for every parallel stack in the repo.
+// Reporting it as unused would tell someone to delete the value their whole
+// worktree isolation depends on, which is worse than saying nothing.
+func (c *WetConfig) UnusedSecrets() []string {
+	if c.Secrets == nil {
+		return nil
+	}
+	used := map[string]bool{}
+	for _, o := range c.Outputs {
+		for _, name := range o.Secrets {
+			used[name] = true
+		}
+	}
+	// A hook body is shell, so the honest test is a substring match: wet
+	// cannot parse it, and a false "used" is far better than telling someone
+	// to delete a credential their post_create depends on.
+	hooks := strings.Join(append(append([]string{}, c.Hooks.PostCreate...), c.Hooks.PreRemove...), "\n")
+
+	var unused []string
+	for _, name := range sortedKeys(c.Secrets.Definitions) {
+		if !used[name] && !strings.Contains(hooks, name) {
+			unused = append(unused, name)
+		}
+	}
+	return unused
+}
+
 // ---------------------------------------------------------------------------
 // Secret resolution
 // ---------------------------------------------------------------------------
@@ -487,6 +530,14 @@ type EnvPair struct {
 // written. Producing all of these before touching the filesystem is what makes
 // a pull all-or-nothing: a second output that fails validation must not leave
 // the first one already replaced on disk.
+//
+// The guarantee is exact and worth stating exactly: every CONFIGURATION or
+// RESOLUTION failure is caught before any file is touched. A write that fails
+// on I/O — ENOSPC, a directory turned read-only underneath us — can still
+// leave an earlier output replaced, because each file is replaced atomically
+// but the set is not. Making the set atomic would need a staging directory
+// and a rename loop with its own partial-failure window, which buys less than
+// it costs for a case a re-run fixes.
 type ResolvedOutput struct {
 	Config      OutputConfig
 	Pairs       []EnvPair
@@ -711,7 +762,10 @@ func PullOutputs(req PullRequest) error {
 		// Warned here rather than in Validate() so it fires once, when a file
 		// is about to be written, and not from every command that loads config.
 		if len(r.Config.Secrets) > 0 && r.Mode&0o077 != 0 {
-			fmt.Fprintf(os.Stderr, "  warning: %s carries %d secret(s) at mode %04o, readable beyond its owner\n",
+			// Through `out` like every other line in this loop: a caller that
+			// supplies Out is capturing this run's narrative, and a lone write
+			// to os.Stderr interleaves outside its control.
+			fmt.Fprintf(out, "  warning: %s carries %d secret(s) at mode %04o, readable beyond its owner\n",
 				r.Config.Out, len(r.Config.Secrets), r.Mode)
 		}
 		path := filepath.Join(req.TreePath, r.Config.Out)
@@ -719,7 +773,14 @@ func PullOutputs(req PullRequest) error {
 			fmt.Fprintf(out, "  would write %s (%d keys)\n", r.Config.Out, len(r.Pairs))
 			continue
 		}
-		if err := writeOutputFile(path, r.Content, r.Mode); err != nil {
+		// A directory wet creates for a secret-bearing file need not be
+		// listable by anyone else. It only ever leaks the file's name, which
+		// .wet.yaml already publishes, so this is cheap rather than critical.
+		dirMode := os.FileMode(0o755)
+		if len(r.Config.Secrets) > 0 {
+			dirMode = 0o700
+		}
+		if err := writeOutputFile(path, r.Content, r.Mode, dirMode); err != nil {
 			return fmt.Errorf("outputs %s: %w", r.Config.Name, err)
 		}
 		fmt.Fprintf(out, "  Wrote %s (%d keys)\n", r.Config.Out, len(r.Pairs))
@@ -785,12 +846,15 @@ func reportSecretProvenance(w io.Writer, cfg *WetConfig, policy string, r *Resol
 // process died mid-write, and the reader of that file is a booting app. The
 // temp file is created 0600 regardless of the final mode, so a secret is never
 // briefly world-readable between create and chmod.
-func writeOutputFile(path, content string, mode os.FileMode) error {
+func writeOutputFile(path, content string, mode os.FileMode, dirMode os.FileMode) error {
 	dir := filepath.Dir(path)
 	// A declared output may live in a directory nothing has created yet — a
 	// gitignored .vscode/, a build dir — and a bare ENOENT on a path the user
 	// can see is correct is a bad way to say so.
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	//
+	// MkdirAll leaves an existing directory's mode alone, so this only ever
+	// narrows a directory wet itself creates.
+	if err := os.MkdirAll(dir, dirMode); err != nil {
 		return fmt.Errorf("create parent of %s: %w", path, err)
 	}
 	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".wet-*")

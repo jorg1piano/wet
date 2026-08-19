@@ -234,9 +234,12 @@ func TestSharedSecretRefIsFetchedOnce(t *testing.T) {
       field: shared_id
     SHARED_ALIAS:
       field: shared_id`, 1))
-	// Both names are selected by the backend output, and both resolve to
-	// op://V/I/shared_id.
+	// One name in each output — so this exercises the cross-output collection
+	// loop the spec names ("references shared by outputs") — plus a second
+	// name on the same field, which is the only case the byURI cache can
+	// actually be seen by: two names cannot be collapsed by the `needed` set.
 	cfg.Outputs[0].Secrets = append(cfg.Outputs[0].Secrets, "SHARED_ALIAS")
+	cfg.Outputs[1].Secrets = append(cfg.Outputs[1].Secrets, "SHARED_ID")
 	store := newFakeStore(map[string]string{
 		"op://V/I/secret_key_base": "k",
 		"op://V/I/admin_emails":    "a",
@@ -252,6 +255,9 @@ func TestSharedSecretRefIsFetchedOnce(t *testing.T) {
 		t.Errorf("shared reference read %d times, want 1", n)
 	}
 	// Both names still land in the file, each carrying the one value.
+	if got := readOutput(t, tree, "mobile/.env"); !strings.Contains(got, "SHARED_ID=sid") {
+		t.Errorf("the second output did not receive the shared credential:\n%s", got)
+	}
 	body := readOutput(t, tree, "backend/.env.dev")
 	for _, want := range []string{"SHARED_ID=sid", "SHARED_ALIAS=sid"} {
 		if !strings.Contains(body, want) {
@@ -380,6 +386,12 @@ func TestSecretPolicies(t *testing.T) {
 // A pull is all-or-nothing: an output that cannot be resolved must not leave
 // an earlier one already replaced on disk, because the file left behind would
 // look current to whatever boots next.
+//
+// The first output's content must CHANGE between the two runs, or the test
+// cannot see the failure it is named for. An earlier version broke the second
+// output by editing a value the first one did not carry, so the first file was
+// byte-identical either way and "unchanged" was true whether or not it had
+// been rewritten — write-as-you-resolve passed it.
 func TestPullIsAllOrNothing(t *testing.T) {
 	cfg := loadTestConfig(t, fullConfig)
 	tree := t.TempDir()
@@ -392,18 +404,28 @@ func TestPullIsAllOrNothing(t *testing.T) {
 		t.Fatalf("first pull: %v", err)
 	}
 	before := readOutput(t, tree, "backend/.env.dev")
+	if !strings.Contains(before, "AUTH_BASE_URL=http://localhost:4010") {
+		t.Fatalf("fixture changed; the first pull did not carry the expected value:\n%s", before)
+	}
 
-	// Break the *second* output only: a newline is refused by the encoder, so
-	// mobile fails while backend has already resolved cleanly.
 	broken := worktreeData(t, cfg, 1, nil)
-	broken["DEV_HOST"] = "local\nhost"
+	// backend WOULD be rewritten with a visibly different value...
+	broken["AUTH_BASE_URL"] = "http://rewritten:9999"
+	// ...while mobile, resolved after it, fails encoding. GRPC_PORT reaches
+	// only mobile, so backend resolves cleanly and is the output at risk.
+	broken["GRPC_PORT"] = "50061\nINJECTED=1"
 	if _, _, err := pullInto(t, PullRequest{
 		Cfg: cfg, TreePath: tree, Data: broken, Reader: store,
 	}); err == nil {
 		t.Fatal("expected the newline-bearing value to be rejected")
 	}
-	if after := readOutput(t, tree, "backend/.env.dev"); after != before {
-		t.Errorf("backend was rewritten even though the pull failed:\nbefore:\n%s\nafter:\n%s", before, after)
+
+	after := readOutput(t, tree, "backend/.env.dev")
+	if strings.Contains(after, "rewritten") {
+		t.Errorf("backend was written before the later output failed to resolve:\n%s", after)
+	}
+	if after != before {
+		t.Errorf("backend changed despite the failed pull:\nbefore:\n%s\nafter:\n%s", before, after)
 	}
 }
 
@@ -558,54 +580,67 @@ func TestEnvLocalCannotSupplyASecret(t *testing.T) {
 
 // Every rule below is knowable from .wet.yaml alone, so it must fail at load —
 // before any store is contacted and long before a file is written.
+//
+// Each case asserts on a distinctive piece of the message, not merely that an
+// error occurred. Two of these rules are defense in depth over a broader check
+// that also fires, so "an error happened" passed with the rule deleted — and
+// what would have been lost silently is the actionable half of the message.
 func TestValidateOutputsRejects(t *testing.T) {
-	cases := map[string]struct{ patch, want string }{
+	cases := map[string]struct{ patch, with, want string }{
 		"unknown include": {
-			"    include: [PHX_HOST,", "    include: [PHX_HSOT,",
+			"    include: [PHX_HOST,", "    include: [PHX_HSOT,", "unknown value",
+		},
+		"include names a secret": {
+			"    include: [PHX_HOST,", "    include: [SECRET_KEY_BASE, PHX_HOST,",
+			"list it under secrets: instead",
 		},
 		"unknown secret": {
-			"    secrets: [SECRET_KEY_BASE,", "    secrets: [SECRET_KEY_BAES,",
+			"    secrets: [SECRET_KEY_BASE,", "    secrets: [SECRET_KEY_BAES,", "unknown secret",
 		},
 		"unselected secret via values.from": {
 			"      host:\n        from: DEV_HOST", "      host:\n        from: SECRET_KEY_BASE",
+			"never renamed",
 		},
 		"unknown values.from": {
-			"      host:\n        from: DEV_HOST", "      host:\n        from: NOPE",
+			"      host:\n        from: DEV_HOST", "      host:\n        from: NOPE", "unknown value",
 		},
 		"from and literal together": {
 			"      host:\n        from: DEV_HOST", "      host:\n        from: DEV_HOST\n        literal: x",
+			"mutually exclusive",
 		},
 		"neither from nor literal": {
-			"      host:\n        from: DEV_HOST", "      host: {}",
+			"      host:\n        from: DEV_HOST", "      host: {}", "needs either",
 		},
 		"duplicate output key": {
-			"    include: [PHX_HOST,", "    include: [SENTRY_ENV, PHX_HOST,",
+			"    include: [PHX_HOST,", "    include: [SENTRY_ENV, PHX_HOST,", "declared twice",
 		},
 		"duplicate output name": {
-			"  - name: mobile", "  - name: backend",
+			"  - name: mobile", "  - name: backend", "name already used",
 		},
 		"duplicate output path": {
-			"    out: mobile/.env\n", "    out: backend/.env.dev\n",
+			"    out: mobile/.env\n", "    out: backend/.env.dev\n", "already written by",
 		},
 		"escaping output path": {
-			"    out: mobile/.env\n", "    out: ../outside/.env\n",
+			"    out: mobile/.env\n", "    out: ../outside/.env\n", "escape",
 		},
 		"missing format": {
-			"    out: mobile/.env\n    format: dotenv\n", "    out: mobile/.env\n",
+			"    out: mobile/.env\n    format: dotenv\n", "    out: mobile/.env\n", "format is required",
 		},
 		"unknown format": {
 			"    out: mobile/.env\n    format: dotenv\n", "    out: mobile/.env\n    format: toml\n",
+			"is not supported",
 		},
 		"bad mode": {
-			"    out: mobile/.env\n    format: dotenv\n", "    out: mobile/.env\n    format: dotenv\n    mode: \"rw-\"\n",
+			"    out: mobile/.env\n    format: dotenv\n",
+			"    out: mobile/.env\n    format: dotenv\n    mode: \"rw-\"\n", "octal file mode",
 		},
 		"unknown policy": {
-			"  policy: fallback", "  policy: maybe",
+			"  policy: fallback", "  policy: maybe", "secrets.policy",
 		},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
-			body := strings.Replace(fullConfig, c.patch, c.want, 1)
+			body := strings.Replace(fullConfig, c.patch, c.with, 1)
 			if body == fullConfig {
 				t.Fatalf("patch %q did not apply — the fixture changed", c.patch)
 			}
@@ -613,8 +648,13 @@ func TestValidateOutputsRejects(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(dir, wetConfigFileName), []byte(body), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := LoadWetConfigWithLocal(dir, ""); err == nil {
+			_, err := LoadWetConfigWithLocal(dir, "")
+			if err == nil {
 				t.Fatalf("%s was accepted", name)
+			}
+			if !strings.Contains(err.Error(), c.want) {
+				t.Errorf("err = %v\nwant it to contain %q — a different rule fired, so this "+
+					"subtest is not testing what it names", err, c.want)
 			}
 		})
 	}
@@ -1425,36 +1465,29 @@ func TestRemovedKeyInTheOverlayIsBlamedOnTheOverlay(t *testing.T) {
 }
 
 // A file carrying credentials at a mode readable beyond its owner is a
-// decision, and a silent one reads as the default.
+// decision, and a silent one reads as the default. It is reported through the
+// run's own output stream, not os.Stderr, so a caller capturing the narrative
+// sees it in order.
 func TestSecretBearingOutputWarnsOnAWidenedMode(t *testing.T) {
 	cfg := loadTestConfig(t, strings.Replace(fullConfig,
 		"    out: backend/.env.dev\n    format: dotenv\n",
 		"    out: backend/.env.dev\n    format: dotenv\n    mode: \"0644\"\n", 1))
 
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	orig := os.Stderr
-	os.Stderr = w
-	_, _, pullErr := pullInto(t, PullRequest{
+	_, log, err := pullInto(t, PullRequest{
 		Cfg: cfg, Data: worktreeData(t, cfg, 1, nil), Policy: SecretPolicyDisabled,
 	})
-	os.Stderr = orig
-	_ = w.Close()
-	var b strings.Builder
-	_, _ = io.Copy(&b, r)
-
-	if pullErr != nil {
-		t.Fatalf("pull: %v", pullErr)
+	if err != nil {
+		t.Fatalf("pull: %v", err)
 	}
-	if !strings.Contains(b.String(), "backend/.env.dev") || !strings.Contains(b.String(), "0644") {
-		t.Errorf("no warning for a secret-bearing 0644 output, got: %q", b.String())
+	if !strings.Contains(log, "backend/.env.dev") || !strings.Contains(log, "0644") {
+		t.Errorf("no warning for a secret-bearing 0644 output, got:\n%s", log)
 	}
 	// The mobile output selects no secrets, so widening it is nobody's
 	// business and must not produce noise.
-	if strings.Contains(b.String(), "mobile") {
-		t.Errorf("warned about an output that carries no secrets: %q", b.String())
+	for _, line := range strings.Split(log, "\n") {
+		if strings.Contains(line, "warning") && strings.Contains(line, "mobile") {
+			t.Errorf("warned about an output that carries no secrets: %q", line)
+		}
 	}
 }
 
@@ -1657,5 +1690,69 @@ func TestOutputNameAndModeValidation(t *testing.T) {
 				t.Fatalf("%s was accepted", name)
 			}
 		})
+	}
+}
+
+// A secret nothing selects is inert, and the spec asks for it to be reported.
+//
+// The spec's companion diagnostic — `env:` values nothing reads — is
+// deliberately not implemented, and this pins that decision: every `env:`
+// value reaches `.env.worktree`, which docker compose consumes, so reporting
+// one as unused would tell someone to delete a value their stack depends on.
+func TestUnusedSecretsAreReported(t *testing.T) {
+	cfg := loadTestConfig(t, `project_name: app
+port_stride: 10
+ports:
+  - { name: APP_PORT, base: 4000 }
+env:
+  COMPOSE_PROJECT_NAME: "{{.ProjectName}}-{{.BranchSafe}}"
+  BASE_URL: "http://localhost:{{.APP_PORT}}"
+secrets:
+  store: op
+  vault: V
+  item: I
+  definitions:
+    SELECTED:
+      field: sel
+      default: ''
+    USED_BY_HOOK:
+      field: hooked
+      default: ''
+    NEVER_SELECTED:
+      field: never
+      default: ''
+hooks:
+  post_create:
+    - "echo $USED_BY_HOOK"
+outputs:
+  - name: backend
+    out: backend/.env.dev
+    format: dotenv
+    include: [BASE_URL]
+    secrets: [SELECTED]
+`)
+	got := cfg.UnusedSecrets()
+	if len(got) != 1 || got[0] != "NEVER_SELECTED" {
+		t.Fatalf("unused = %v, want [NEVER_SELECTED]", got)
+	}
+
+	var out strings.Builder
+	reportUnusedSecrets(&out, cfg)
+	if !strings.Contains(out.String(), "NEVER_SELECTED") {
+		t.Errorf("report missing the unused secret:\n%s", out.String())
+	}
+	// COMPOSE_PROJECT_NAME is included by no output and named by no hook, and
+	// must still never be reported: it reaches compose through .env.worktree.
+	for _, unwanted := range []string{"COMPOSE_PROJECT_NAME", "USED_BY_HOOK", "BASE_URL"} {
+		if strings.Contains(out.String(), unwanted) {
+			t.Errorf("report named %q, which is consumed:\n%s", unwanted, out.String())
+		}
+	}
+
+	// A config where every definition is selected says nothing at all.
+	var quiet strings.Builder
+	reportUnusedSecrets(&quiet, loadTestConfig(t, fullConfig))
+	if quiet.Len() != 0 {
+		t.Errorf("a fully-consumed config produced a diagnostic:\n%s", quiet.String())
 	}
 }
