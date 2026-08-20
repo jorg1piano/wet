@@ -1,6 +1,6 @@
 ---
 name: wet
-description: "wet parallel-worktree helper: write/edit .wet.yaml configs AND boot the stack + spawn an agent team. Detects worktree context automatically. Triggers on: wet, wet.yaml, worktree create, parallel worktrees, port allocator, worktree hooks, wet outputs, wet env pull, wet env push, wet env explain, wet secrets, secrets policy, wet pr, pull request, start team, spawn team, boot team, wet team."
+description: "wet parallel-worktree helper: write/edit .wet.yaml configs AND boot the stack + spawn an agent team. Detects worktree context automatically. Triggers on: wet, wet.yaml, worktree create, parallel worktrees, port allocator, worktree hooks, wet outputs, wet env pull, wet env push, wet env explain, wet secrets, secrets policy, wet pr, pull request, wet mobile, reverse-tcp, adb reverse, start team, spawn team, boot team, wet team."
 allowed-tools: [Bash, Read, Glob]
 context: inherit
 ---
@@ -121,7 +121,7 @@ If any of those keys is a credential, don't hand-write the block — run
 definitions and wires them into an output. See "Secrets" below.
 
 ### Step 7. Hooks
-Ask: **"What should happen on worktree create/destroy?"** Common: start/stop Docker, run migrations, forward adb ports. You do **not** need a hook to generate env files — `wet setup` generates every declared output before hooks run.
+Ask: **"What should happen on worktree create/destroy?"** Common: start/stop Docker, run migrations. For adb port forwarding don't write a script — add `wet mobile reverse-tcp` as a `post_create` hook, which reverses every allocated port onto the device this worktree claimed. You do **not** need a hook to generate env files — `wet setup` generates every declared output before hooks run.
 
 If you reach for `sed` to patch a port into a config file, check first whether that file could just be a declared `outputs:` entry — that's the same job without the in-place edit.
 
@@ -789,7 +789,7 @@ Only boot components that exist in this project. Skip sections that don't apply.
 
 **Mobile** — only if a `pubspec.yaml` exists. **Always launch the app** — don't wait to be asked:
 - Use the device assigned to this worktree (`$FLUTTER_DEVICE_ID` from `.env.worktree`, or the pool-allocated device ID). Never prompt for device selection — the pool handles it.
-- Android: `adb reverse tcp:$APP_PORT tcp:$APP_PORT` first.
+- Android: `wet mobile reverse-tcp` first — it reverses every port this worktree was allocated onto the device it claimed. Never hand-roll `adb reverse`: without `-s` it dies with "more than one device/emulator" the moment a second worktree has a device up.
 - Launch with `flutter run -d $FLUTTER_DEVICE_ID` in background (`run_in_background: true`).
 - Confirm the app is running on the device before proceeding to Step 3.
 

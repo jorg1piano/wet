@@ -237,28 +237,49 @@ func reportUnusedSecrets(w io.Writer, cfg *WetConfig) {
 	fmt.Fprintln(w, "  written, which reads as wet ignoring a provider you configured.")
 }
 
-// buildWorktreeData assembles the ordinary value set for an env command.
+// worktreeAllocation is what one checkout was actually granted: its slot,
+// branch, resolved ports and claimed pool items. Every command that needs to
+// act on "this worktree's ports" reads it from here, so `wet env pull` and
+// `wet mobile reverse-tcp` can never disagree about which ports a worktree owns.
+type worktreeAllocation struct {
+	Branch string
+	Slot   int
+	Ports  []ResolvedPort
+	Pools  map[string]string
+}
+
+// Port returns the resolved value of a declared port by name.
+func (a worktreeAllocation) Port(name string) (int, bool) {
+	for _, p := range a.Ports {
+		if p.Name == name {
+			return p.Value, true
+		}
+	}
+	return 0, false
+}
+
+// readWorktreeAllocation reports what `worktreePath` was allocated.
 //
 // The environment wins over the state file, and has to: post_create hooks run
 // BEFORE `wet worktree setup` persists .wet-worktrees.json, so a hook-invoked
-// pull would find no entry for its own worktree. BuildHookEnv has already
+// command would find no entry for its own worktree. BuildHookEnv has already
 // exported everything needed (SLOT, BRANCH, ports, POOL_*), so in that context
 // the environment is both authoritative and the only source available.
 //
-// Outside a hook (a hand-run pull after setup), the state file is the record
-// of what this worktree was allocated.
-func buildWorktreeData(cfg *WetConfig, worktreePath string) (map[string]any, error) {
+// Outside a hook (a hand-run command after setup), the state file is the
+// record of what this worktree was allocated.
+func readWorktreeAllocation(cfg *WetConfig, worktreePath string) (worktreeAllocation, error) {
 	if slot, ok := slotFromEnv(); ok {
-		return dataFromEnv(cfg, worktreePath, slot)
+		return allocationFromEnv(cfg, slot)
 	}
 	state, err := loadConfig()
 	if err != nil {
-		return nil, fmt.Errorf("load wet state: %w", err)
+		return worktreeAllocation{}, fmt.Errorf("load wet state: %w", err)
 	}
 	wt := worktreeStateForPath(state, worktreePath)
 	if wt == nil {
-		return nil, fmt.Errorf("no wet state for %s — run `wet setup` first "+
-			"(it works in the main repo and in worktrees), or invoke `wet env pull` "+
+		return worktreeAllocation{}, fmt.Errorf("no wet state for %s — run `wet setup` first "+
+			"(it works in the main repo and in worktrees), or invoke it "+
 			"from a .wet.yaml hook", worktreePath)
 	}
 	ports := make([]ResolvedPort, 0, len(wt.Ports))
@@ -267,7 +288,16 @@ func buildWorktreeData(cfg *WetConfig, worktreePath string) (map[string]any, err
 			ports = append(ports, ResolvedPort{Name: p.Name, Value: v})
 		}
 	}
-	return withRenderedEnv(cfg, worktreePath, BuildTemplateData(cfg, wt.Branch, wt.Index, ports, wt.Pools))
+	return worktreeAllocation{Branch: wt.Branch, Slot: wt.Index, Ports: ports, Pools: wt.Pools}, nil
+}
+
+// buildWorktreeData assembles the ordinary value set for an env command.
+func buildWorktreeData(cfg *WetConfig, worktreePath string) (map[string]any, error) {
+	alloc, err := readWorktreeAllocation(cfg, worktreePath)
+	if err != nil {
+		return nil, err
+	}
+	return withRenderedEnv(cfg, worktreePath, BuildTemplateData(cfg, alloc.Branch, alloc.Slot, alloc.Ports, alloc.Pools))
 }
 
 func slotFromEnv() (int, bool) {
@@ -282,23 +312,24 @@ func slotFromEnv() (int, bool) {
 	return slot, true
 }
 
-// dataFromEnv reconstructs template data from the variables BuildHookEnv
-// exported. Ports and pools are read back by declared name so the values
-// always match the ones the hook itself sees as $APP_PORT / $POOL_DEVICES.
-func dataFromEnv(cfg *WetConfig, treePath string, slot int) (map[string]any, error) {
+// allocationFromEnv reconstructs the allocation from the variables
+// BuildHookEnv exported. Ports and pools are read back by declared name so the
+// values always match the ones the hook itself sees as $APP_PORT /
+// $POOL_DEVICES.
+func allocationFromEnv(cfg *WetConfig, slot int) (worktreeAllocation, error) {
 	branch := os.Getenv("BRANCH")
 	if branch == "" {
-		return nil, fmt.Errorf("SLOT is set but BRANCH is not — refusing to guess the worktree's identity")
+		return worktreeAllocation{}, fmt.Errorf("SLOT is set but BRANCH is not — refusing to guess the worktree's identity")
 	}
 	ports := make([]ResolvedPort, 0, len(cfg.Ports))
 	for _, p := range cfg.Ports {
 		raw, ok := os.LookupEnv(p.Name)
 		if !ok {
-			return nil, fmt.Errorf("port %s declared in .wet.yaml but missing from the hook environment", p.Name)
+			return worktreeAllocation{}, fmt.Errorf("port %s declared in .wet.yaml but missing from the hook environment", p.Name)
 		}
 		v, err := strconv.Atoi(raw)
 		if err != nil {
-			return nil, fmt.Errorf("port %s=%q is not a number", p.Name, raw)
+			return worktreeAllocation{}, fmt.Errorf("port %s=%q is not a number", p.Name, raw)
 		}
 		ports = append(ports, ResolvedPort{Name: p.Name, Value: v})
 	}
@@ -308,7 +339,7 @@ func dataFromEnv(cfg *WetConfig, treePath string, slot int) (map[string]any, err
 			pools[name] = v
 		}
 	}
-	return withRenderedEnv(cfg, treePath, BuildTemplateData(cfg, branch, slot, ports, pools))
+	return worktreeAllocation{Branch: branch, Slot: slot, Ports: ports, Pools: pools}, nil
 }
 
 // withRenderedEnv layers .env.local and the resolved cfg.Env values onto the

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -74,10 +75,34 @@ func runningEmulatorSerial(avdName string) (string, bool) {
 
 var emulatorSerialRE = regexp.MustCompile(`^(emulator-\d+)\b`)
 
-func attachedEmulatorSerials() []string {
+// requireADB fails with the fix rather than "executable file not found".
+func requireADB() error {
+	if _, err := exec.LookPath("adb"); err != nil {
+		return errors.New("adb is not installed or not on PATH: install the Android " +
+			"platform-tools (brew install --cask android-platform-tools) and re-run")
+	}
+	return nil
+}
+
+// attachedSerials lists every adb serial currently in the `device` state,
+// physical phones included. Callers that want only emulators filter what it
+// returns rather than parsing `adb devices` again.
+//
+// One other reader of `adb devices` survives, deliberately: nextEmulatorPort
+// counts consoles in ANY state, because a booting or offline emulator still
+// holds its port, and filtering to `device` the way this does would hand out a
+// port that is already taken.
+//
+// The error is returned rather than folded into an empty list because the two
+// mean opposite things to a caller: "adb cannot run here" is a machine-setup
+// problem to report, while "no devices" is a fact about what is plugged in.
+func attachedSerials() ([]string, error) {
+	if err := requireADB(); err != nil {
+		return nil, err
+	}
 	out, err := exec.Command("adb", "devices").Output()
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("adb devices: %w", err)
 	}
 	var serials []string
 	for _, line := range strings.Split(string(out), "\n") {
@@ -85,7 +110,22 @@ func attachedEmulatorSerials() []string {
 		if len(fields) != 2 || fields[1] != "device" {
 			continue
 		}
-		if m := emulatorSerialRE.FindStringSubmatch(fields[0]); m != nil {
+		serials = append(serials, fields[0])
+	}
+	return serials, nil
+}
+
+// attachedEmulatorSerials narrows attachedSerials to booted emulators. A
+// machine without adb has none, which is the honest answer for every caller
+// here: they are all asking "which emulator can I address right now?".
+func attachedEmulatorSerials() []string {
+	all, err := attachedSerials()
+	if err != nil {
+		return nil
+	}
+	var serials []string
+	for _, serial := range all {
+		if m := emulatorSerialRE.FindStringSubmatch(serial); m != nil {
 			serials = append(serials, m[1])
 		}
 	}

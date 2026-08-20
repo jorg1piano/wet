@@ -121,6 +121,12 @@ pools:
 #
 # A pool with no entry here — or with any other value — is not grown: it fails
 # with the exhaustion error described above.
+#
+# A pool with a strategy may start EMPTY: `devices: []` plus the strategy below
+# is the bootstrap case, and wet creates the first AVD on the first `wet setup`.
+# An empty pool without a strategy is rejected at load — nothing can ever fill
+# it, so it could only fail later at allocation, and failing at load names the
+# file to fix.
 # pool_grow:
 #   devices: android-emulator
 
@@ -410,6 +416,13 @@ hooks:
     # `outputs:` above already covers env files — hooks are for actions.
     - echo "slot {{.Slot}} ready at {{.APP_URL}}"
     - docker compose up -d
+    # An Android app talks to localhost, and on a device that IS the device.
+    # This points the claimed device's localhost back at this worktree's ports,
+    # so the app finds the stack the hook above just booted. It reads the ports
+    # from the hook environment, so it is correct on every slot without naming
+    # one, and it re-runs safely — after a reboot, or by hand, whenever the
+    # device drops its forwards.
+    # - wet mobile reverse-tcp
 
   pre_remove:
     - docker compose down -v

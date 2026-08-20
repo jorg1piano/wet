@@ -20,7 +20,7 @@ func testEnvConfig() *WetConfig {
 	}
 }
 
-func TestDataFromEnvReadsHookVariables(t *testing.T) {
+func TestBuildWorktreeDataReadsHookVariables(t *testing.T) {
 	cfg := testEnvConfig()
 	t.Setenv("SLOT", "2")
 	t.Setenv("BRANCH", "feature/x")
@@ -32,7 +32,7 @@ func TestDataFromEnvReadsHookVariables(t *testing.T) {
 	if !ok || slot != 2 {
 		t.Fatalf("slotFromEnv() = %d, %v; want 2, true", slot, ok)
 	}
-	data, err := dataFromEnv(cfg, t.TempDir(), slot)
+	data, err := buildWorktreeData(cfg, t.TempDir())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -50,13 +50,13 @@ func TestDataFromEnvReadsHookVariables(t *testing.T) {
 	}
 }
 
-func TestDataFromEnvMissingPortIsAnError(t *testing.T) {
+func TestBuildWorktreeDataMissingPortIsAnError(t *testing.T) {
 	cfg := testEnvConfig()
 	t.Setenv("SLOT", "1")
 	t.Setenv("BRANCH", "x")
 	t.Setenv("APP_PORT", "8090")
 	os.Unsetenv("GRPC_PORT")
-	if _, err := dataFromEnv(cfg, t.TempDir(), 1); err == nil || !strings.Contains(err.Error(), "GRPC_PORT") {
+	if _, err := buildWorktreeData(cfg, t.TempDir()); err == nil || !strings.Contains(err.Error(), "GRPC_PORT") {
 		t.Fatalf("expected an error naming GRPC_PORT, got %v", err)
 	}
 }
@@ -64,12 +64,12 @@ func TestDataFromEnvMissingPortIsAnError(t *testing.T) {
 // BRANCH must be the ONLY thing missing, or the port loop errors first and the
 // test passes with the guard deleted — asserting on the message is what makes
 // it a test of the guard rather than a test that something went wrong.
-func TestDataFromEnvRequiresBranch(t *testing.T) {
+func TestBuildWorktreeDataRequiresBranch(t *testing.T) {
 	t.Setenv("SLOT", "1")
 	t.Setenv("BRANCH", "")
 	t.Setenv("APP_PORT", "8090")
 	t.Setenv("GRPC_PORT", "50061")
-	_, err := dataFromEnv(testEnvConfig(), t.TempDir(), 1)
+	_, err := buildWorktreeData(testEnvConfig(), t.TempDir())
 	if err == nil {
 		t.Fatal("expected an error when BRANCH is unset")
 	}
@@ -228,5 +228,32 @@ func TestLoadEnvLocal(t *testing.T) {
 	}
 	if _, err := LoadEnvLocal(bad); err == nil {
 		t.Error("expected an error for a line without '='")
+	}
+}
+
+// The allocation is what every command acts on — `wet env pull` renders it,
+// `wet mobile reverse-tcp` reverses it — so it is worth asserting directly and
+// not only through the rendered template data.
+func TestAllocationFromEnvReadsPortsAndPools(t *testing.T) {
+	t.Setenv("BRANCH", "feature/x")
+	t.Setenv("APP_PORT", "8100")
+	t.Setenv("GRPC_PORT", "50071")
+	t.Setenv("POOL_DEVICES", "emulator-5556")
+
+	alloc, err := allocationFromEnv(testEnvConfig(), 2)
+	if err != nil {
+		t.Fatalf("allocationFromEnv: %v", err)
+	}
+	if alloc.Branch != "feature/x" || alloc.Slot != 2 {
+		t.Errorf("identity = %q slot %d", alloc.Branch, alloc.Slot)
+	}
+	if v, ok := alloc.Port("GRPC_PORT"); !ok || v != 50071 {
+		t.Errorf("Port(GRPC_PORT) = %d, %v; want 50071, true", v, ok)
+	}
+	if _, ok := alloc.Port("NOPE"); ok {
+		t.Error("Port must report an undeclared name as absent, not as 0")
+	}
+	if alloc.Pools["devices"] != "emulator-5556" {
+		t.Errorf("pools = %v", alloc.Pools)
 	}
 }

@@ -18,6 +18,7 @@ wet secrets setup [group…]      # scaffold a provider's keys into .wet.yaml
 wet env pull [output]           # regenerate the env files declared under outputs:
 wet env explain [output]        # what each output contains, and where its secrets live
 wet env push <output> --from …  # write that output's declared secrets back to the store
+wet mobile reverse-tcp          # adb reverse this worktree's ports onto its device
 wet pr create                   # push branch + open a GitHub PR (via gh)
 wet install wet-skill           # install the Claude Code helper skill
 ```
@@ -227,6 +228,20 @@ just reports as exhausted.
 pool_grow:
   devices: android-emulator
 ```
+
+A pool with a strategy may start empty — that is the bootstrap case, and wet
+creates the first AVD on the first `wet setup`:
+
+```yaml
+pools:
+  devices: []
+pool_grow:
+  devices: android-emulator
+```
+
+An empty pool *without* a strategy is rejected at load: nothing can ever fill
+it, so it can only fail later at allocation, and failing at load names the file
+to fix.
 
 **Template and hook access.** Pool picks are exposed as `{{.Pools.<name>}}`,
 and as `POOL_<NAME>` in upper snake case (`devices` → `POOL_DEVICES`,
@@ -731,6 +746,39 @@ all works the same way.
 **Pool growth writes here, never to `.wet.yaml`** — a grown AVD exists only on
 this machine. Because sequences replace, the local file gets the full merged
 list.
+
+## Mobile — `wet mobile reverse-tcp`
+
+An Android app talks to `localhost`, and on a device that *is* the device. The
+fix is `adb reverse tcp:P tcp:P` — and which `P` is exactly what the worktree
+already knows: the ports it was allocated for its slot.
+
+```
+wet mobile reverse-tcp                 # every allocated port, onto this worktree's device
+wet mobile reverse-tcp APP_PORT        # only the named ports
+wet mobile reverse-tcp --dry-run       # print the adb commands, change nothing
+wet mobile reverse-tcp --remove        # undo the same set
+wet mobile reverse-tcp --headless      # boot a claimed emulator without a window
+wet mobile reverse-tcp --device RFCR…  # target a serial wet knows nothing about
+```
+
+To have `wet setup` do it for you, make it a hook — it reads its ports from the
+hook environment, so it needs no arguments and is right on every slot:
+
+```yaml
+hooks:
+  post_create:
+    - docker compose up -d
+    - wet mobile reverse-tcp
+```
+
+Ports come from `.wet-worktrees.json` — or from that hook environment, which is
+what lets it run before setup has written the state file.
+
+The target device is this worktree's own claim: a pool item naming an emulator
+(booted first if it isn't running, `--headless` to boot without a window) or a
+pool item that is an attached adb serial. A pool item that is neither — a
+fixture snapshot — is never passed to `adb`.
 
 ## Items and handles
 

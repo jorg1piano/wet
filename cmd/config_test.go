@@ -1013,6 +1013,20 @@ func TestValidatePoolGrow(t *testing.T) {
 			wantErr:  `pool_grow["device"]: no pool named "device" is declared under pools:`,
 		},
 		{
+			// The bootstrap config: no AVD exists yet and pool_grow's whole
+			// job is to create one.
+			name:     "empty pool with a grow strategy",
+			pools:    map[string][]string{"devices": {}},
+			poolGrow: map[string]string{"devices": PoolGrowAndroidEmulator},
+		},
+		{
+			// Nothing can ever fill it, so it can only fail later at
+			// allocation — and the error would name a worktree, not the file.
+			name:    "empty pool with no grow strategy",
+			pools:   map[string][]string{"devices": {}},
+			wantErr: `pools["devices"]: item list must not be empty`,
+		},
+		{
 			name:     "strategy with no pools block at all",
 			pools:    nil,
 			poolGrow: map[string]string{"devices": PoolGrowAndroidEmulator},

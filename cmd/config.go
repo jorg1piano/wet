@@ -685,8 +685,17 @@ func (c *WetConfig) Validate() error {
 			return fmt.Errorf("pools[%q]: name collides with a reserved template field (%s)",
 				name, strings.Join(reservedTemplateFields, ", "))
 		}
-		if len(items) == 0 {
-			return fmt.Errorf("pools[%q]: item list must not be empty", name)
+		// An empty pool is legal only when pool_grow can fill it. That is the
+		// bootstrap case — `devices: []` with `pool_grow.devices:
+		// android-emulator` says "wet, create the first emulator yourself",
+		// and growAndroidEmulatorPool does precisely that. Rejecting it forced
+		// someone to hand-create an AVD before the strategy whose whole job is
+		// creating AVDs could run. Without a strategy the pool is still
+		// rejected here, because it can only ever fail later at allocation,
+		// and failing at load names the file to fix.
+		if len(items) == 0 && c.PoolGrow[name] == "" {
+			return fmt.Errorf("pools[%q]: item list must not be empty — add an item, or "+
+				"declare pool_grow[%q] so wet can create the first one", name, name)
 		}
 		seenItems := make(map[string]bool, len(items))
 		for i, item := range items {

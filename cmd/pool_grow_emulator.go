@@ -166,19 +166,35 @@ func pickAVDTemplate() (sysImage, device string, err error) {
 }
 
 // waitForDevice polls `adb devices` until the serial appears as "device" (online).
+//
+// A failed poll is not fatal. This runs across a cold boot, and the emulator
+// restarts the adb daemon on its way up — a single `adb devices` exiting
+// nonzero in that window is a blip, not a verdict, and aborting on it would
+// kill the boot it is waiting for. A machine with no adb at all is a different
+// fact, so that one is checked once, up front. Whatever the last poll said is
+// carried into the timeout, so a genuinely broken adb still explains itself.
 func waitForDevice(serial string, timeout time.Duration) error {
+	if err := requireADB(); err != nil {
+		return err
+	}
 	deadline := time.Now().Add(timeout)
+	var lastErr error
 	for time.Now().Before(deadline) {
-		out, err := exec.Command("adb", "devices").Output()
-		if err == nil {
-			for _, line := range strings.Split(string(out), "\n") {
-				fields := strings.Fields(line)
-				if len(fields) == 2 && fields[0] == serial && fields[1] == "device" {
-					return nil
-				}
+		serials, err := attachedSerials()
+		// Cleared on success: a blip in the first second must not be the
+		// explanation printed after two minutes of clean polls that simply
+		// never saw the serial.
+		lastErr = err
+		for _, s := range serials {
+			if s == serial {
+				return nil
 			}
 		}
 		time.Sleep(3 * time.Second)
+	}
+	if lastErr != nil {
+		return fmt.Errorf("timed out waiting for %s to come online (%v); last adb error: %w",
+			serial, timeout, lastErr)
 	}
 	return fmt.Errorf("timed out waiting for %s to come online (%v)", serial, timeout)
 }
