@@ -38,15 +38,15 @@ localhost, discovers connected devices (adb, devicectl, simctl), and:
   real phone            records KEY: <this machine's LAN IP> in .wet.local.yaml
   emulator / simulator  removes the override, so the declared localhost wins
 
-The override lives in .wet.local.yaml — the same machine-local overlay
-pool_grow records new emulators in — because a LAN IP is a fact about this
-machine, not about the project or any one worktree. Every checkout follows
-it: worktrees keep their own strided ports and merely advertise the LAN IP,
-which this machine can reach too. And because the overlay wins over the
+The override lands in the .wet.local.yaml of the checkout you run this in.
+Overlays are layered: the trunk checkout's file is the machine layer every
+checkout shares (the vault, grown emulators), and a checkout's own file wins
+on top of it — so a device is pointed at ONE worktree's stack while every
+other checkout keeps its own host. And because the overlay wins over the
 committed defaults, every later ` + "`wet setup`" + `, ` + "`wet worktree setup`" + ` and
-` + "`wet env pull`" + ` keeps generating files for the chosen device with no further
-edits. Re-run this when you switch devices — or when the machine's IP
-changes.
+` + "`wet env pull`" + ` in that checkout keeps generating files for the chosen
+device with no further edits. Re-run this when you switch devices — or when
+the machine's IP changes.
 
 The phone must be on the same network as this machine — a LAN IP is only
 reachable from the LAN. With URLs carrying the LAN IP,
@@ -518,6 +518,28 @@ func writeLocalOverlay(path string, doc *yaml.Node) error {
 	return nil
 }
 
+// overlayEnvValue reads one env: value straight out of a .wet.local.yaml,
+// without loading a whole config — the machine layer's copy of a key is
+// exactly what decides whether removing a checkout's own override is enough
+// to restore localhost. A missing or unreadable file answers "not set":
+// runMobileSetup has already loaded the merged config, so a genuinely broken
+// machine layer failed loudly before this is ever consulted.
+func overlayEnvValue(dir, key string) (string, bool) {
+	root, _, err := readLocalOverlay(filepath.Join(dir, wetLocalConfigFileName))
+	if err != nil {
+		return "", false
+	}
+	env := findMappingValue(root, "env")
+	if env == nil || env.Kind != yaml.MappingNode {
+		return "", false
+	}
+	v := findMappingValue(env, key)
+	if v == nil {
+		return "", false
+	}
+	return v.Value, true
+}
+
 // findMappingValue returns the value node stored at key, or nil.
 func findMappingValue(mapping *yaml.Node, key string) *yaml.Node {
 	for i := 0; i+1 < len(mapping.Content); i += 2 {
@@ -602,22 +624,44 @@ func runMobileSetup(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// The overlay is edited where the loader reads it: beside the config's
-	// own checkout when the worktree carries a .wet.yaml, beside the trunk
-	// otherwise — the exact resolution LoadWetConfigForWorktree just used.
-	localDir := LocalConfigDir(filepath.Dir(cfgPath), repoRoot)
+	// The override goes in THIS checkout's own .wet.local.yaml — the layer
+	// the loader applies last — so a device is pointed at one worktree's
+	// stack while every other checkout keeps its own host.
+	localDir := treePath
+	machineDir := LocalConfigDir(filepath.Dir(cfgPath), repoRoot)
+	sameLayer := resolvePath(machineDir) == resolvePath(localDir)
+	path := filepath.Join(localDir, wetLocalConfigFileName)
 	fmt.Printf("Target: %s\n", device)
 	if device.wantsLocalhost() {
-		removed, err := removeLocalEnvOverrides(localDir, hostKeys)
+		// Removing this checkout's override only restores localhost when the
+		// machine layer underneath doesn't also set the key (an old
+		// machine-wide workflow, a hand edit). Such keys are pinned to an
+		// explicit localhost here instead — this layer wins.
+		var pin, drop []string
+		for _, k := range hostKeys {
+			if _, shadowed := overlayEnvValue(machineDir, k); shadowed && !sameLayer {
+				pin = append(pin, k)
+			} else {
+				drop = append(drop, k)
+			}
+		}
+		removed, err := removeLocalEnvOverrides(localDir, drop)
 		if err != nil {
 			return err
 		}
-		path := filepath.Join(localDir, wetLocalConfigFileName)
-		if len(removed) == 0 {
-			fmt.Printf("  no override recorded in %s — the declared localhost already applies\n", path)
-		} else {
+		if len(pin) > 0 {
+			if _, err := setLocalEnvOverrides(localDir, pin, "localhost"); err != nil {
+				return err
+			}
+			fmt.Printf("  %s: localhost pinned in %s — the machine layer (%s) also sets it, and this layer wins\n",
+				strings.Join(pin, ", "), path, filepath.Join(machineDir, wetLocalConfigFileName))
+		}
+		switch {
+		case len(removed) > 0:
 			fmt.Printf("  removed %s from %s — the declared localhost wins again\n",
 				strings.Join(removed, ", "), path)
+		case len(pin) == 0:
+			fmt.Printf("  no override recorded in %s — the declared localhost already applies\n", path)
 		}
 	} else {
 		host := mobileSetupHost
@@ -636,16 +680,14 @@ func runMobileSetup(cmd *cobra.Command, args []string) error {
 					host, strings.Join(alternates, ", "))
 			}
 		}
-		path, err := setLocalEnvOverrides(localDir, hostKeys, host)
-		if err != nil {
+		if _, err := setLocalEnvOverrides(localDir, hostKeys, host); err != nil {
 			return err
 		}
 		for _, k := range hostKeys {
 			fmt.Printf("  %s: %s recorded in %s\n", k, host, path)
 		}
-		fmt.Println("  Every checkout on this machine follows the overlay: worktrees keep their")
-		fmt.Println("  strided ports and just advertise the LAN IP. The device must be on the")
-		fmt.Println("  same network as this machine to reach it.")
+		fmt.Println("  Only this checkout follows the override; other worktrees keep their own")
+		fmt.Println("  host. The device must be on the same network as this machine to reach it.")
 		if device.Kind == kindAndroidPhysical {
 			fmt.Println("  `wet mobile reverse-tcp` is unnecessary for this device now — the URLs carry the LAN IP.")
 		}

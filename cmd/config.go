@@ -289,15 +289,18 @@ const wetLocalConfigFileName = ".wet.local.yaml"
 
 // LoadWetConfig reads, parses, defaults, and validates `.wet.yaml` from the
 // given repo root, overlaying the machine's `.wet.local.yaml` from wherever
-// the trunk is checked out (see LocalConfigDir).
+// the trunk is checked out (see LocalConfigDir) and then the checkout's own,
+// when it has one.
 func LoadWetConfig(repoRoot string) (*WetConfig, error) {
-	return LoadWetConfigWithLocal(repoRoot, LocalConfigDir(repoRoot, repoRoot))
+	return LoadWetConfigWithLocal(repoRoot, LocalConfigDir(repoRoot, repoRoot), repoRoot)
 }
 
-// LocalConfigDir picks the directory `.wet.local.yaml` is read from: the
-// checkout that has `main_branch:` checked out, falling back to fallbackDir.
+// LocalConfigDir picks the directory the MACHINE layer of `.wet.local.yaml`
+// is read from: the checkout that has `main_branch:` checked out, falling
+// back to fallbackDir. (A checkout's own overlay, when it has one, is layered
+// on top of this — see LoadWetConfigWithLocal.)
 //
-// The overlay is one per machine and gitignored, so no worktree has a copy and
+// The machine layer is gitignored, so no worktree has a copy and
 // it has to be read from some other checkout. Reading it from git's "main
 // working tree" is wrong whenever that isn't the checkout anyone works in — a
 // first clone left parked on an unrelated branch still answers to
@@ -330,20 +333,25 @@ func probeMainBranch(configDir string) string {
 	return probe.MainBranch
 }
 
-// LoadWetConfigWithLocal loads `.wet.yaml` from configDir and overlays
-// `.wet.local.yaml` from localDir.
+// LoadWetConfigWithLocal loads `.wet.yaml` from configDir and overlays a
+// `.wet.local.yaml` from each localDir in turn — a later layer wins where
+// they collide, mapping keys merging one by one exactly as a single overlay
+// does.
 //
-// The two are separate because they answer to different scopes. The config can
-// come from a worktree's own checkout — that's how a `.wet.yaml` change is
-// testable where it's written. The local overlay is one per machine, so it is
-// read from the checkout holding the trunk (see LocalConfigDir): it's
-// gitignored, so a worktree checkout never has a copy, and looking for one
-// beside the worktree's config would silently drop every override — leaving
-// the worktree claiming pool items nobody configured.
+// The layers answer to different scopes. The config can come from a
+// worktree's own checkout — that's how a `.wet.yaml` change is testable
+// where it's written. The first overlay is the machine's, read from the
+// checkout holding the trunk (see LocalConfigDir): the vault this
+// workstation signs into, the emulators pool_grow created — facts every
+// checkout shares. A checkout may then carry its own `.wet.local.yaml` on
+// top, holding facts about that checkout alone — the LAN IP `wet mobile
+// setup` points one worktree's stack at while the others keep localhost.
+// It's gitignored, so a fresh worktree simply has none and lives on the
+// machine layer.
 //
-// An empty localDir means "no overlay", used by callers that have already
-// decided there is none to apply.
-func LoadWetConfigWithLocal(configDir, localDir string) (*WetConfig, error) {
+// An empty localDir means "no overlay"; a dir naming the same place twice
+// (the trunk checkout IS the checkout) is read once, not applied twice.
+func LoadWetConfigWithLocal(configDir string, localDirs ...string) (*WetConfig, error) {
 	repoRoot := configDir
 	path := filepath.Join(repoRoot, wetConfigFileName)
 	data, err := os.ReadFile(path)
@@ -370,15 +378,31 @@ func LoadWetConfigWithLocal(configDir, localDir string) (*WetConfig, error) {
 	// An empty localDir means no overlay. Joining onto "" would produce a
 	// bare relative path and read whatever .wet.local.yaml happens to sit in
 	// the process's cwd.
-	var overridden []string
-	localPath := ""
-	if localDir != "" {
-		localPath = filepath.Join(localDir, wetLocalConfigFileName)
-		overridden, err = mergeLocalConfig(baseRoot, localPath)
+	var overridden, applied []string
+	seenDirs := map[string]bool{}
+	for _, localDir := range localDirs {
+		if localDir == "" {
+			continue
+		}
+		// The same directory offered twice is one layer, not two: when the
+		// checkout IS the trunk, applying its file again would report every
+		// key as overridden twice and re-run the merge for nothing.
+		resolved := resolvePath(localDir)
+		if seenDirs[resolved] {
+			continue
+		}
+		seenDirs[resolved] = true
+		localPath := filepath.Join(localDir, wetLocalConfigFileName)
+		keys, err := mergeLocalConfig(baseRoot, localPath)
 		if err != nil {
 			return nil, err
 		}
+		if len(keys) > 0 {
+			applied = append(applied, localPath)
+		}
+		overridden = append(overridden, keys...)
 	}
+	overridden = dedupeSorted(overridden)
 
 	// The overlay is checked inside mergeLocalConfig, against its own path, so
 	// this one only ever blames the file a removed key actually came from.
@@ -395,12 +419,26 @@ func LoadWetConfigWithLocal(configDir, localDir string) (*WetConfig, error) {
 	// Validate the merged result, not either half: a local file that breaks
 	// the schema has to fail here, where the file name is still in hand.
 	if err := cfg.Validate(); err != nil {
-		if len(overridden) > 0 {
-			return nil, fmt.Errorf("invalid config (%s merged over %s): %w", localPath, path, err)
+		if len(applied) > 0 {
+			return nil, fmt.Errorf("invalid config (%s merged over %s): %w",
+				strings.Join(applied, " and "), path, err)
 		}
 		return nil, fmt.Errorf("invalid %s: %w", path, err)
 	}
 	return &cfg, nil
+}
+
+// dedupeSorted sorts keys and drops repeats — a key both layers override is
+// still one override in LocalKeys.
+func dedupeSorted(keys []string) []string {
+	sort.Strings(keys)
+	out := keys[:0]
+	for i, k := range keys {
+		if i == 0 || k != keys[i-1] {
+			out = append(out, k)
+		}
+	}
+	return out
 }
 
 // rejectRemovedKeys fails on the schema wet used to have.
@@ -565,14 +603,18 @@ func LoadWetConfigForWorktreeTestable(worktreePath, repoRoot string) (*WetConfig
 }
 
 func LoadWetConfigForWorktree(worktreePath, repoRoot string) (*WetConfig, string, error) {
-	cfg, err := LoadWetConfigWithLocal(worktreePath, LocalConfigDir(worktreePath, repoRoot))
+	// Two overlay layers, machine first: the trunk's .wet.local.yaml, then
+	// the worktree's own — see LoadWetConfigWithLocal. The worktree layer is
+	// listed either way; when this checkout IS the trunk the loader reads it
+	// once.
+	cfg, err := LoadWetConfigWithLocal(worktreePath, LocalConfigDir(worktreePath, repoRoot), worktreePath)
 	if err == nil {
 		return cfg, filepath.Join(worktreePath, wetConfigFileName), nil
 	}
 	if err != ErrConfigMissing {
 		return nil, filepath.Join(worktreePath, wetConfigFileName), err
 	}
-	cfg, err = LoadWetConfigWithLocal(repoRoot, LocalConfigDir(repoRoot, repoRoot))
+	cfg, err = LoadWetConfigWithLocal(repoRoot, LocalConfigDir(repoRoot, repoRoot), worktreePath)
 	return cfg, filepath.Join(repoRoot, wetConfigFileName), err
 }
 

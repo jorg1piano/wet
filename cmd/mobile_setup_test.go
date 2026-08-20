@@ -469,3 +469,26 @@ func TestPickDeviceNonTTY(t *testing.T) {
 		t.Errorf("err = %v, want the --device hint listing discovered ids", err)
 	}
 }
+
+func TestOverlayEnvValue(t *testing.T) {
+	dir := t.TempDir()
+	if _, ok := overlayEnvValue(dir, "DEV_HOST"); ok {
+		t.Error("missing file must answer not-set")
+	}
+	path := filepath.Join(dir, wetLocalConfigFileName)
+	if err := os.WriteFile(path, []byte("env:\n  DEV_HOST: 192.168.1.7\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := overlayEnvValue(dir, "DEV_HOST"); !ok || v != "192.168.1.7" {
+		t.Errorf("overlayEnvValue = %q/%v, want the recorded IP", v, ok)
+	}
+	if _, ok := overlayEnvValue(dir, "OTHER"); ok {
+		t.Error("absent key must answer not-set")
+	}
+	if err := os.WriteFile(path, []byte("env: not-a-mapping\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := overlayEnvValue(dir, "DEV_HOST"); ok {
+		t.Error("a non-mapping env: must answer not-set, not panic")
+	}
+}

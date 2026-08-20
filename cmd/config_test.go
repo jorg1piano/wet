@@ -1108,3 +1108,61 @@ func TestOverlayOnlySecretsBlockSaysWhatIsMissing(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadWetConfigWithLocalLayers(t *testing.T) {
+	configDir := t.TempDir()
+	machineDir := t.TempDir()
+	treeDir := t.TempDir()
+	write := func(dir, name, content string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(configDir, wetConfigFileName,
+		"project_name: demo\nenv:\n  DEV_HOST: \"localhost\"\n  SHARED: \"base\"\n")
+	write(machineDir, wetLocalConfigFileName,
+		"env:\n  SHARED: \"machine\"\n  MACHINE_ONLY: \"yes\"\n")
+	write(treeDir, wetLocalConfigFileName,
+		"env:\n  SHARED: \"worktree\"\n  DEV_HOST: \"192.168.1.7\"\n")
+
+	cfg, err := LoadWetConfigWithLocal(configDir, machineDir, treeDir)
+	if err != nil {
+		t.Fatalf("LoadWetConfigWithLocal: %v", err)
+	}
+	for key, want := range map[string]string{
+		"SHARED":       "worktree", // the checkout's own layer wins
+		"DEV_HOST":     "192.168.1.7",
+		"MACHINE_ONLY": "yes", // machine-layer keys still apply underneath
+	} {
+		if got := cfg.Env[key]; got != want {
+			t.Errorf("Env[%s] = %q, want %q", key, got, want)
+		}
+	}
+	if !reflect.DeepEqual(cfg.LocalKeys, []string{"env"}) {
+		t.Errorf("LocalKeys = %v, want [env] exactly once across both layers", cfg.LocalKeys)
+	}
+
+	// The same directory offered twice is one layer: the trunk checkout IS
+	// the checkout in the main repo, and its file must not apply twice.
+	cfg, err = LoadWetConfigWithLocal(configDir, machineDir, machineDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Env["SHARED"]; got != "machine" {
+		t.Errorf("Env[SHARED] = %q, want the machine layer's value", got)
+	}
+	if !reflect.DeepEqual(cfg.LocalKeys, []string{"env"}) {
+		t.Errorf("LocalKeys = %v, want [env] once for a deduped layer", cfg.LocalKeys)
+	}
+
+	// A checkout with no overlay of its own lives on the machine layer.
+	bare := t.TempDir()
+	cfg, err = LoadWetConfigWithLocal(configDir, machineDir, bare)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Env["SHARED"]; got != "machine" {
+		t.Errorf("Env[SHARED] = %q, want the machine layer's value", got)
+	}
+}
