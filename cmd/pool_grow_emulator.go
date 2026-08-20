@@ -211,21 +211,9 @@ func waitForDevice(serial string, timeout time.Duration) error {
 // is the pool as the caller sees it, new item included.
 func appendPoolItem(repoRoot, poolName string, items []string) error {
 	path := filepath.Join(repoRoot, wetLocalConfigFileName)
-
-	var doc yaml.Node
-	if data, err := os.ReadFile(path); err == nil {
-		if err := yaml.Unmarshal(data, &doc); err != nil {
-			return fmt.Errorf("parse %s: %w", path, err)
-		}
-	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("read %s: %w", path, err)
-	}
-	if doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 {
-		doc = yaml.Node{Kind: yaml.DocumentNode, Content: []*yaml.Node{{Kind: yaml.MappingNode}}}
-	}
-	root := doc.Content[0]
-	if root.Kind != yaml.MappingNode {
-		return fmt.Errorf("unexpected yaml root kind in %s", path)
+	root, doc, err := readLocalOverlay(path)
+	if err != nil {
+		return err
 	}
 
 	seq := &yaml.Node{Kind: yaml.SequenceNode}
@@ -234,12 +222,7 @@ func appendPoolItem(repoRoot, poolName string, items []string) error {
 	}
 	pools := findOrCreateMapping(root, "pools")
 	setMappingValue(pools, poolName, seq)
-
-	out, err := yaml.Marshal(&doc)
-	if err != nil {
-		return fmt.Errorf("marshal %s: %w", path, err)
-	}
-	return os.WriteFile(path, out, 0o644)
+	return writeLocalOverlay(path, doc)
 }
 
 // findOrCreateMapping returns the mapping node stored at key, creating an
