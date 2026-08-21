@@ -527,7 +527,19 @@ func parseOPRef(raw string) (SecretRef, error) {
 
 // ResolveSecretRef turns one definition into a concrete place in the store,
 // layering the definition's overrides over the block-level vault and item.
-func (s *SecretsConfig) ResolveSecretRef(name string) (SecretRef, error) {
+//
+// env selects among `vaults:` (see SelectEnv); "" is the single-vault config
+// and reads `vault:`. A definition's own vault: still wins over both — "this
+// one credential lives elsewhere" is a fact about the credential, not about
+// the environment.
+//
+// A full ref: is environment-invariant for the same reason, and more strongly:
+// it names its own vault, so it resolves to the same place in every
+// environment. That is legitimate — a shared credential does not fork per
+// environment — but it is invisible in the generated file, so `wet env
+// explain` marks such destinations rather than leaving a reader to infer that
+// `--env production` moved every secret but this one.
+func (s *SecretsConfig) ResolveSecretRef(name, env string) (SecretRef, error) {
 	def, ok := s.Definitions[name]
 	if !ok {
 		return SecretRef{}, fmt.Errorf("unknown secret %q (defined: %s)", name, strings.Join(sortedKeys(s.Definitions), ", "))
@@ -540,7 +552,7 @@ func (s *SecretsConfig) ResolveSecretRef(name string) (SecretRef, error) {
 		ref.Key = name
 		return ref, nil
 	}
-	ref := SecretRef{Key: name, Vault: s.Vault, Item: s.Item, Field: def.Field}
+	ref := SecretRef{Key: name, Vault: s.VaultForEnv(env), Item: s.Item, Field: def.Field}
 	if def.Vault != "" {
 		ref.Vault = def.Vault
 	}
@@ -548,13 +560,20 @@ func (s *SecretsConfig) ResolveSecretRef(name string) (SecretRef, error) {
 		ref.Item = def.Item
 	}
 	if ref.Vault == "" {
+		if len(s.Vaults) > 0 {
+			// Unreachable through SelectEnv, which only ever returns a
+			// declared env — so this is a caller that resolved with an env
+			// of its own, and saying which envs exist is the whole fix.
+			return ref, fmt.Errorf("secrets.definitions.%s: no vault for environment %q (declared: %s)",
+				name, env, strings.Join(s.VaultEnvs(), ", "))
+		}
 		return ref, fmt.Errorf("secrets.definitions.%s: no vault configured\n"+
 			"  Add a shared secrets.vault to %s:\n"+
 			"    secrets:\n"+
 			"      vault: Development\n"+
-			"  Or put the same block in %s when the vault differs by machine.\n"+
+			"  Use secrets.vaults: instead when staging and production live in different vaults.\n"+
 			"  To override only this secret, set secrets.definitions.%s.vault instead.",
-			name, wetConfigFileName, wetLocalConfigFileName, name)
+			name, wetConfigFileName, name)
 	}
 	if ref.Item == "" {
 		return ref, fmt.Errorf("secrets.definitions.%s: no item — set secrets.item in %s (which item the fields sit on is a project fact) or give this secret its own item", name, wetConfigFileName)
@@ -573,7 +592,7 @@ func (s *SecretsConfig) ResolveSecretRef(name string) (SecretRef, error) {
 // view containing only the names it selected (see resolveOutput), because a
 // single merged map is exactly how a mobile `.env` ends up carrying a backend
 // credential.
-func resolveSecrets(cfg *WetConfig, names []string, policy string, reader SecretReader) (map[string]resolvedSecret, error) {
+func resolveSecrets(cfg *WetConfig, names []string, policy, env string, reader SecretReader) (map[string]resolvedSecret, error) {
 	out := make(map[string]resolvedSecret, len(names))
 	if len(names) == 0 {
 		return out, nil
@@ -594,7 +613,7 @@ func resolveSecrets(cfg *WetConfig, names []string, policy string, reader Secret
 		var uris []string
 		seen := map[string]bool{}
 		for _, name := range names {
-			ref, err := cfg.Secrets.ResolveSecretRef(name)
+			ref, err := cfg.Secrets.ResolveSecretRef(name, env)
 			if err != nil || seen[ref.URI()] {
 				continue
 			}
@@ -620,7 +639,7 @@ func resolveSecrets(cfg *WetConfig, names []string, policy string, reader Secret
 		// not silent: every fallback is named out loud, and `wet env explain`
 		// reports the missing key. Choose `required` to make it fatal. A
 		// malformed ref: was already rejected at load.
-		ref, readErr := cfg.Secrets.ResolveSecretRef(name)
+		ref, readErr := cfg.Secrets.ResolveSecretRef(name, env)
 		switch {
 		case readErr != nil:
 		case policy == SecretPolicyDisabled:
@@ -834,6 +853,9 @@ type PullRequest struct {
 	Only []string
 	// Policy overrides secrets.policy for this run ("" keeps the config's).
 	Policy string
+	// Env overrides secrets.default_env for this run ("" keeps the config's,
+	// and means nothing at all to a config without secrets.vaults:).
+	Env string
 	// Reader fetches secrets. Nil means the store named by secrets.store.
 	Reader SecretReader
 	// DryRun resolves and validates everything, and writes nothing. It still
@@ -865,6 +887,11 @@ func PullOutputs(req PullRequest) error {
 		policy = req.Policy
 	}
 
+	env, err := req.Cfg.Secrets.SelectEnv(req.Env)
+	if err != nil {
+		return err
+	}
+
 	// Collect across every requested output first, so a shared credential is
 	// one fetch no matter how many files consume it.
 	needed := map[string]bool{}
@@ -873,6 +900,15 @@ func PullOutputs(req PullRequest) error {
 			needed[name] = true
 		}
 	}
+	// Named in the run's own output, not only in `explain`. A generated
+	// .env.dev carries no record of which environment's vault filled it, so
+	// the pull that wrote it is the only place that can say — and only when
+	// this run actually reads a vault. Announcing an environment over a pull
+	// that resolved no secrets claims an influence it did not have.
+	if env != "" && len(needed) > 0 && policy != SecretPolicyDisabled {
+		fmt.Fprintf(out, "environment: %s (of %s)\n", env, strings.Join(req.Cfg.Secrets.VaultEnvs(), ", "))
+	}
+
 	reader := req.Reader
 	if reader == nil && len(needed) > 0 && policy != SecretPolicyDisabled {
 		reader, err = newStoreReader(req.Cfg)
@@ -892,7 +928,7 @@ func PullOutputs(req PullRequest) error {
 	if reader != nil {
 		reader = &latchingReader{inner: reader}
 	}
-	secrets, err := resolveSecrets(req.Cfg, sortedKeys(needed), policy, reader)
+	secrets, err := resolveSecrets(req.Cfg, sortedKeys(needed), policy, env, reader)
 	if err != nil {
 		return err
 	}

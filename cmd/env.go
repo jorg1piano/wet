@@ -14,6 +14,11 @@ import (
 var (
 	envPullDryRun  bool
 	envPullSecrets string
+	// envSelectEnv backs the --env flag on pull, explain and push. One
+	// variable for all three because one command runs per process, and the
+	// flag means exactly the same thing in each: which secrets.vaults: entry
+	// this run reads from.
+	envSelectEnv string
 )
 
 var envCmd = &cobra.Command{
@@ -27,7 +32,7 @@ checked-in template — .wet.yaml is the whole inventory, so one file answers
 what is generated, what each file holds, and which of those keys are secrets.
 
 The secret store is never named on the command line: secrets.store decides,
-and .wet.local.yaml supplies the machine's account and vault.`,
+and .wet.yaml names the vault and item the definitions resolve against.`,
 }
 
 var envPullCmd = &cobra.Command{
@@ -57,6 +62,11 @@ pull. So a pull is always safe to re-run.
   fallback   use a declared default when the store cannot answer, and say so
   disabled   never contact the store; declared defaults must suffice
 
+--env selects a vault when .wet.yaml declares per-environment vaults under
+secrets.vaults:. Without it the run uses secrets.default_env:
+
+  wet env pull --env production
+
 --dry-run resolves and validates everything and writes nothing. It still
 contacts the store, because whether a required secret exists is exactly what a
 dry run is asked to find out. It never prints a secret value.`,
@@ -71,7 +81,10 @@ var envExplainCmd = &cobra.Command{
 destination of every secret they select.
 
 It reads .wet.yaml only — no worktree, no store, no values. Names and
-provenance are printed; secret values never are.`,
+provenance are printed; secret values never are.
+
+--env explains the destinations as another environment's vault, exactly as a
+pull with the same flag would resolve them.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runEnvExplain,
 }
@@ -81,6 +94,10 @@ func init() {
 		"resolve and validate everything, write nothing")
 	envPullCmd.Flags().StringVar(&envPullSecrets, "secrets", "",
 		"override secrets.policy for this run (required|fallback|disabled)")
+	for _, c := range []*cobra.Command{envPullCmd, envExplainCmd, envPushCmd} {
+		c.Flags().StringVar(&envSelectEnv, "env", "",
+			"which secrets.vaults: environment to read (default secrets.default_env)")
+	}
 	envCmd.AddCommand(envPullCmd, envExplainCmd, envPushCmd)
 	rootCmd.AddCommand(envCmd)
 }
@@ -121,6 +138,7 @@ func runEnvPull(cmd *cobra.Command, args []string) error {
 		Data:     data,
 		Only:     args,
 		Policy:   envPullSecrets,
+		Env:      envSelectEnv,
 		DryRun:   envPullDryRun,
 	})
 }
@@ -151,6 +169,25 @@ func runEnvExplain(cmd *cobra.Command, args []string) error {
 	selected, err := cfg.SelectOutputs(args)
 	if err != nil {
 		return err
+	}
+	env, err := cfg.Secrets.SelectEnv(envSelectEnv)
+	if err != nil {
+		return err
+	}
+	// Printed once, before the outputs: every destination below is a vault
+	// this choice picked, and a reader comparing two `explain` runs has no
+	// other way to see which one they are looking at.
+	//
+	// Only when it picked one, though — the same rule a pull follows.
+	// `wet env explain mobile` on an output selecting no secrets resolves no
+	// vault at all, and a banner over that listing claims an influence the
+	// environment did not have.
+	explainsASecret := false
+	for _, o := range selected {
+		explainsASecret = explainsASecret || len(o.Secrets) > 0
+	}
+	if env != "" && explainsASecret {
+		fmt.Printf("environment: %s (of %s)\n\n", env, strings.Join(cfg.Secrets.VaultEnvs(), ", "))
 	}
 	for i, o := range selected {
 		if i > 0 {
@@ -198,20 +235,30 @@ func runEnvExplain(cmd *cobra.Command, args []string) error {
 			if def.HasDefault() {
 				fallback = "has default"
 			}
-			// A missing vault or item is a machine-local gap, not a broken
+			// A missing vault or item is a gap in the config, not a broken
 			// config, and explain is the command you run to find out what is
 			// missing — so it reports the gap instead of failing on it.
-			ref, err := cfg.Secrets.ResolveSecretRef(name)
+			ref, err := cfg.Secrets.ResolveSecretRef(name, env)
 			if err != nil {
 				// The resolver's own error is printed rather than one
 				// summary for all of them. A missing item and a missing
-				// vault are fixed in DIFFERENT files, and a message that
-				// named only the vault sent half the readers to edit the
-				// wrong one. The errors already say which key is missing.
+				// vault are different keys with different fixes, and a
+				// message that named only the vault sent half the readers to
+				// the wrong line. The errors already say which key is
+				// missing.
 				fmt.Printf("    %s -> (no destination: %s) (%s)\n", name, whyNoDestination(name, err), fallback)
 				continue
 			}
-			fmt.Printf("    %s -> %s/%s/%s (%s)\n", name, ref.Vault, ref.Item, ref.Field, fallback)
+			// A definition carrying its own ref: or vault: resolves to the
+			// same place whatever --env says. Under a vaults: config that is
+			// the one thing a reader cannot infer from this listing, and the
+			// mistake it prevents is assuming `--env production` moved every
+			// secret when it moved all but this one.
+			fixed := ""
+			if env != "" && (def.Ref != "" || def.Vault != "") {
+				fixed = ", same in every environment"
+			}
+			fmt.Printf("    %s -> %s/%s/%s (%s%s)\n", name, ref.Vault, ref.Item, ref.Field, fallback, fixed)
 		}
 	}
 

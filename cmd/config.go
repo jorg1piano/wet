@@ -166,19 +166,46 @@ type SecretsConfig struct {
 	// Policy decides what happens when the store cannot answer. See
 	// SecretPolicy* — the default is "fallback".
 	Policy string `yaml:"policy,omitempty"`
-	// Vault and Item are the default destination, and they live in DIFFERENT
-	// files. Item belongs in the committed .wet.yaml — which item the fields
-	// sit on is a fact about the project, and everyone needs the same answer.
-	// Vault belongs in the gitignored .wet.local.yaml, since which vault a
-	// machine reads from (and which account it is signed into) is a fact
-	// about that machine.
+	// Vault and Item are the default destination, and both belong in the
+	// committed .wet.yaml: which vault holds the project's credentials and
+	// which item the fields sit on are facts about the project, and everyone
+	// who clones the repo needs the same answer.
+	//
+	// Like every other key, either can be overridden in .wet.local.yaml —
+	// that file is an ordinary overlay, not a special home for the vault.
 	Vault string `yaml:"vault,omitempty"`
 	Item  string `yaml:"item,omitempty"`
+	// Vaults is the multi-environment form of Vault: one vault per deploy
+	// environment, so a checkout can read staging credentials today and
+	// production ones tomorrow without editing the file. The definitions are
+	// unchanged — the same field on the same item, in a different vault — so
+	// this adds no second home for values and no per-environment key list.
+	//
+	// Mutually exclusive with Vault, and committed for the same reason Vault
+	// is: the vault names are the same for everyone who clones the repo.
+	Vaults []VaultConfig `yaml:"vaults,omitempty"`
+	// DefaultEnv names the Vaults entry used when no --env is given. It may
+	// be omitted when exactly one vault is declared. Because .wet.local.yaml
+	// overlays the committed file per checkout, overriding it there is how
+	// one worktree works against staging while the others stay on the
+	// project's default.
+	DefaultEnv string `yaml:"default_env,omitempty"`
 	// Account is the 1Password account (sign-in address or UUID). Empty means
-	// whichever account the shell is signed into, or ask when ambiguous.
+	// whichever account the shell is signed into, or ask when ambiguous. It
+	// is the one key here that is genuinely per-workstation, so it is the one
+	// that usually lives in the gitignored .wet.local.yaml.
 	Account string `yaml:"account,omitempty"`
 	// Definitions maps a logical secret name to its place in the store.
 	Definitions map[string]SecretDefinition `yaml:"definitions"`
+}
+
+// VaultConfig is one deploy environment's vault: the environment's name as
+// wet knows it, and the vault holding that environment's credentials.
+type VaultConfig struct {
+	// Name is the vault, exactly as the store names it.
+	Name string `yaml:"name"`
+	// Env is the label selected by default_env or `--env`.
+	Env string `yaml:"env"`
 }
 
 // SecretDefinition is one credential: what it is called here, where it lives
@@ -658,6 +685,12 @@ var (
 	// TitleCase reserved template fields.
 	portNameRE = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
 
+	// Environment names appear on the command line (`--env staging`) and in
+	// .wet.yaml under secrets.vaults:. Lowercase word characters keep them
+	// typable and keep them from being mistaken for a vault name, which may
+	// contain anything.
+	secretEnvNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
+
 	// Pool names are lowercase snake_case so they're visually distinct from
 	// UPPER-case ports. They become `$POOL_<UPPER>` env vars for hooks.
 	poolNameRE = regexp.MustCompile(`^[a-z_][a-z0-9_]*$`)
@@ -813,16 +846,20 @@ func (c *WetConfig) validateSecrets() error {
 		return nil
 	}
 	s := c.Secrets
-	// An overlay-only secrets: block is the shape a user lands in by
-	// following the instructions: .wet.local.yaml is where the vault goes, so
-	// someone writes one against a .wet.yaml that has no secrets: block at
-	// all. The merge then synthesizes a block with an empty store, and the
-	// resulting `secrets.store "" is not supported` names a key they never
-	// wrote and does not say what is actually missing.
-	if (s.Vault != "" || s.Item != "" || s.Account != "") && s.Store == "" && len(s.Definitions) == 0 {
-		return fmt.Errorf("secrets: names a destination (vault/item/account) but declares no store: or definitions: — "+
-			"the credentials themselves belong in %s; %s carries only the machine-local vault and account",
+	// An overlay-only secrets: block is a shape people land in: someone adds
+	// `secrets: {account: ...}` — or a vault override — to .wet.local.yaml
+	// against a .wet.yaml that has no secrets: block at all. The merge then
+	// synthesizes a block with an empty store, and the resulting
+	// `secrets.store "" is not supported` names a key they never wrote and
+	// does not say what is actually missing.
+	if (s.Vault != "" || len(s.Vaults) > 0 || s.Item != "" || s.Account != "") && s.Store == "" && len(s.Definitions) == 0 {
+		return fmt.Errorf("secrets: names a destination (vault/vaults/item/account) but declares no store: or definitions: — "+
+			"declare the block in %s (store:, the vault, the item, and the definitions). An overlay may add keys, "+
+			"but a secrets: block that exists only in %s is missing the half that makes it mean anything",
 			wetConfigFileName, wetLocalConfigFileName)
+	}
+	if err := s.validateVaults(); err != nil {
+		return err
 	}
 	if s.Store != secretsStoreOP {
 		return fmt.Errorf("secrets.store %q is not supported (known: %s)", s.Store, secretsStoreOP)
@@ -877,6 +914,123 @@ func (c *WetConfig) validateSecrets() error {
 		}
 	}
 	return nil
+}
+
+// validateVaults checks the multi-environment vault list: that it is not
+// mixed with the single `vault:`, that every entry is complete and uniquely
+// named, and that `default_env:` names an environment that exists.
+//
+// A bad env reference has to fail at load rather than at read. Selecting a
+// vault nobody declared resolves to no destination at all, and under the
+// default `fallback` policy that is indistinguishable from being offline: wet
+// would quietly write every declared default and report a store it never
+// meant to skip.
+func (s *SecretsConfig) validateVaults() error {
+	if len(s.Vaults) == 0 {
+		if s.DefaultEnv != "" {
+			return fmt.Errorf("secrets.default_env %q names an environment, but secrets.vaults: declares none — "+
+				"list the vaults as `- {name: ..., env: ...}` or drop default_env", s.DefaultEnv)
+		}
+		return nil
+	}
+	if s.Vault != "" {
+		// The two can arrive from different layers — a `vault:` in the
+		// committed file under a `vaults:` in an overlay — and by the time
+		// this runs the merge has erased which file each came from. So the
+		// message describes the fix rather than pointing at a line.
+		return fmt.Errorf("secrets: names both vault: (%s) and vaults: — one vault or a list of "+
+			"per-environment vaults, not both.\n"+
+			"  Replace `vault: %s` with the vaults: list wherever it is declared (%s, or the %s overlaying it).",
+			s.Vault, s.Vault, wetConfigFileName, wetLocalConfigFileName)
+	}
+	seen := map[string]bool{}
+	for i, v := range s.Vaults {
+		if v.Name == "" {
+			return fmt.Errorf("secrets.vaults[%d]: name: is required (the vault as the store names it)", i)
+		}
+		if v.Env == "" {
+			return fmt.Errorf("secrets.vaults[%d] (%s): env: is required — it is the label default_env and --env select by", i, v.Name)
+		}
+		if !secretEnvNameRE.MatchString(v.Env) {
+			return fmt.Errorf("secrets.vaults[%d]: env %q must match %s", i, v.Env, secretEnvNameRE.String())
+		}
+		if seen[v.Env] {
+			return fmt.Errorf("secrets.vaults: env %q is declared twice — one vault per environment", v.Env)
+		}
+		seen[v.Env] = true
+	}
+	if s.DefaultEnv == "" {
+		if len(s.Vaults) > 1 {
+			return fmt.Errorf("secrets.vaults declares %d environments (%s), so secrets.default_env: must say which one is used "+
+				"when no --env is given", len(s.Vaults), strings.Join(s.VaultEnvs(), ", "))
+		}
+		return nil
+	}
+	if !seen[s.DefaultEnv] {
+		return fmt.Errorf("secrets.default_env %q is not one of secrets.vaults: (%s)", s.DefaultEnv, strings.Join(s.VaultEnvs(), ", "))
+	}
+	return nil
+}
+
+// VaultEnvs lists the declared environments in declaration order, for errors
+// and for `wet env explain`.
+func (s *SecretsConfig) VaultEnvs() []string {
+	if s == nil {
+		return nil
+	}
+	out := make([]string, 0, len(s.Vaults))
+	for _, v := range s.Vaults {
+		out = append(out, v.Env)
+	}
+	return out
+}
+
+// SelectEnv resolves the environment one command runs against: the --env
+// override if given, otherwise default_env, otherwise the only declared
+// environment. It returns "" when the config has no vaults: block at all,
+// which is the single-vault shape every existing config has.
+//
+// An override is validated even when there are no vaults, because `--env
+// production` against a config that has none is a request wet cannot honour —
+// answering it with the one vault there is would read from the wrong place.
+func (s *SecretsConfig) SelectEnv(override string) (string, error) {
+	if s == nil || len(s.Vaults) == 0 {
+		if override != "" {
+			return "", fmt.Errorf("--env %s: no secrets.vaults: declares per-environment vaults — "+
+				"add them to %s as `- {name: ..., env: %s}`", override, wetConfigFileName, override)
+		}
+		return "", nil
+	}
+	if override != "" {
+		for _, v := range s.Vaults {
+			if v.Env == override {
+				return override, nil
+			}
+		}
+		return "", fmt.Errorf("--env %s: not one of secrets.vaults: (%s)", override, strings.Join(s.VaultEnvs(), ", "))
+	}
+	if s.DefaultEnv != "" {
+		return s.DefaultEnv, nil
+	}
+	// Exactly one vault and no default_env — validation guarantees it.
+	return s.Vaults[0].Env, nil
+}
+
+// VaultForEnv is the vault a resolution in env reads from. An empty env is
+// the single-vault config, which answers with `vault:`.
+func (s *SecretsConfig) VaultForEnv(env string) string {
+	if s == nil {
+		return ""
+	}
+	if env == "" {
+		return s.Vault
+	}
+	for _, v := range s.Vaults {
+		if v.Env == env {
+			return v.Name
+		}
+	}
+	return ""
 }
 
 // sortedKeys returns a map's keys in a stable order, for error messages that

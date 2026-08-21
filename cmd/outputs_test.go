@@ -1723,7 +1723,7 @@ outputs:
 	if err != nil {
 		t.Fatalf("a standalone ref: was rejected: %v", err)
 	}
-	ref, err := cfg.Secrets.ResolveSecretRef("API_KEY")
+	ref, err := cfg.Secrets.ResolveSecretRef("API_KEY", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1885,7 +1885,7 @@ func TestLocalOverlayOverridesTheVaultAndResolvesReferences(t *testing.T) {
 	}
 	// The point of the override: references resolve to the machine's vault,
 	// while the item stays the committed one nothing overrode.
-	ref, err := cfg.Secrets.ResolveSecretRef("SECRET_KEY_BASE")
+	ref, err := cfg.Secrets.ResolveSecretRef("SECRET_KEY_BASE", "")
 	if err != nil {
 		t.Fatalf("reference unresolvable after the override: %v", err)
 	}
@@ -1897,15 +1897,15 @@ func TestLocalOverlayOverridesTheVaultAndResolvesReferences(t *testing.T) {
 // `wet env explain` is the command you run to find out WHY nothing resolves,
 // so a missing destination must be reported as the gap it is rather than
 // failing the command — and it must name the RIGHT gap. A missing item and a
-// missing vault are fixed in different files, so one summary message for both
-// sends half the readers to edit the wrong one.
+// missing vault are different keys with different fixes, so one summary
+// message for both sends half the readers to edit the wrong line.
 func TestEnvExplainReportsAMissingDestination(t *testing.T) {
 	for _, tc := range []struct {
 		name, strip, wantKey, wantFile string
 		alsoWant                       []string
 	}{
 		{"no vault", "  vault: V\n", "secrets.vault", wetConfigFileName,
-			[]string{wetLocalConfigFileName, "vault: Development", "secrets.definitions.SECRET_KEY_BASE.vault"}},
+			[]string{"vault: Development", "secrets.vaults:", "secrets.definitions.SECRET_KEY_BASE.vault"}},
 		{"no item", "  item: I\n", "secrets.item", wetConfigFileName, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

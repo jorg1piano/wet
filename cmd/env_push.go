@@ -51,6 +51,10 @@ key this output does not select, which is what you want when importing a
 dedicated secrets-only file and a typo should be loud. It does not widen what
 wet may write.
 
+--env picks the secrets.vaults: environment written to, so pushing the same
+file to staging and to production is the same command twice. Without it the
+push goes to secrets.default_env — the same vault a pull reads.
+
 Names, destinations and statuses are printed. Values never are.`,
 	Args: cobra.ExactArgs(1),
 	RunE: runEnvPush,
@@ -94,8 +98,21 @@ func runEnvPush(cmd *cobra.Command, args []string) error {
 	if cfg.Secrets.Store != secretsStoreOP {
 		return fmt.Errorf("secrets.store %q is not supported (known: %s)", cfg.Secrets.Store, secretsStoreOP)
 	}
+	// Before requireOP: an undeclared --env is answerable from the config
+	// alone, and "op is not installed" is the wrong answer to `--env
+	// prodution`.
+	env, err := cfg.Secrets.SelectEnv(envSelectEnv)
+	if err != nil {
+		return err
+	}
 	if err := requireOP(); err != nil {
 		return err
+	}
+	// Said out loud before anything is written. push is the one command that
+	// can put a staging value on a production credential, and the only thing
+	// standing between those two runs is a flag that is easy to forget.
+	if env != "" {
+		fmt.Printf("environment: %s (of %s)\n", env, strings.Join(cfg.Secrets.VaultEnvs(), ", "))
 	}
 
 	values, order, err := ParseEnvFile(envPushFrom)
@@ -143,7 +160,7 @@ func runEnvPush(cmd *cobra.Command, args []string) error {
 
 	for _, name := range output.Secrets {
 		def := cfg.Secrets.Definitions[name]
-		ref, err := cfg.Secrets.ResolveSecretRef(name)
+		ref, err := cfg.Secrets.ResolveSecretRef(name, env)
 		if err != nil {
 			return err
 		}
@@ -208,7 +225,20 @@ func runEnvPush(cmd *cobra.Command, args []string) error {
 	}
 
 	for _, r := range report {
-		fmt.Printf("  %s -> %s/%s/%s: %s\n", r.name, r.ref.Vault, r.ref.Item, r.ref.Field, r.status)
+		// The same marker `explain` prints, and it matters more here: a
+		// definition carrying its own vault:/ref: does not follow --env, so
+		// under `--env production` it is written to that vault in every
+		// environment. It is marked on EVERY status line, not only the ones
+		// that would write — a CONFLICT is where the misreading has
+		// consequences, because the next move is --force, and a --force aimed
+		// at what looks like a production-only credential overwrites the one
+		// staging reads too.
+		def := cfg.Secrets.Definitions[r.name]
+		fixed := ""
+		if env != "" && (def.Ref != "" || def.Vault != "") {
+			fixed = " (same in every environment)"
+		}
+		fmt.Printf("  %s -> %s/%s/%s: %s%s\n", r.name, r.ref.Vault, r.ref.Item, r.ref.Field, r.status, fixed)
 	}
 	sort.Strings(unmapped)
 	for _, key := range unmapped {

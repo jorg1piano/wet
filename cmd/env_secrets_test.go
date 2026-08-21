@@ -8,6 +8,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 // stubOP puts a fake `op` at the front of PATH. It is a real script rather
@@ -164,13 +167,35 @@ func worktreeEnv(t *testing.T, slot int) {
 
 // resetEnvFlags clears the package-level flag state cobra would otherwise
 // carry between tests in one process.
+//
+// It resets from cobra's own flag definitions rather than a hand-written list
+// of variables. The hand-written list is a generator of exactly one bug: a new
+// flag is added to the var block and not to the list, so it keeps whatever the
+// last test set for the rest of the process — and a leaked `--env` retargets
+// every later push at another environment's vault. Walking the flag sets means
+// a new flag is covered the moment it is registered. (A package-level var
+// that is NOT registered as a flag is still on its author — but such a var is
+// read by a command and set by nothing, which is its own bug.)
 func resetEnvFlags(t *testing.T) {
 	t.Helper()
 	restore := func() {
-		envPullDryRun, envPullSecrets = false, ""
-		envPushFrom = ""
-		envPushDryRun, envPushForce, envPushCreateItem = false, false, false
-		envPushRejectUnmapped, envPushIncludeDefaults = false, false
+		for _, c := range append([]*cobra.Command{envCmd}, envCmd.Commands()...) {
+			c.Flags().VisitAll(func(f *pflag.Flag) {
+				// Set is correct for every flag these commands have, which is
+				// to say every string and bool. It is NOT correct for a slice
+				// value: those append on a second Set, using a "changed" bit
+				// private to the value that clearing f.Changed does not
+				// reach. The first slice flag added here needs a
+				// pflag.SliceValue branch that Replaces the default — and
+				// TestResetEnvFlagsClearsEveryFlag fails loudly until it gets
+				// one, which is why this stays a comment and not speculative
+				// code for a flag nobody has written.
+				if err := f.Value.Set(f.DefValue); err != nil {
+					t.Fatalf("reset --%s: %v", f.Name, err)
+				}
+				f.Changed = false
+			})
+		}
 	}
 	restore()
 	t.Cleanup(restore)

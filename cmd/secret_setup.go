@@ -229,8 +229,11 @@ func printScaffoldSummary(res *ScaffoldResult, groups []string) {
 // that outdented mid-paragraph and then re-indented.
 func printSecretDestinationSteps(indent, output string) {
 	fmt.Printf("%sBefore these resolve, name where they live:\n", indent)
-	fmt.Printf("%s  secrets.item          in %s — the item every field sits on (a project fact)\n", indent, wetConfigFileName)
-	fmt.Printf("%s  secrets.vault/account in %s — this machine's sign-in (gitignored)\n", indent, wetLocalConfigFileName)
+	fmt.Printf("%s  secrets.item          in %s — the item every field sits on\n", indent, wetConfigFileName)
+	fmt.Printf("%s  secrets.vault         in %s — the vault holding it\n", indent, wetConfigFileName)
+	fmt.Printf("%s  secrets.vaults        in %s — instead of vault:, when staging and\n", indent, wetConfigFileName)
+	fmt.Printf("%s                        production live in different vaults (see default_env)\n", indent)
+	fmt.Printf("%s  secrets.account       in %s — this workstation's sign-in (gitignored)\n", indent, wetLocalConfigFileName)
 	fmt.Printf("%sThen `wet env pull %s` writes the file, or `wet env push %s --from <dotenv>`\n", indent, output, output)
 	fmt.Printf("%sstores real values you already have.\n", indent)
 }

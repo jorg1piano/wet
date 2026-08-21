@@ -312,24 +312,62 @@ outputs:
 #   ref       a full "op://vault/item/field" for a secret that lives somewhere
 #             else entirely. Mutually exclusive with vault/item/field.
 #
-# A reference resolves only once BOTH an item and a vault are named, and the
-# two live in different files:
+# A reference resolves only once BOTH an item and a vault are named, and both
+# belong here, in .wet.yaml:
 #
-#   item     here, in .wet.yaml. Which item the fields sit on is a fact about
-#            the project, and everyone needs the same answer.
-#   vault    in the gitignored .wet.local.yaml, under this same secrets: key,
-#   account  along with the account. Which vault you keep the item in and
-#            which account you are signed into are facts about your machine.
+#   item     which item the fields sit on is a fact about the project, and
+#   vault    so is which vault holds it — everyone who clones the repo needs
+#            the same answer.
+#   account  the exception: which account you are signed into is a fact about
+#            your machine, so it goes in the gitignored .wet.local.yaml.
+#
+# .wet.local.yaml can override the vault too, the way it can override any key
+# — but that is an override, not where the value lives.
 #
 # Leave the item out and `policy: fallback` treats the unresolvable reference
 # as a store failure like any other: every secret quietly falls back to its
 # default: and the generated file looks configured when it is not.
 #
-# So the machine-local half is a .wet.local.yaml holding only:
+# So the machine-local half is usually a .wet.local.yaml holding only:
 #
 #   secrets:
-#     vault: myapp_development
 #     account: my.1password.com
+#
+# When one repo has more than one deploy environment — staging, production,
+# sandbox — the definitions do not change: the same keys, the same fields, the
+# same item, in a different vault per environment. Say so with `vaults:`
+# instead of `vault:` (the two are mutually exclusive), here beside the
+# definitions:
+#
+#   secrets:
+#     vaults:
+#       - name: myapp_staging
+#         env: staging
+#       - name: myapp_production
+#         env: production
+#     default_env: staging
+#
+# `default_env` is which one a plain `wet env pull` reads, and is required as
+# soon as there is more than one vault — wet will not guess which environment
+# a command meant. Any single run may say otherwise:
+#
+#   wet env pull --env production
+#   wet env explain --env production
+#   wet env push backend --from backend/.env.prod --env production
+#
+# Because .wet.local.yaml layers per checkout, `default_env` is also how ONE
+# worktree works against staging while the rest of the machine stays on the
+# default. `wet setup`, `wet worktree create` and `wet mobile setup` have no
+# --env for that reason: they configure a checkout that lives on, so the
+# environment belongs in its .wet.local.yaml rather than in a transient flag.
+#
+# Two things do NOT follow the environment:
+#
+#   item     the same item name must exist in every vault. Where it genuinely
+#            differs, give that definition its own item: or a full ref:.
+#   vault    a definition's own vault: or ref: names its own place, so --env
+#   ref      does not move it. `wet env explain` marks those destinations
+#            "same in every environment".
 #
 # Moving values in the other direction — a dotenv file back into the store:
 #
@@ -363,8 +401,10 @@ outputs:
 #   #   wet env pull --secrets=required|fallback|disabled
 #   policy: fallback
 #
-#   # The item is a project fact and belongs here. vault: and account: are
-#   # facts about one machine — see the .wet.local.yaml snippet above.
+#   # The vault and the item are project facts and belong here. Only account:
+#   # is machine-local — see the .wet.local.yaml snippet above. Use vaults:
+#   # instead of vault: when the repo has more than one deploy environment.
+#   vault: myapp_development
 #   item: backend-development
 #
 #   definitions:
@@ -382,10 +422,10 @@ outputs:
 #       default: ''
 #     # No default at all: this one must come from the store, and a checkout
 #     # that cannot reach it fails loudly instead of booting misconfigured.
-#     # vault:/item: override the block-level destination for one secret.
-#     # A vault override IS legitimate in this committed file, unlike the
-#     # block-level vault: that arrives from .wet.local.yaml — "payments lives
-#     # in its own vault" is a fact about the project, not about your machine.
+#     # vault:/item: override the block-level destination for one secret —
+#     # "payments lives in its own vault" is a fact about the project. Such an
+#     # override does not follow --env: it names its own place in every
+#     # environment, and `wet env explain` marks it as such.
 #     STRIPE_SECRET_KEY:
 #       field: stripe_secret_key
 #       vault: myapp_payments

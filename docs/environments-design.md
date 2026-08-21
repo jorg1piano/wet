@@ -74,6 +74,27 @@ That is not implemented, and it is not the rejected idea: it adds no second
 home for values, because it emits no values — it is the canonical definition
 list rendered in a different notation. If it is ever built, it must stay that.
 
+## What this does NOT rule out: `secrets.vaults:`
+
+wet now accepts a list of per-environment vaults in place of a single
+`vault:`, with `default_env:` choosing between them and `--env` overriding for
+one run. That is not the rejected idea returning under another name, and the
+distinction is the whole argument above:
+
+- It holds **no values** — only which vault a lookup reads from. The keys, the
+  fields and the item are unchanged across environments; `secrets.definitions:`
+  stays the single list.
+- It is **committed**, for exactly the reason `vault:` and `item:` are: which
+  vault holds a given environment's credentials is a fact about the project,
+  the same for everyone who clones the repo. `.wet.local.yaml` can override it
+  like any other key, but it is not that file's business.
+- It configures **this checkout**, not a deployed app. `wet env pull --env
+  production` fills a local file from production credentials; nothing about it
+  describes what some other machine runs.
+
+An `environments:` block of literal hostnames and issuers would still be a
+second home for values, and is still rejected.
+
 ## What was worth keeping
 
 Two prerequisites from the rejected design stand on their own:

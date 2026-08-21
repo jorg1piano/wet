@@ -512,22 +512,56 @@ gets a provenance line, names only, never values:
 Each distinct reference is fetched once per run across all outputs — one round
 trip, and one authorization prompt.
 
-### Where the account and vault come from
+### Where the vault and the account come from
 
-No command sets them. The credential map is committed in `.wet.yaml`; which
-account you are signed into and which vault you use are facts about your
-workstation, so they are the two keys the gitignored overlay carries:
+No command sets them. The credential map, the vault and the item are all
+committed in `.wet.yaml`. Which account you are signed into is the one fact
+about your workstation, so it is what the gitignored overlay carries:
 
 ```yaml
 # .wet.local.yaml
 secrets:
   account: my.1password.com
-  vault: Development
 ```
 
-Until the vault is set, `policy: fallback` writes each secret's declared
+Until a vault is named, `policy: fallback` writes each secret's declared
 `default:` and names which ones fell back; `wet env explain` reports the
 missing destination instead of failing.
+
+More than one deploy environment is `vaults:` in place of `vault:` — same keys,
+same fields, same item, one vault per environment:
+
+```yaml
+# .wet.yaml
+secrets:
+  vaults:
+    - name: myapp_staging
+      env: staging
+    - name: myapp_production
+      env: production
+  default_env: staging
+```
+
+`default_env:` is what a plain `wet env pull` reads and is required once there
+is more than one vault. `--env production` overrides it for one run of `pull`,
+`explain` or `push`; an environment nobody declared is an error rather than a
+silent fall back to the default. A checkout's own `.wet.local.yaml` may carry
+`default_env:` alone, so one worktree works against production while the
+machine stays on staging.
+
+Three limits worth knowing before you write a multi-environment config:
+
+- **`item:` does not vary by environment.** The same item name must exist in
+  every vault. Where it genuinely differs, give that definition its own `item:`
+  or a full `ref:`.
+- **A definition's own `vault:` or `ref:` is environment-invariant.** It names
+  its own place and `--env` does not move it — legitimate for a genuinely
+  shared credential, and `wet env explain` marks those lines `same in every
+  environment` so it is visible rather than inferred.
+- **`wet setup`, `wet worktree create` and `wet mobile setup` have no
+  `--env`.** They configure a checkout that then lives on, so the environment
+  goes in that checkout's `.wet.local.yaml` as `default_env:`, where it is
+  written down.
 
 ### `wet env push` — declared secrets, back into the store
 

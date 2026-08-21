@@ -545,22 +545,82 @@ actually wrote empty strings, debugs the wrong thing for an hour.
 Each distinct reference is fetched **once** per run, across every requested
 output — one round trip, and more importantly one authorization prompt.
 
-### Where the account and vault come from
+### Where the vault and the account come from
 
-The map lives in `.wet.yaml` and is shared by everyone. Which 1Password account
-you are signed into and which vault you keep the project's item in are facts
-about *your workstation*, so those two keys are the only parts that belong in
-the gitignored `.wet.local.yaml`:
+Both are in `.wet.yaml`, with one exception. The vault and the item are facts
+about the *project* — the credentials sit where they sit, whoever clones the
+repo — so they are committed alongside the definitions that resolve against
+them. Which 1Password account you are signed into is a fact about *your
+workstation*, so that one key is the one that normally lives in the gitignored
+`.wet.local.yaml`:
+
+```yaml
+# .wet.local.yaml
+secrets:
+  account: my.1password.com
+```
+
+There is no special rule making the vault local. `.wet.local.yaml` overrides
+*any* key, so a machine that reads a differently-named vault overrides `vault:`
+there exactly as it would override `port_stride:` — but that is an override,
+not where the value belongs.
+
+#### More than one deploy environment
+
+When the repo has staging, production and sandbox credentials, nothing about
+the definitions changes — the same keys, the same fields, the same item, in a
+different vault each. Say that with `vaults:` instead of `vault:` (they are
+mutually exclusive), in `.wet.yaml` beside the definitions:
 
 ```yaml
 secrets:
-  account: my.1password.com
-  vault: Development
+  vaults:
+    - name: myapp_staging
+      env: staging
+    - name: myapp_production
+      env: production
+  default_env: staging
 ```
 
-`wet env pull`, `wet env push` and `wet env explain` read that overlay
-themselves; no separate command sets it, and the provider is never named on the
-command line — `secrets.store:` decides. Until the vault is set, `pull` under
+`default_env:` is the environment a plain `wet env pull` reads, and it is
+required as soon as there is more than one vault — wet does not guess which
+environment a command meant. A single run can say otherwise with `--env`, on
+`pull`, `explain` and `push` alike:
+
+```
+wet env pull --env production
+wet env explain --env production
+wet env push backend --from backend/.env.prod --env production
+```
+
+An `--env` naming an environment nobody declared is an error, not a fallback to
+the default — a typo must not push staging values over production credentials.
+All three print the environment they chose before doing anything — and only
+when the run actually resolves a secret, since an output selecting none reads
+no vault for the choice to affect.
+
+Two things stay outside the flag, on purpose:
+
+- **`item:` does not vary by environment.** The same item name has to exist in
+  every vault. Where it genuinely differs, give that definition its own `item:`
+  or a full `ref:`.
+- **A definition's own `vault:` or `ref:` is environment-invariant** — it names
+  its own place and `--env` does not move it. `wet env explain` marks those
+  destinations `same in every environment` so the exception is visible rather
+  than inferred.
+
+`wet setup`, `wet worktree create` and `wet mobile setup` have no `--env`: they
+configure a checkout that then lives on, and an environment chosen by a
+transient flag would leave no record of which vault filled the files. Put
+`default_env:` in that checkout's own `.wet.local.yaml` instead — it is the
+same choice, written down.
+
+Because `.wet.local.yaml` layers per checkout, a worktree's own overlay can
+carry `default_env:` alone and work against production while the rest of the
+machine stays on staging.
+
+No separate command sets any of this, and the provider is never named on the
+command line — `secrets.store:` decides. Until a vault is named, `pull` under
 `policy: fallback` writes each secret's declared `default:` and says so, and
 `explain` reports the missing destination rather than failing.
 

@@ -876,11 +876,18 @@ var commentedSchemaKeys = map[string]*regexp.Regexp{
 	"secrets.policy":      regexp.MustCompile(`(?m)^#   policy: \w+`),
 	"secrets.item":        regexp.MustCompile(`(?m)^#   item: \S+`),
 	"secrets.definitions": regexp.MustCompile(`(?m)^#   definitions:$`),
-	// vault and account are machine-local, so the example documents them
-	// where they actually belong: the .wet.local.yaml snippet, NOT the
-	// commented .wet.yaml block. Pinning to that depth is what keeps the two
-	// from drifting back together.
-	"secrets.vault":                 regexp.MustCompile(`(?m)^#     vault: \S+`),
+	// The vault is a project fact, so the example documents it in the
+	// commented .wet.yaml block, at that block's depth. account — the one
+	// machine-local key — stays pinned to the .wet.local.yaml snippet below.
+	// Pinning both is what keeps them from drifting back together.
+	"secrets.vault": regexp.MustCompile(`(?m)^#   vault: \S+`),
+	// The per-environment form replaces vault:, so it is illustrated as a
+	// secrets: snippet of its own in the prose above the block — showing both
+	// live in one block would be a config that does not load.
+	"secrets.vaults":                regexp.MustCompile(`(?m)^#     vaults:$`),
+	"secrets.vaults[].name":         regexp.MustCompile(`(?m)^#       - name: \S+`),
+	"secrets.vaults[].env":          regexp.MustCompile(`(?m)^#         env: \S+`),
+	"secrets.default_env":           regexp.MustCompile(`(?m)^#     default_env: \S+`),
 	"secrets.account":               regexp.MustCompile(`(?m)^#     account: \S+`),
 	"secrets.definitions.*.field":   regexp.MustCompile(`(?m)^#       field: \S+`),
 	"secrets.definitions.*.default": regexp.MustCompile(`(?m)^#       default:`),
@@ -1080,9 +1087,10 @@ func TestValidateRejectsUnknownPoolGrowBeforeExhaustion(t *testing.T) {
 	}
 }
 
-// Writing a .wet.local.yaml is now the ONLY documented way to name a vault,
-// so someone will write one against a .wet.yaml that has no secrets: block —
-// following the instructions exactly. The merge synthesizes a secrets: block
+// The overlay is where the 1Password account goes, so someone writes
+// `secrets: {account: ...}` against a .wet.yaml that has no secrets: block —
+// following the instructions exactly. The merge ADDS the key (an overlay is
+// not limited to keys the base already has), synthesizing a secrets: block
 // with an empty store, and the generic store error named a key the user never
 // wrote. The message has to say which file is missing what.
 func TestOverlayOnlySecretsBlockSaysWhatIsMissing(t *testing.T) {
@@ -1092,7 +1100,7 @@ func TestOverlayOnlySecretsBlockSaysWhatIsMissing(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(repo, wetLocalConfigFileName),
-		[]byte("secrets:\n  vault: V\n  account: a@b.c\n"), 0o600); err != nil {
+		[]byte("secrets:\n  account: a@b.c\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	_, err := LoadWetConfigWithLocal(repo, repo)
