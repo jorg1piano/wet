@@ -210,6 +210,13 @@ env:
 #   values    renamed and literal keys, emitted in the order written here.
 #             `from:` reads an ordinary value, port, or Pools./Handles. entry;
 #             `literal:` emits a fixed scalar; the two are mutually exclusive.
+#   on_demand optional. Keeps the output out of the sweep: `wet setup`, `wet
+#             worktree create` and a bare `wet env pull` skip it, and only
+#             `wet env pull <name>` generates it. For the files that are not
+#             this checkout's at all — a deploy environment's dotenv, whose
+#             credentials belong to a running system and have no business
+#             being fetched onto every developer's disk. `wet env explain`
+#             still lists it, marked, because it is part of the inventory.
 #
 # Secrets are deliberately NOT reachable through `values.from` — they are
 # emitted only under their own logical name, so a rename can never smuggle one
@@ -255,6 +262,34 @@ outputs:
         literal: myapp-mobile
       oidcRedirectUri:
         literal: "myapp://auth/callback"
+
+  # A deploy environment. It is an output like any other — one inventory, one
+  # place to read what the app is configured with — but it is `on_demand:`, so
+  # a worktree never fetches these credentials, and it is generated straight
+  # into whatever consumes it rather than onto a disk:
+  #
+  #   wet env pull deploy-staging --env staging --secrets required --stdout \
+  #     | fly secrets import --app myapp-staging
+  #
+  # --secrets required is what keeps a development placeholder out of a running
+  # system: under the default `fallback` policy an unreachable store writes
+  # each declared `default:`, and pushing an empty string over a real
+  # credential is the mistake this path must never make.
+  #
+  # The per-environment values are literals here, in git, rather than fields in
+  # the vault: a hostname is not a credential, and a value nobody can diff is
+  # a value nobody can review. Only the vault varies with --env.
+  #
+  # - name: deploy-staging
+  #   out: deploy/.env.staging
+  #   format: dotenv
+  #   on_demand: true
+  #   values:
+  #     APP_HOST:
+  #       literal: staging.example.com
+  #   secrets:
+  #     - SECRET_KEY_BASE
+  #     - SENTRY_DSN
 
   # Editor config usually needs NO output of its own. Point it at the env file
   # wet already writes, and it stops varying per worktree:

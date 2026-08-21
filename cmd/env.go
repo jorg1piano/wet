@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -13,6 +14,7 @@ import (
 
 var (
 	envPullDryRun  bool
+	envPullStdout  bool
 	envPullSecrets string
 	// envSelectEnv backs the --env flag on pull, explain and push. One
 	// variable for all three because one command runs per process, and the
@@ -69,7 +71,16 @@ secrets.vaults:. Without it the run uses secrets.default_env:
 
 --dry-run resolves and validates everything and writes nothing. It still
 contacts the store, because whether a required secret exists is exactly what a
-dry run is asked to find out. It never prints a secret value.`,
+dry run is asked to find out. It never prints a secret value.
+
+--stdout writes the generated file to standard output instead of to disk, so a
+deploy environment's credentials can be piped straight into whatever consumes
+them and never land on a developer's filesystem:
+
+  wet env pull fly-staging --stdout | fly secrets import --app my-app
+
+It takes exactly one output, and every progress line goes to stderr so the
+stream carries the file and nothing else.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runEnvPull,
 }
@@ -94,6 +105,8 @@ func init() {
 		"resolve and validate everything, write nothing")
 	envPullCmd.Flags().StringVar(&envPullSecrets, "secrets", "",
 		"override secrets.policy for this run (required|fallback|disabled)")
+	envPullCmd.Flags().BoolVar(&envPullStdout, "stdout", false,
+		"write the generated file to stdout instead of to disk (one output)")
 	for _, c := range []*cobra.Command{envPullCmd, envExplainCmd, envPushCmd} {
 		c.Flags().StringVar(&envSelectEnv, "env", "",
 			"which secrets.vaults: environment to read (default secrets.default_env)")
@@ -124,6 +137,11 @@ func loadConfigForTree() (*WetConfig, string, error) {
 }
 
 func runEnvPull(cmd *cobra.Command, args []string) error {
+	// Both mean "write nothing to disk", but one of them still produces the
+	// file. Picking either silently would make the other one's promise a lie.
+	if envPullStdout && envPullDryRun {
+		return errors.New("--stdout and --dry-run are mutually exclusive: one writes the file to the stream, the other writes it nowhere")
+	}
 	cfg, treePath, err := loadConfigForTree()
 	if err != nil {
 		return err
@@ -132,7 +150,7 @@ func runEnvPull(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	return PullOutputs(PullRequest{
+	req := PullRequest{
 		Cfg:      cfg,
 		TreePath: treePath,
 		Data:     data,
@@ -140,7 +158,15 @@ func runEnvPull(cmd *cobra.Command, args []string) error {
 		Policy:   envPullSecrets,
 		Env:      envSelectEnv,
 		DryRun:   envPullDryRun,
-	})
+	}
+	if envPullStdout {
+		// Provenance and warnings move to stderr so the stream is the file and
+		// nothing else — a "Wrote …" line in the middle of a dotenv is a
+		// syntax error in whatever reads it.
+		req.Content = cmd.OutOrStdout()
+		req.Out = cmd.ErrOrStderr()
+	}
+	return PullOutputs(req)
 }
 
 // valueSourceLabel says where an ordinary value comes from, so `explain`
@@ -166,7 +192,7 @@ func runEnvExplain(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	selected, err := cfg.SelectOutputs(args)
+	selected, err := cfg.SelectEveryOutput(args)
 	if err != nil {
 		return err
 	}
@@ -193,7 +219,14 @@ func runEnvExplain(cmd *cobra.Command, args []string) error {
 		if i > 0 {
 			fmt.Println()
 		}
-		fmt.Printf("%s — %s (%s)\n", o.Name, o.Out, o.Format)
+		// on_demand is stated on the header line because it changes what the
+		// reader can expect on disk: this file is not there after a setup, and
+		// looking for it and not finding it is otherwise a bug hunt.
+		demand := ""
+		if o.OnDemand {
+			demand = " — on demand, generated only when named"
+		}
+		fmt.Printf("%s — %s (%s)%s\n", o.Name, o.Out, o.Format, demand)
 		// Literals are counted apart from ordinary values because they are a
 		// different kind of fact: an ordinary key varies per worktree and can
 		// go missing when a name is renamed, a literal is a constant that

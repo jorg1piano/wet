@@ -319,6 +319,15 @@ outputs:
       port:          { from: GRPC_PORT }
       webBaseUrl:    { from: AUTH_BASE_URL }
       oidcClientId:  { literal: myapp-mobile }
+
+  - name: deploy-staging
+    out: deploy/.env.staging
+    format: dotenv
+    on_demand: true               # not this checkout's file; see below
+    values:
+      APP_HOST:      { literal: staging.example.com }
+    secrets:
+      - SECRET_KEY_BASE
 ```
 
 That one block answers the questions the old split between `.wet.yaml` and a
@@ -379,10 +388,11 @@ otherwise.
 ### `wet env pull` — regenerate, and nothing else
 
 ```
-wet env pull                       # every declared output
+wet env pull                       # every declared output that is not on_demand
 wet env pull backend               # just that one
 wet env pull --dry-run             # resolve, validate, write nothing
 wet env pull --secrets=disabled    # override secrets.policy for this run
+wet env pull deploy --stdout       # write the file to the stream, not to disk
 ```
 
 Values come from this worktree's allocation — its slot, its strided ports, its
@@ -400,6 +410,40 @@ already replaced on disk.
 `--dry-run` still contacts the store, because whether a `required` secret
 actually exists is exactly what a dry run is asked to find out. It never prints
 a secret value.
+
+#### `on_demand:` and `--stdout` — the outputs that are not this checkout's
+
+A deploy environment's dotenv belongs in the same inventory as everything else:
+it is the same question — which keys does that app run with, and where does
+each come from — and answering it in a second file is how the two drift apart.
+But it is not a file this checkout wants. `wet setup` and `wet worktree create`
+pull with no selection, so a plain `outputs:` entry would fetch a running
+system's credentials onto every developer's disk the moment they made a
+worktree.
+
+`on_demand: true` withholds an output from that sweep. It is skipped by setup,
+by `wet worktree create`, and by a bare `wet env pull`; naming it is what
+generates it. `wet env explain` still lists it, marked `on demand`, because it
+is part of the inventory even when it is not part of the checkout.
+
+`--stdout` writes the generated file to standard output instead of to disk, so
+the credentials go from the store into whatever consumes them and never exist
+as a file:
+
+```
+wet env pull deploy-staging --env staging --secrets required --stdout \
+  | fly secrets import --app myapp-staging
+```
+
+It takes exactly one output — two dotenv files concatenated into one stream is
+not a file either reader would accept — and every progress line goes to stderr,
+so the stream carries the file and nothing else. It is mutually exclusive with
+`--dry-run`: both mean "write nothing to disk", but one of them still produces
+the file.
+
+Pair it with `--secrets required`. Under the default `fallback` policy an
+unreachable store writes each declared `default:`, and pushing a development
+placeholder over a live credential is the mistake this path must never make.
 
 ### `wet env explain` — read the inventory
 

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -1939,5 +1940,148 @@ func TestEnvExplainReportsAMissingDestination(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// onDemandConfig adds a deploy output to the worked example: the file that is
+// not this checkout's at all, whose credentials belong to a running system.
+const onDemandConfig = fullConfig + `  - name: deploy
+    out: deploy/.env.staging
+    format: dotenv
+    on_demand: true
+    values:
+      PHX_HOST:
+        literal: app.example.com
+    secrets: [SECRET_KEY_BASE]
+`
+
+// The reason on_demand: exists. `wet setup` and `wet worktree create` pull
+// with no selection, so without the filter every new worktree would fetch a
+// deploy environment's credentials and write them to a developer's disk —
+// which is strictly worse than the checked-in injection template the flag was
+// added to replace.
+func TestPullSweepSkipsOnDemandOutputs(t *testing.T) {
+	cfg := loadTestConfig(t, onDemandConfig)
+	store := newFakeStore(map[string]string{
+		"op://V/I/secret_key_base": "real-key",
+		"op://V/I/admin_emails":    "a@b.c",
+		"op://V/I/shared_id":       "sid",
+	})
+	tree, _, err := pullInto(t, PullRequest{
+		Cfg: cfg, Data: worktreeData(t, cfg, 3, nil), Reader: store,
+	})
+	if err != nil {
+		t.Fatalf("pull: %v", err)
+	}
+	readOutput(t, tree, "backend/.env.dev")
+	if _, err := os.Stat(filepath.Join(tree, "deploy/.env.staging")); !os.IsNotExist(err) {
+		t.Fatalf("a bare pull wrote the on_demand output (stat err = %v)", err)
+	}
+}
+
+// Withheld from the sweep, not made unreachable: naming it is how it is
+// generated, and that is the whole interface a deploy recipe has.
+func TestPullByNameGeneratesOnDemandOutput(t *testing.T) {
+	cfg := loadTestConfig(t, onDemandConfig)
+	store := newFakeStore(map[string]string{"op://V/I/secret_key_base": "real-key"})
+	tree, _, err := pullInto(t, PullRequest{
+		Cfg: cfg, Data: worktreeData(t, cfg, 3, nil), Reader: store, Only: []string{"deploy"},
+	})
+	if err != nil {
+		t.Fatalf("pull deploy: %v", err)
+	}
+	body := readOutput(t, tree, "deploy/.env.staging")
+	for _, want := range []string{"PHX_HOST=app.example.com", "SECRET_KEY_BASE=real-key"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("deploy output missing %q:\n%s", want, body)
+		}
+	}
+}
+
+// The stream is the point: a deploy environment's credentials go from the
+// store into whatever consumes them without ever existing as a file.
+func TestPullToStreamWritesNoFile(t *testing.T) {
+	cfg := loadTestConfig(t, onDemandConfig)
+	store := newFakeStore(map[string]string{"op://V/I/secret_key_base": "real-key"})
+	var stream strings.Builder
+	tree, log, err := pullInto(t, PullRequest{
+		Cfg: cfg, Data: worktreeData(t, cfg, 3, nil), Reader: store,
+		Only: []string{"deploy"}, Content: &stream,
+	})
+	if err != nil {
+		t.Fatalf("pull deploy --stdout: %v", err)
+	}
+	if !strings.Contains(stream.String(), "SECRET_KEY_BASE=real-key") {
+		t.Errorf("stream missing the resolved secret:\n%s", stream.String())
+	}
+	if _, err := os.Stat(filepath.Join(tree, "deploy/.env.staging")); !os.IsNotExist(err) {
+		t.Fatalf("--stdout wrote a file anyway (stat err = %v)", err)
+	}
+	// Provenance belongs on the caller's log writer, never in the stream: a
+	// "Wrote …" line inside a dotenv is a syntax error to whatever reads it.
+	if strings.Contains(stream.String(), "Wrote") {
+		t.Errorf("narration leaked into the stream:\n%s", stream.String())
+	}
+	if !strings.Contains(log, "Wrote deploy") {
+		t.Errorf("log did not report the write:\n%s", log)
+	}
+}
+
+// Two dotenv files concatenated into one stream is not a file either reader
+// would accept, so the ambiguity is refused rather than resolved.
+func TestPullToStreamRefusesMoreThanOneOutput(t *testing.T) {
+	cfg := loadTestConfig(t, onDemandConfig)
+	var stream strings.Builder
+	_, _, err := pullInto(t, PullRequest{
+		Cfg: cfg, Data: worktreeData(t, cfg, 3, nil), Reader: newFakeStore(nil), Content: &stream,
+	})
+	if err == nil || !strings.Contains(err.Error(), "exactly one output") {
+		t.Fatalf("err = %v, want a refusal naming the one-output rule", err)
+	}
+	if stream.Len() != 0 {
+		t.Errorf("refused pull still wrote to the stream: %q", stream.String())
+	}
+}
+
+// explain reports the inventory rather than acting on it, so it must list the
+// output a pull withholds — hiding the file whose existence it explains is the
+// opposite of its job.
+func TestSelectEveryOutputKeepsOnDemand(t *testing.T) {
+	cfg := loadTestConfig(t, onDemandConfig)
+	swept, err := cfg.SelectOutputs(nil)
+	if err != nil {
+		t.Fatalf("SelectOutputs(nil): %v", err)
+	}
+	if got := outputConfigNames(swept); !slices.Equal(got, []string{"backend", "mobile"}) {
+		t.Errorf("sweep = %v, want the two checkout outputs", got)
+	}
+	every, err := cfg.SelectEveryOutput(nil)
+	if err != nil {
+		t.Fatalf("SelectEveryOutput(nil): %v", err)
+	}
+	if got := outputConfigNames(every); !slices.Equal(got, []string{"backend", "mobile", "deploy"}) {
+		t.Errorf("inventory = %v, want every declared output", got)
+	}
+}
+
+// A config whose every output is on_demand: has nothing to sweep, and a
+// silent success there reads as "your env files are up to date".
+func TestSelectOutputsRefusesAnAllOnDemandSweep(t *testing.T) {
+	cfg := loadTestConfig(t, `project_name: app
+port_stride: 10
+ports:
+  - { name: APP_PORT, base: 4000 }
+env:
+  DEV_HOST: localhost
+outputs:
+  - name: deploy
+    out: deploy/.env.staging
+    format: dotenv
+    on_demand: true
+    include: [DEV_HOST]
+`)
+	_, err := cfg.SelectOutputs(nil)
+	if err == nil || !strings.Contains(err.Error(), "on_demand") {
+		t.Fatalf("err = %v, want it to say every output is on_demand", err)
 	}
 }

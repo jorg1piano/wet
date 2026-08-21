@@ -253,14 +253,41 @@ func (o OutputConfig) FileMode() (os.FileMode, error) {
 }
 
 // SelectOutputs returns the outputs to act on: the ones named, in the order
-// named, or every declared output. An unknown name is an error listing the
-// ones that exist, because a typo must not quietly generate nothing.
+// named, or every declared output that is not `on_demand:`. An unknown name is
+// an error listing the ones that exist, because a typo must not quietly
+// generate nothing.
+//
+// Naming an on-demand output selects it — the flag withholds it from the
+// sweep, it does not make it unreachable.
 func (c *WetConfig) SelectOutputs(only []string) ([]OutputConfig, error) {
+	return c.selectOutputs(only, false)
+}
+
+// SelectEveryOutput is SelectOutputs without the on_demand: filter, for the
+// commands that report the inventory rather than act on it. `wet env explain`
+// must list a deploy output: hiding the file whose existence it is there to
+// explain would be the opposite of its job.
+func (c *WetConfig) SelectEveryOutput(only []string) ([]OutputConfig, error) {
+	return c.selectOutputs(only, true)
+}
+
+func (c *WetConfig) selectOutputs(only []string, includeOnDemand bool) ([]OutputConfig, error) {
 	if len(c.Outputs) == 0 {
 		return nil, errors.New(".wet.yaml declares no outputs: — nothing to generate")
 	}
 	if len(only) == 0 {
-		return append([]OutputConfig(nil), c.Outputs...), nil
+		out := make([]OutputConfig, 0, len(c.Outputs))
+		for _, o := range c.Outputs {
+			if o.OnDemand && !includeOnDemand {
+				continue
+			}
+			out = append(out, o)
+		}
+		if len(out) == 0 {
+			return nil, fmt.Errorf("every declared output is on_demand: (%s) — name the one to generate",
+				strings.Join(c.outputNames(), ", "))
+		}
+		return out, nil
 	}
 	byName := make(map[string]OutputConfig, len(c.Outputs))
 	for _, o := range c.Outputs {
@@ -270,16 +297,26 @@ func (c *WetConfig) SelectOutputs(only []string) ([]OutputConfig, error) {
 	for _, name := range only {
 		o, ok := byName[name]
 		if !ok {
-			names := make([]string, 0, len(c.Outputs))
-			for _, d := range c.Outputs {
-				names = append(names, d.Name)
-			}
-			return nil, fmt.Errorf("unknown output %q (declared: %s)", name, strings.Join(names, ", "))
+			return nil, fmt.Errorf("unknown output %q (declared: %s)", name, strings.Join(c.outputNames(), ", "))
 		}
 		out = append(out, o)
 	}
 	return out, nil
 }
+
+// outputConfigNames names a selection, for the errors that have to say which
+// outputs the caller actually asked for.
+func outputConfigNames(outs []OutputConfig) []string {
+	names := make([]string, 0, len(outs))
+	for _, o := range outs {
+		names = append(names, o.Name)
+	}
+	return names
+}
+
+// outputNames lists every declared output in declaration order, for the error
+// messages that have to say what the reader could have named instead.
+func (c *WetConfig) outputNames() []string { return outputConfigNames(c.Outputs) }
 
 // UnusedSecrets reports secret definitions no output selects.
 //
@@ -864,6 +901,15 @@ type PullRequest struct {
 	DryRun bool
 	// Out receives the progress and provenance lines. Nil means stdout.
 	Out io.Writer
+	// Content, when set, receives the generated file instead of the
+	// filesystem: nothing is written, nothing is staged, and the caller pipes
+	// the bytes wherever they belong. It is what a deploy artifact wants —
+	// `wet env pull fly-staging --stdout | fly secrets import` puts the
+	// credentials in the app without ever putting them on a disk.
+	//
+	// Exactly one output may be selected: two dotenv files concatenated into
+	// one stream is not a file either reader would accept.
+	Content io.Writer
 }
 
 // PullOutputs runs the whole pipeline: select, resolve ordinary values,
@@ -877,6 +923,10 @@ func PullOutputs(req PullRequest) error {
 	selected, err := req.Cfg.SelectOutputs(req.Only)
 	if err != nil {
 		return err
+	}
+	if req.Content != nil && len(selected) != 1 {
+		return fmt.Errorf("a stream takes exactly one output, and %d were selected (%s) — name the one to write",
+			len(selected), strings.Join(outputConfigNames(selected), ", "))
 	}
 
 	policy := req.Cfg.Secrets.PolicyOrDefault()
@@ -964,6 +1014,14 @@ func PullOutputs(req PullRequest) error {
 		toWrite = append(toWrite, r)
 	}
 	if req.DryRun {
+		return nil
+	}
+	if req.Content != nil {
+		r := toWrite[0]
+		if _, err := io.WriteString(req.Content, r.Content); err != nil {
+			return fmt.Errorf("outputs %s: %w", r.Config.Name, err)
+		}
+		fmt.Fprintf(out, "  Wrote %s (%d keys) to the stream — no file\n", r.Config.Name, len(r.Pairs))
 		return nil
 	}
 	if err := writeOutputFiles(req.TreePath, toWrite); err != nil {

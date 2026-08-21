@@ -72,6 +72,13 @@ type OutputConfig struct {
 	Secrets []string `yaml:"secrets,omitempty"`
 	// Values carries renamed and literal keys, in declaration order.
 	Values OutputValues `yaml:"values,omitempty"`
+	// OnDemand keeps this output out of the sweep that configures a checkout.
+	// `wet setup`, `wet worktree create` and a bare `wet env pull` skip it;
+	// only naming it generates it. It exists for the outputs that are not a
+	// worktree's own files at all — a deploy environment's dotenv, whose
+	// secrets belong to a running system and have no business being fetched
+	// onto every developer's disk just because they made a worktree.
+	OnDemand bool `yaml:"on_demand,omitempty"`
 }
 
 // OutputValues is `values:` — an output key to a source, preserving the order
