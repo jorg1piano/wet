@@ -324,6 +324,11 @@ Field by field:
   Exactly one of the two; both or neither is an error. `from:` accepts an
   ordinary value, a port, a reserved field, or a `Pools.<name>` /
   `Handles.<name>` pick.
+- `on_demand` — optional `true`. Keeps the output out of the sweep: `wet
+  setup`, `wet worktree create` and a bare `wet env pull` skip it, and only
+  `wet env pull <name>` generates it. `wet env explain` still lists it,
+  marked, because it is part of the inventory. See "Deploy environments"
+  below — this is the flag that makes it safe to declare one.
 
 An output must declare at least one key across the three.
 
@@ -358,13 +363,50 @@ in the order they were written. This is a guarantee, not an accident — write
 Everything above that is checkable from `.wet.yaml` alone is checked at load, in
 every command, before a store is contacted or a byte is written.
 
+### Deploy environments
+
+A deployed app's env file belongs in the same inventory as everything else —
+it is the same question, which keys does that app run with and where does each
+come from, and answering it in a second file (a checked-in `op inject`
+template, a hand-kept list in a deploy script) is how the two drift apart until
+nobody can say what the running system is configured with.
+
+Declare it as an output, with two rules:
+
+- **`on_demand: true`.** `wet setup` and `wet worktree create` pull with no
+  selection, so a plain entry would fetch a running system's credentials onto
+  every developer's disk the moment they made a worktree. The flag withholds it
+  from that sweep; naming it is what generates it.
+- **Generate it into the pipe, not onto the disk.** `--stdout` writes the file
+  to standard output, and `--secrets required` refuses to substitute a declared
+  `default:` — which is what stops a development placeholder from landing on
+  top of a live credential:
+
+```bash
+wet env pull deploy-staging --env staging --secrets required --stdout \
+  | fly secrets import --app myapp-staging
+```
+
+State this to the user when writing one: **the per-environment values that are
+not credentials — hostnames, callback URLs, an environment name — belong in the
+output as `values: { literal: … }`, in git, not as fields in the vault.** A
+hostname is not a credential, and a value nobody can diff is a value nobody
+reviews. Only which vault is read varies with `--env`.
+
+One output per environment, because `values:` literals cannot vary by `--env`.
+Give them a shared `secrets:` list with a YAML anchor (`secrets:
+&app_secrets` on the first, `secrets: *app_secrets` on the rest) — two
+hand-maintained copies of a credential list is the drift this whole shape
+exists to prevent.
+
 ### Commands
 
 ```bash
-wet env pull                     # regenerate every declared output
+wet env pull                     # every declared output that is not on_demand
 wet env pull backend             # just that one
 wet env pull --dry-run           # resolve and validate, write nothing
 wet env pull --secrets=disabled  # override secrets.policy for this run
+wet env pull deploy --stdout     # write the file to the stream, not to disk
 wet env explain                  # what each output holds and where its secrets live
 wet env explain backend
 ```
