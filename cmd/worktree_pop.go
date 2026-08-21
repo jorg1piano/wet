@@ -35,7 +35,7 @@ Fix the cause and retry `+"`wet worktree pop`"+` from inside the worktree, or ed
 var worktreePopCmd = &cobra.Command{
 	Use:   "pop",
 	Short: "Remove current worktree and exit tmux pane",
-	Long:  "Removes the git worktree for the current directory, deletes the branch, and kills the tmux pane.",
+	Long:  "Removes the git worktree for the current directory and kills the tmux pane. The branch is kept.",
 	RunE:  runWorktreePop,
 }
 
@@ -168,14 +168,6 @@ func runWorktreePop(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to remove worktree: %w", err)
 	}
 
-	// Delete the branch
-	gitCmd = exec.Command("git", "branch", "-D", branchName)
-	gitCmd.Stdout = os.Stdout
-	gitCmd.Stderr = os.Stderr
-	if err := gitCmd.Run(); err != nil {
-		fmt.Printf("  Warning: could not delete branch '%s': %v\n", branchName, err)
-	}
-
 	// Remove from config (only if this was a tracked worktree)
 	if foundIndex >= 0 {
 		config.Worktrees = append(config.Worktrees[:foundIndex], config.Worktrees[foundIndex+1:]...)
@@ -184,7 +176,7 @@ func runWorktreePop(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	fmt.Printf("  Removed worktree '%s'\n", branchName)
+	fmt.Printf("  Removed worktree '%s' (branch kept)\n", branchName)
 
 	// Kill tmux pane if inside tmux
 	if os.Getenv("TMUX") != "" {

@@ -13,7 +13,7 @@ wet worktree create [branch]    # minimal: `git worktree add` + copy .env + open
 wet worktree mount <branch>     # same, for a branch that already exists (local or on origin)
 wet worktree setup              # worktree-only form of `wet setup`
 wet worktree list               # interactive list — pick one to open in tmux or VS Code (alias: ls)
-wet worktree pop                # remove the current worktree (run pre_remove hooks, tear down)
+wet worktree pop                # remove the current worktree, keep the branch (runs pre_remove hooks)
 wet secrets setup [group…]      # scaffold a provider's keys into .wet.yaml
 wet env pull [output]           # regenerate the env files declared under outputs:
 wet env explain [output]        # what each output contains, and where its secrets live
@@ -79,7 +79,8 @@ holding `APP_PORT=8090` — slot N gets `base + N*port_stride`, so slot 1 of a
 on a tracked worktree updates the entry in place rather than appending a
 duplicate.
 
-To clean up, `cd` into the worktree and run `wet worktree pop`.
+To clean up, `cd` into the worktree and run `wet worktree pop`. That removes the
+worktree and tears down its containers; the branch is left alone.
 
 ### Installing the Claude helper skill
 
