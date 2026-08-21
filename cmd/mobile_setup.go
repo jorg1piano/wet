@@ -38,6 +38,12 @@ localhost, discovers connected devices (adb, devicectl, simctl), and:
   real phone            records KEY: <this machine's LAN IP> in .wet.local.yaml
   emulator / simulator  removes the override, so the declared localhost wins
 
+On Android it then runs ` + "`adb reverse tcp:P tcp:P`" + ` on the chosen device for
+every port this checkout was allocated — the same set ` + "`wet mobile reverse-tcp`" + `
+issues. An emulator needs it (that is what makes its localhost this machine);
+a phone reached over the LAN IP does not, so there the reverse is a bonus for
+anything still dialling localhost and a failure to add it is only reported.
+
 The override lands in the .wet.local.yaml of the checkout you run this in.
 Overlays are layered: the trunk checkout's file is the machine layer every
 checkout shares (the vault, grown emulators), and a checkout's own file wins
@@ -49,8 +55,7 @@ device with no further edits. Re-run this when you switch devices — or when
 the machine's IP changes.
 
 The phone must be on the same network as this machine — a LAN IP is only
-reachable from the LAN. With URLs carrying the LAN IP,
-` + "`wet mobile reverse-tcp`" + ` is no longer needed for that device.`,
+reachable from the LAN.`,
 	Args: cobra.NoArgs,
 	RunE: runMobileSetup,
 }
@@ -88,6 +93,14 @@ type mobileDevice struct {
 
 func (d mobileDevice) wantsLocalhost() bool {
 	return d.Kind == kindAndroidEmulator || d.Kind == kindIOSSimulator
+}
+
+// isAndroid reports whether the device is addressable with `adb -s <ID>` —
+// which is what decides whether the run can finish the job with `adb reverse`.
+// iOS has no equivalent: a simulator shares the Mac's network and a phone has
+// only the LAN IP this command records.
+func (d mobileDevice) isAndroid() bool {
+	return d.Kind == kindAndroidEmulator || d.Kind == kindAndroidPhysical
 }
 
 func (d mobileDevice) String() string {
@@ -688,9 +701,6 @@ func runMobileSetup(cmd *cobra.Command, args []string) error {
 		}
 		fmt.Println("  Only this checkout follows the override; other worktrees keep their own")
 		fmt.Println("  host. The device must be on the same network as this machine to reach it.")
-		if device.Kind == kindAndroidPhysical {
-			fmt.Println("  `wet mobile reverse-tcp` is unnecessary for this device now — the URLs carry the LAN IP.")
-		}
 	}
 
 	// Reload before rendering: cfg was resolved before the overlay changed,
@@ -704,8 +714,10 @@ func runMobileSetup(cmd *cobra.Command, args []string) error {
 	// the same pull `wet env pull` runs, nothing more. Other checkouts pick
 	// it up on their next setup or pull. A checkout with no allocation yet
 	// has nothing to regenerate; the first `wet setup` reads the overlay.
-	if _, allocErr := readWorktreeAllocation(cfg, treePath); allocErr != nil {
-		fmt.Printf("  Outputs not regenerated (%v)\n  `wet setup` will pick the override up.\n", allocErr)
+	alloc, err := readWorktreeAllocation(cfg, treePath)
+	if err != nil {
+		fmt.Printf("  Outputs not regenerated and no ports reversed (%v)\n"+
+			"  `wet setup` will pick the override up.\n", err)
 		return nil
 	}
 	data, err := buildWorktreeData(cfg, treePath)
@@ -715,9 +727,54 @@ func runMobileSetup(cmd *cobra.Command, args []string) error {
 	if err := PullOutputs(PullRequest{Cfg: cfg, TreePath: treePath, Data: data}); err != nil {
 		return err
 	}
+	if err := reverseDevicePorts(device, alloc.Ports); err != nil {
+		return err
+	}
 	fmt.Println("  Running services cached their environment at boot: restart the stack (e.g. your")
 	fmt.Println("  compose project) so it re-reads the regenerated files — an OIDC issuer especially")
 	fmt.Println("  keeps advertising the old host until it does.")
+	return nil
+}
+
+// reverseDevicePorts finishes the job on Android: `adb reverse tcp:P tcp:P`
+// for every port this checkout was allocated, on the device just picked.
+// Choosing the device and making it reach the stack are one intent, and
+// leaving the second half to a remembered `wet mobile reverse-tcp` is how an
+// emulator ends up pointed at a localhost with nothing listening. iOS has no
+// adb, so there is nothing to do there.
+//
+// The failure is fatal only for a device whose URLs say localhost: there the
+// reverse IS the bridge, and reporting success without it sends the user
+// debugging a stack that never had a listener. A physical phone dials the LAN
+// IP this run just recorded, so a reverse it could not add costs it nothing —
+// that one is reported and the run still succeeds.
+//
+// adb itself is not re-checked: an Android device is only in the list because
+// discoverDevices asked adb for it.
+func reverseDevicePorts(device mobileDevice, ports []ResolvedPort) error {
+	if !device.isAndroid() {
+		return nil
+	}
+	if len(ports) == 0 {
+		fmt.Println("  No allocated ports to reverse — declare ports: in .wet.yaml and run `wet setup`.")
+		return nil
+	}
+	if device.wantsLocalhost() {
+		fmt.Println("  Reversing this worktree's ports, so localhost on the device reaches this stack:")
+	} else {
+		fmt.Println("  Reversing this worktree's ports too, for anything on the device still dialling")
+		fmt.Println("  localhost — the URLs themselves carry the LAN IP:")
+	}
+	err := reversePorts(device.ID, ports, false)
+	if err == nil {
+		return nil
+	}
+	if device.wantsLocalhost() {
+		return fmt.Errorf("%w\n  The override is written and the outputs are regenerated; the URLs point at\n"+
+			"  localhost, which only reaches this machine once the reverse lands. Fix adb and\n"+
+			"  re-run `wet mobile reverse-tcp`", err)
+	}
+	fmt.Printf("  Reverse incomplete (%v)\n  Harmless here: the URLs carry the LAN IP.\n", err)
 	return nil
 }
 

@@ -18,6 +18,7 @@ wet secrets setup [group…]      # scaffold a provider's keys into .wet.yaml
 wet env pull [output]           # regenerate the env files declared under outputs:
 wet env explain [output]        # what each output contains, and where its secrets live
 wet env push <output> --from …  # write that output's declared secrets back to the store
+wet mobile setup                # point this checkout's dev URLs at the device you test on
 wet mobile reverse-tcp          # adb reverse this worktree's ports onto its device
 wet pr create                   # push branch + open a GitHub PR (via gh)
 wet install wet-skill           # install the Claude Code helper skill
@@ -809,7 +810,31 @@ all works the same way.
 this machine. Because sequences replace, the local file gets the full merged
 list.
 
-## Mobile — `wet mobile reverse-tcp`
+## Mobile — `wet mobile setup` and `wet mobile reverse-tcp`
+
+`wet mobile setup` points this checkout at the device you are about to run on.
+It finds the `env:` keys the committed `.wet.yaml` declares as `localhost` (the
+`DEV_HOST` convention every URL derives from), lists the connected devices
+(`adb`, `devicectl`, `simctl`), and rewires the checkout for the one you pick:
+
+```
+wet mobile setup                       # pick a device in a TUI
+wet mobile setup --device RFCR…        # or name it (id, unique prefix, or name)
+wet mobile setup --host 192.168.1.7    # skip LAN-IP autodetection
+```
+
+| picked | `.wet.local.yaml` | Android also gets |
+| --- | --- | --- |
+| real phone | `KEY: <this machine's LAN IP>` | `adb reverse` for this checkout's ports |
+| emulator / simulator | the override removed, so the declared `localhost` wins | the same reverses — that is what makes its `localhost` this machine |
+
+The override lands in the `.wet.local.yaml` of the checkout you run it in, so
+one device follows one worktree's stack while every other checkout keeps its
+own host — and every later `wet setup`, `wet worktree setup` and `wet env pull`
+there renders for that device. The run finishes by regenerating this checkout's
+outputs; restart the stack afterwards, since running services cached their
+environment at boot. Re-run it when you switch devices, or when the machine's
+IP changes.
 
 An Android app talks to `localhost`, and on a device that *is* the device. The
 fix is `adb reverse tcp:P tcp:P` — and which `P` is exactly what the worktree
@@ -841,6 +866,14 @@ The target device is this worktree's own claim: a pool item naming an emulator
 (booted first if it isn't running, `--headless` to boot without a window) or a
 pool item that is an attached adb serial. A pool item that is neither — a
 fixture snapshot — is never passed to `adb`.
+
+`wet mobile setup` runs the same reverses itself, on the device you pick there,
+so choosing a device and making it reach the stack are one step. An emulator
+needs them (localhost on the device is only this machine once they land, so a
+failure fails the command); a phone pointed at the LAN IP does not, so there
+they are a bonus for anything still dialling localhost and a failure is only
+reported. Reach for `wet mobile reverse-tcp` when the ports change without the
+device changing, in a hook, or for a serial wet knows nothing about.
 
 ## Items and handles
 

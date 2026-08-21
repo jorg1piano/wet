@@ -311,3 +311,86 @@ func TestReverseTargetsRejectsAllEmptyDevices(t *testing.T) {
 		t.Fatalf("expected an error naming --device, got %v", err)
 	}
 }
+
+// stubReverse captures every adb invocation reversePorts would run, and
+// answers each with the queued (output, error) pair — so the reverse path is
+// exercised end to end without an adb on the machine.
+type fakeReverse struct {
+	calls  [][]string
+	fail   error
+	output string
+}
+
+func (f *fakeReverse) install(t *testing.T) {
+	t.Helper()
+	runADBReverse = func(args []string) (string, error) {
+		f.calls = append(f.calls, args)
+		return f.output, f.fail
+	}
+	t.Cleanup(func() { runADBReverse = execADBReverse })
+}
+
+func TestReversePortsIssuesOneAdbCallPerPort(t *testing.T) {
+	fake := &fakeReverse{}
+	fake.install(t)
+	if err := reversePorts("emulator-5554", testAllocation().Ports, false); err != nil {
+		t.Fatalf("reversePorts: %v", err)
+	}
+	want := []string{
+		"-s emulator-5554 reverse tcp:4020 tcp:4020",
+		"-s emulator-5554 reverse tcp:50071 tcp:50071",
+	}
+	if len(fake.calls) != len(want) {
+		t.Fatalf("ran %v, want %v", fake.calls, want)
+	}
+	for i, w := range want {
+		if got := strings.Join(fake.calls[i], " "); got != w {
+			t.Errorf("call %d = %q, want %q", i, got, w)
+		}
+	}
+}
+
+// The tolerance that keeps --remove re-runnable, and the line that keeps it
+// honest: an absent listener is the desired end state, any other adb failure
+// is not.
+func TestReversePortsTreatsAnAbsentListenerAsRemoved(t *testing.T) {
+	fake := &fakeReverse{output: "error: listener 'tcp:4020' not found", fail: errors.New("exit status 1")}
+	fake.install(t)
+	ports := []ResolvedPort{{Name: "APP_PORT", Value: 4020}}
+	if err := reversePorts("emulator-5554", ports, true); err != nil {
+		t.Errorf("removing an absent listener must succeed, got %v", err)
+	}
+	// The same failure while ADDING is a real failure.
+	if err := reversePorts("emulator-5554", ports, false); err == nil {
+		t.Error("an adb failure on add must surface")
+	}
+	fake.output = "error: device 'RFCR921L4DP' not found"
+	if err := reversePorts("emulator-5554", ports, true); err == nil {
+		t.Error("a missing device must not be reported as a successful removal")
+	}
+}
+
+// A failure stops the run rather than reversing the rest quietly: a half-open
+// device is the state that costs an hour to debug.
+func TestReversePortsStopsOnTheFirstFailure(t *testing.T) {
+	fake := &fakeReverse{output: "error: cannot bind listener", fail: errors.New("exit status 1")}
+	fake.install(t)
+	err := reversePorts("emulator-5554", testAllocation().Ports, false)
+	if err == nil || !strings.Contains(err.Error(), "cannot bind listener") {
+		t.Fatalf("err = %v, want adb's own message", err)
+	}
+	if len(fake.calls) != 1 {
+		t.Errorf("ran %d calls, want 1 — the run must stop at the first failure", len(fake.calls))
+	}
+}
+
+// --dry-run executes nothing. The seam proves it: a dry run that reached adb
+// would show up here as a call.
+func TestPrintReversePlanRunsNothing(t *testing.T) {
+	fake := &fakeReverse{}
+	fake.install(t)
+	printReversePlan(reverseTarget{Address: "emulator:pixel-a"}, testAllocation().Ports, false)
+	if len(fake.calls) != 0 {
+		t.Errorf("a dry run executed %v", fake.calls)
+	}
+}

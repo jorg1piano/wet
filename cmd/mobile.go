@@ -103,41 +103,68 @@ func runMobileReverseTCP(cmd *cobra.Command, args []string) error {
 	}
 
 	for _, target := range targets {
-		serial := target.Address
-		for _, p := range ports {
-			adbArgs := adbReverseArgs(serial, p.Value, mobileReverseRemove)
-			if mobileReverseDryRun {
-				note := p.Name
-				if !target.Booted {
-					// Say it plainly: this line is not copy-pasteable, because
-					// the AVD has no serial until something boots it.
-					note += fmt.Sprintf("; %s is not booted, its serial is assigned at boot", serial)
-				}
-				fmt.Printf("  adb %s   # %s\n", strings.Join(adbArgs, " "), note)
-				continue
-			}
-			out, err := exec.Command("adb", adbArgs...).CombinedOutput()
-			if err != nil {
-				// Removing a reverse that isn't there is the desired end
-				// state, not a failure: the command has to stay re-runnable
-				// after a device reboot dropped the forwards on its own. A
-				// missing *device* is not that, so the match is on the
-				// listener error specifically.
-				if mobileReverseRemove && isMissingListener(string(out), p.Value) {
-					fmt.Printf("  %s %s (%d): already absent\n", serial, p.Name, p.Value)
-					continue
-				}
-				return fmt.Errorf("adb %s: %w: %s", strings.Join(adbArgs, " "), err,
-					strings.TrimSpace(string(out)))
-			}
-			verb := "→"
-			if mobileReverseRemove {
-				verb = "✗"
-			}
-			fmt.Printf("  %s %s %s tcp:%d\n", serial, verb, p.Name, p.Value)
+		if mobileReverseDryRun {
+			printReversePlan(target, ports, mobileReverseRemove)
+			continue
+		}
+		if err := reversePorts(target.Address, ports, mobileReverseRemove); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+// runADBReverse is a seam over the one command this file actually executes:
+// tests replace it so the unit suite never talks to a device.
+var runADBReverse = execADBReverse
+
+func execADBReverse(args []string) (string, error) {
+	out, err := exec.Command("adb", args...).CombinedOutput()
+	return string(out), err
+}
+
+// reversePorts issues one `adb reverse` per port on serial and prints what it
+// did. It is the single place a reverse is applied, so `wet mobile setup`
+// finishing the job for the device it just picked cannot drift from what
+// `wet mobile reverse-tcp` does with the same ports.
+func reversePorts(serial string, ports []ResolvedPort, remove bool) error {
+	for _, p := range ports {
+		adbArgs := adbReverseArgs(serial, p.Value, remove)
+		out, err := runADBReverse(adbArgs)
+		if err != nil {
+			// Removing a reverse that isn't there is the desired end state,
+			// not a failure: the command has to stay re-runnable after a
+			// device reboot dropped the forwards on its own. A missing
+			// *device* is not that, so the match is on the listener error
+			// specifically.
+			if remove && isMissingListener(out, p.Value) {
+				fmt.Printf("  %s %s (%d): already absent\n", serial, p.Name, p.Value)
+				continue
+			}
+			return fmt.Errorf("adb %s: %w: %s", strings.Join(adbArgs, " "), err,
+				strings.TrimSpace(out))
+		}
+		verb := "→"
+		if remove {
+			verb = "✗"
+		}
+		fmt.Printf("  %s %s %s tcp:%d\n", serial, verb, p.Name, p.Value)
+	}
+	return nil
+}
+
+// printReversePlan is the --dry-run half: it prints the adb commands and
+// executes nothing.
+func printReversePlan(target reverseTarget, ports []ResolvedPort, remove bool) {
+	for _, p := range ports {
+		note := p.Name
+		if !target.Booted {
+			// Say it plainly: this line is not copy-pasteable, because the AVD
+			// has no serial until something boots it.
+			note += fmt.Sprintf("; %s is not booted, its serial is assigned at boot", target.Address)
+		}
+		fmt.Printf("  adb %s   # %s\n", strings.Join(adbReverseArgs(target.Address, p.Value, remove), " "), note)
+	}
 }
 
 // adbReverseArgs builds one `adb` invocation. A reverse maps the same number

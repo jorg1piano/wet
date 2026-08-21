@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -490,5 +491,91 @@ func TestOverlayEnvValue(t *testing.T) {
 	}
 	if _, ok := overlayEnvValue(dir, "DEV_HOST"); ok {
 		t.Error("a non-mapping env: must answer not-set, not panic")
+	}
+}
+
+func TestIsAndroidPerKind(t *testing.T) {
+	tests := []struct {
+		kind string
+		want bool
+	}{
+		{kindAndroidEmulator, true},
+		{kindAndroidPhysical, true},
+		{kindIOSSimulator, false},
+		{kindIOSPhysical, false},
+	}
+	for _, tt := range tests {
+		if got := (mobileDevice{Kind: tt.kind}).isAndroid(); got != tt.want {
+			t.Errorf("%s: isAndroid = %v, want %v", tt.kind, got, tt.want)
+		}
+	}
+}
+
+// Picking a device is picking a device to reach: both Android kinds get the
+// worktree's ports reversed onto the serial that was picked, and iOS — which
+// has no adb — gets nothing.
+func TestReverseDevicePortsCoversBothAndroidKinds(t *testing.T) {
+	ports := testAllocation().Ports
+	tests := []struct {
+		name      string
+		device    mobileDevice
+		wantCalls int
+	}{
+		{"emulator", mobileDevice{ID: "emulator-5554", Kind: kindAndroidEmulator}, 2},
+		{"physical android", mobileDevice{ID: "RFCR921L4DP", Kind: kindAndroidPhysical}, 2},
+		{"iphone", mobileDevice{ID: "00008120-001A", Kind: kindIOSPhysical}, 0},
+		{"simulator", mobileDevice{ID: "AAAA-1111", Kind: kindIOSSimulator}, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := &fakeReverse{}
+			fake.install(t)
+			if err := reverseDevicePorts(tt.device, ports); err != nil {
+				t.Fatalf("reverseDevicePorts: %v", err)
+			}
+			if len(fake.calls) != tt.wantCalls {
+				t.Fatalf("ran %v, want %d calls", fake.calls, tt.wantCalls)
+			}
+			for _, call := range fake.calls {
+				got := strings.Join(call, " ")
+				if !strings.HasPrefix(got, "-s "+tt.device.ID+" reverse tcp:") ||
+					strings.Contains(got, "--remove") {
+					t.Errorf("call %q must add a reverse on the picked device", got)
+				}
+			}
+		})
+	}
+}
+
+// A worktree with no allocated ports has nothing to reverse — and that is a
+// note, not a failure: the override it just wrote is still correct.
+func TestReverseDevicePortsWithNoPortsIsANote(t *testing.T) {
+	fake := &fakeReverse{}
+	fake.install(t)
+	if err := reverseDevicePorts(mobileDevice{ID: "emulator-5554", Kind: kindAndroidEmulator}, nil); err != nil {
+		t.Fatalf("reverseDevicePorts: %v", err)
+	}
+	if len(fake.calls) != 0 {
+		t.Errorf("ran %v with no ports allocated", fake.calls)
+	}
+}
+
+// The asymmetry that matters: an emulator's URLs say localhost, so a reverse
+// that did not land means nothing is reachable and the run must say so. A
+// phone dials the LAN IP the run recorded, so the same failure changes
+// nothing for it.
+func TestReverseDevicePortsFailsOnlyWhereLocalhostIsTheBridge(t *testing.T) {
+	fake := &fakeReverse{output: "error: device offline", fail: errors.New("exit status 1")}
+	fake.install(t)
+	err := reverseDevicePorts(mobileDevice{ID: "emulator-5554", Kind: kindAndroidEmulator}, testAllocation().Ports)
+	if err == nil || !strings.Contains(err.Error(), "device offline") {
+		t.Fatalf("emulator err = %v, want the adb failure", err)
+	}
+	if !strings.Contains(err.Error(), "reverse-tcp") {
+		t.Errorf("the error must name the command that retries it, got: %v", err)
+	}
+	if err := reverseDevicePorts(
+		mobileDevice{ID: "RFCR921L4DP", Kind: kindAndroidPhysical}, testAllocation().Ports); err != nil {
+		t.Errorf("a physical phone reaches this machine over the LAN IP, so err = %v must be a note", err)
 	}
 }
