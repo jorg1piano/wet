@@ -91,11 +91,11 @@ func ensureGitignoreEntries() error {
 	// just the missing entry appended.
 	//
 	// The two machine-local files are here because wet asks the user to write
-	// them by hand — .wet.local.yaml holds the 1Password account and vault
-	// this workstation reads from, and .env.local holds its overrides. Neither
-	// is a fact about the repo, and committing the first one publishes a
-	// sign-in address. Telling people to ignore them is the version of this
-	// that gets skipped.
+	// them by hand — .wet.local.yaml overrides committed config for this
+	// workstation (its 1Password account, whatever else differs here), and
+	// .env.local holds its value overrides. Neither is a fact about the repo,
+	// and committing the first one publishes a sign-in address. Telling
+	// people to ignore them is the version of this that gets skipped.
 	entries := []string{".wet-worktrees.json", ".wet-worktrees.lock", ".env.worktree",
 		wetLocalConfigFileName, envLocalFileName}
 

@@ -399,8 +399,9 @@ secrets:
   store: op                 # only 1Password is implemented
   policy: fallback          # required | fallback | disabled — default fallback
   item: backend-development # the item the fields sit on — a project fact
-  # vault: and account: are NOT here — they are machine-local, and belong in
-  # the gitignored .wet.local.yaml under this same secrets: key.
+  vault: Development        # the vault holding it — also a project fact
+  # account: is NOT here — it is machine-local, and belongs in the gitignored
+  # .wet.local.yaml under this same secrets: key.
   definitions:
     SECRET_KEY_BASE:
       field: secret_key_base
@@ -438,9 +439,11 @@ Rules worth stating to a user before writing this block:
   a reserved field, and must not collide with a declared port or an `env:` key.
   If the user has a development fallback sitting in `env:` under the same name,
   move it into the definition's `default:` — that collision is a hard error.
-- **`vault` / `account` belong in `.wet.local.yaml`** — which account you sign
-  into and which vault you keep the item in are facts about one machine. Do not
-  put an account in `.wet.yaml` unless the whole team signs into the same one.
+- **`vault` and `item` belong in `.wet.yaml`; only `account` is machine-local.**
+  Where the project's credentials live is the same answer for everyone who
+  clones the repo. Do not put an account in `.wet.yaml` unless the whole team
+  signs into the same one. `.wet.local.yaml` can override the vault like any
+  other key — but that is an override, not where it belongs.
 - **`.env.local` cannot override a secret.** Secret values reach a generated
   file only from the store or from a declared `default:`.
 

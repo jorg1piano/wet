@@ -407,8 +407,8 @@ wet env explain
 wet env explain backend
 ```
 
-Reads the config only — `.wet.yaml` plus the `.wet.local.yaml` overlay that
-names the vault. No worktree, no store, no values. It prints each
+Reads the config only — `.wet.yaml` plus any `.wet.local.yaml` overlaying it.
+No worktree, no store, no values. It prints each
 output's keys and where each comes from, and for every selected secret the
 vault/item/field it resolves to and whether it has a declared default.
 
@@ -422,7 +422,8 @@ secrets:
   store: op                 # only 1Password is implemented
   policy: fallback          # required | fallback | disabled — default fallback
   item: backend-development # the item the fields sit on — a project fact
-  # vault: and account: are NOT here: see .wet.local.yaml below
+  vault: Development        # the vault holding it — also a project fact
+  # account: is NOT here: see .wet.local.yaml below
   definitions:
     SECRET_KEY_BASE:
       field: secret_key_base

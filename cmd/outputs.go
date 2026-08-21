@@ -613,10 +613,13 @@ func resolveSecrets(cfg *WetConfig, names []string, policy string, reader Secret
 		var value string
 		// An unresolvable reference is treated as a store failure, not as a
 		// config error. The only way to get here is a missing vault or item,
-		// and both are machine-local facts that live in .wet.local.yaml — a
-		// fresh clone with no .wet.local.yaml yet must still generate
-		// its files from declared defaults, which is exactly what `fallback`
-		// promises. A malformed ref: was already rejected at load.
+		// which means the repo's secrets: block is still half-written — and
+		// the deliberate choice is that such a repo still generates its files
+		// from declared defaults instead of refusing to boot, which is what
+		// `fallback` promises for every other kind of store failure. It is
+		// not silent: every fallback is named out loud, and `wet env explain`
+		// reports the missing key. Choose `required` to make it fatal. A
+		// malformed ref: was already rejected at load.
 		ref, readErr := cfg.Secrets.ResolveSecretRef(name)
 		switch {
 		case readErr != nil:

@@ -219,9 +219,8 @@ func printScaffoldSummary(res *ScaffoldResult, groups []string) {
 // resolvable reference needs an item AND a vault: leave the item out and
 // `policy: fallback` swallows the unresolvable reference as a store failure
 // and writes the dev placeholders, so the user believes they wired up the
-// store and got `dev-only-…` instead. They also live in different files —
-// the item is a project fact and belongs in the committed config, while the
-// vault and account are facts about one workstation.
+// store and got `dev-only-…` instead. Both are project facts and belong in
+// the committed config — the account is the only per-workstation one.
 //
 // One function because this is printed from two scaffolders, and the version
 // of this that drifts is the one written twice.

@@ -987,12 +987,13 @@ outputs:
 	}
 }
 
-// A fresh clone has no .wet.local.yaml yet, so `secrets.vault` is empty and
-// no reference can be resolved at all. Under `fallback` that is a store
-// failure like any other and the declared defaults must carry the setup —
-// otherwise the first `wet setup` on a new machine dies on a config the repo
-// deliberately leaves incomplete.
-func TestFreshCloneWithNoVaultFallsBack(t *testing.T) {
+// A repo that has not named its destination yet — no vault, no item — can
+// resolve no reference at all. Under `fallback` that is a store failure like
+// any other and the declared defaults must carry the setup, so `wet setup`
+// works on a config whose secrets: block is still half-written rather than
+// dying on it. (The same path carries a fresh clone that has the committed
+// vault but no signed-in `op` account.)
+func TestUnnamedDestinationFallsBack(t *testing.T) {
 	cfg := loadTestConfig(t, strings.Replace(fullConfig, "  vault: V\n  item: I\n", "", 1))
 	tree, log, err := pullInto(t, PullRequest{
 		Cfg: cfg, Data: worktreeData(t, cfg, 1, nil), Reader: newFakeStore(nil),
@@ -1848,21 +1849,23 @@ outputs:
 	}
 }
 
-// The overlay is now the ONLY way a machine names its account and vault, so
-// the merge that carries them into the loaded config is load-bearing on its
-// own: get it wrong and every secret in the repo silently falls back to its
-// default: under `policy: fallback`, with a generated file that looks
-// configured. The assertion that matters is end-to-end — not that the keys
-// parsed, but that a reference actually RESOLVES to them afterwards, which is
-// the thing the store call needs.
-func TestLocalOverlayNamesTheVaultAndResolvesReferences(t *testing.T) {
+// The vault belongs in the committed config, but the overlay may override it
+// — and on a machine whose store spells it differently, that override is the
+// only thing standing between the repo and a silent fallback: get the merge
+// wrong and every secret falls back to its default: under `policy: fallback`,
+// with a generated file that looks configured. The assertion that matters is
+// end-to-end — not that the keys parsed, but that a reference actually
+// RESOLVES to them afterwards, which is the thing the store call needs.
+func TestLocalOverlayOverridesTheVaultAndResolvesReferences(t *testing.T) {
 	repo := t.TempDir()
-	stripped := strings.Replace(fullConfig, "  vault: V\n  item: I\n", "", 1)
-	if err := os.WriteFile(filepath.Join(repo, wetConfigFileName), []byte(stripped), 0o644); err != nil {
+	// The committed config names a vault and an item, as it should. The
+	// overlay adds the machine's account and overrides the vault — the shape
+	// this test exists for.
+	if err := os.WriteFile(filepath.Join(repo, wetConfigFileName), []byte(fullConfig), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(repo, wetLocalConfigFileName),
-		[]byte("secrets:\n  account: my.1password.com\n  vault: Development\n  item: backend-development\n"), 0o600); err != nil {
+		[]byte("secrets:\n  account: my.1password.com\n  vault: Development\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1880,12 +1883,13 @@ func TestLocalOverlayNamesTheVaultAndResolvesReferences(t *testing.T) {
 	if def, ok := cfg.Secrets.Definitions["SECRET_KEY_BASE"]; !ok || def.Field != "secret_key_base" {
 		t.Fatalf("overlay damaged the committed definitions: %+v", cfg.Secrets.Definitions)
 	}
-	// The whole point of naming a vault: references now resolve.
+	// The point of the override: references resolve to the machine's vault,
+	// while the item stays the committed one nothing overrode.
 	ref, err := cfg.Secrets.ResolveSecretRef("SECRET_KEY_BASE")
 	if err != nil {
-		t.Fatalf("reference still unresolvable with a vault: %v", err)
+		t.Fatalf("reference unresolvable after the override: %v", err)
 	}
-	if ref.Vault != "Development" || ref.Item != "backend-development" {
+	if ref.Vault != "Development" || ref.Item != "I" {
 		t.Errorf("resolved to %s/%s/%s", ref.Vault, ref.Item, ref.Field)
 	}
 }

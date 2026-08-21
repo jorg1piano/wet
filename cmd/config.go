@@ -341,7 +341,7 @@ func probeMainBranch(configDir string) string {
 // The layers answer to different scopes. The config can come from a
 // worktree's own checkout — that's how a `.wet.yaml` change is testable
 // where it's written. The first overlay is the machine's, read from the
-// checkout holding the trunk (see LocalConfigDir): the vault this
+// checkout holding the trunk (see LocalConfigDir): the account this
 // workstation signs into, the emulators pool_grow created — facts every
 // checkout shares. A checkout may then carry its own `.wet.local.yaml` on
 // top, holding facts about that checkout alone — the LAN IP `wet mobile

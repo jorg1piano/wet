@@ -148,8 +148,9 @@ func ScaffoldGroups(doc *yaml.Node, catalog map[string]SecretGroup, groups []str
 // vault-backed catalog key, creating the secrets: block if there is none.
 //
 // The catalog's fallback goes into `default:`, not into env:. Under the
-// default `fallback` policy that is what lets a fresh clone with no vault
-// still render and boot, while keeping the name a secret everywhere else: only
+// default `fallback` policy that is what lets a clone that cannot reach the
+// store — not signed in, `op` not installed, vault not named yet — still
+// render and boot, while keeping the name a secret everywhere else: only
 // an output that names it may see it, and `wet env push` refuses to send the
 // placeholder back to the store.
 //
@@ -172,9 +173,9 @@ func scaffoldSecretDefinitions(root *yaml.Node, catalog map[string]SecretGroup, 
 		key.HeadComment = "Every credential this repo has, declared once. `policy: fallback` reads\n" +
 			"the store and falls back to a definition's `default:` when it cannot —\n" +
 			"naming which ones fell back, so an empty placeholder never passes for a\n" +
-			"configured provider. Add `item:` here — which item the fields sit on is\n" +
-			"a fact about the project. vault and account are machine-local and go\n" +
-			"in the gitignored " + wetLocalConfigFileName + " instead."
+			"configured provider. Add `item:` and `vault:` here — which item the fields\n" +
+			"sit on, and which vault holds it, are facts about the project. Only the\n" +
+			"account is per-workstation; it goes in the gitignored " + wetLocalConfigFileName + "."
 		root.Content = append(root.Content, key, secretsNode)
 	}
 	if secretsNode.Kind != yaml.MappingNode {
