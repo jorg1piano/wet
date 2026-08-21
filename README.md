@@ -422,16 +422,14 @@ a secret value.
 
 #### `on_demand:` and `--stdout` — the outputs that are not this checkout's
 
-A deploy environment's dotenv belongs in the same inventory as everything else:
-it is the same question — which keys does that app run with, and where does
-each come from — and answering it in a second file is how the two drift apart.
-But it is not a file this checkout wants. `wet setup` and `wet worktree create`
-pull with no selection, so a plain `outputs:` entry would fetch a running
-system's credentials onto every developer's disk the moment they made a
-worktree.
+A deploy environment's dotenv belongs in the same inventory as everything else
+— it is the same question, which keys does that app run with and where does
+each come from, and answering it in a second file is how the two drift apart.
+But it is not a file this checkout wants, and `wet setup` and `wet worktree
+create` pull with no selection, so a plain entry would fetch a running system's
+credentials onto every developer's disk the moment they made a worktree.
 
-`on_demand: true` withholds an output from that sweep. It is skipped by setup,
-by `wet worktree create`, and by a bare `wet env pull`; naming it is what
+`on_demand: true` withholds an output from that sweep; naming it is what
 generates it. `wet env explain` still lists it, marked `on demand`, because it
 is part of the inventory even when it is not part of the checkout.
 

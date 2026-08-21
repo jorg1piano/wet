@@ -265,8 +265,8 @@ func (c *WetConfig) SelectOutputs(only []string) ([]OutputConfig, error) {
 
 // SelectEveryOutput is SelectOutputs without the on_demand: filter, for the
 // commands that report the inventory rather than act on it. `wet env explain`
-// must list a deploy output: hiding the file whose existence it is there to
-// explain would be the opposite of its job.
+// must list a deploy output — hiding the file it exists to explain would be
+// the opposite of its job.
 func (c *WetConfig) SelectEveryOutput(only []string) ([]OutputConfig, error) {
 	return c.selectOutputs(only, true)
 }
@@ -304,8 +304,8 @@ func (c *WetConfig) selectOutputs(only []string, includeOnDemand bool) ([]Output
 	return out, nil
 }
 
-// outputConfigNames names a selection, for the errors that have to say which
-// outputs the caller actually asked for.
+// outputConfigNames names a selection, for errors that say which outputs the
+// caller asked for.
 func outputConfigNames(outs []OutputConfig) []string {
 	names := make([]string, 0, len(outs))
 	for _, o := range outs {
@@ -314,8 +314,8 @@ func outputConfigNames(outs []OutputConfig) []string {
 	return names
 }
 
-// outputNames lists every declared output in declaration order, for the error
-// messages that have to say what the reader could have named instead.
+// outputNames lists every declared output in declaration order, for errors
+// that say what could have been named instead.
 func (c *WetConfig) outputNames() []string { return outputConfigNames(c.Outputs) }
 
 // UnusedSecrets reports secret definitions no output selects.
@@ -903,9 +903,8 @@ type PullRequest struct {
 	Out io.Writer
 	// Content, when set, receives the generated file instead of the
 	// filesystem: nothing is written, nothing is staged, and the caller pipes
-	// the bytes wherever they belong. It is what a deploy artifact wants —
-	// `wet env pull fly-staging --stdout | fly secrets import` puts the
-	// credentials in the app without ever putting them on a disk.
+	// the bytes wherever they belong —
+	// `wet env pull fly-staging --stdout | fly secrets import`.
 	//
 	// Exactly one output may be selected: two dotenv files concatenated into
 	// one stream is not a file either reader would accept.

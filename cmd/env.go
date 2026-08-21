@@ -138,7 +138,7 @@ func loadConfigForTree() (*WetConfig, string, error) {
 
 func runEnvPull(cmd *cobra.Command, args []string) error {
 	// Both mean "write nothing to disk", but one of them still produces the
-	// file. Picking either silently would make the other one's promise a lie.
+	// file. Picking either silently would break the other one's promise.
 	if envPullStdout && envPullDryRun {
 		return errors.New("--stdout and --dry-run are mutually exclusive: one writes the file to the stream, the other writes it nowhere")
 	}
@@ -161,8 +161,8 @@ func runEnvPull(cmd *cobra.Command, args []string) error {
 	}
 	if envPullStdout {
 		// Provenance and warnings move to stderr so the stream is the file and
-		// nothing else — a "Wrote …" line in the middle of a dotenv is a
-		// syntax error in whatever reads it.
+		// nothing else: a "Wrote …" line inside a dotenv is a syntax error to
+		// whatever reads it.
 		req.Content = cmd.OutOrStdout()
 		req.Out = cmd.ErrOrStderr()
 	}
@@ -219,9 +219,8 @@ func runEnvExplain(cmd *cobra.Command, args []string) error {
 		if i > 0 {
 			fmt.Println()
 		}
-		// on_demand is stated on the header line because it changes what the
-		// reader can expect on disk: this file is not there after a setup, and
-		// looking for it and not finding it is otherwise a bug hunt.
+		// Stated on the header line because it changes what the reader can
+		// expect on disk: this file is not there after a setup.
 		demand := ""
 		if o.OnDemand {
 			demand = " — on demand, generated only when named"
