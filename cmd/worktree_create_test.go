@@ -1,12 +1,89 @@
 package cmd
 
 import (
+	"bytes"
+	"encoding/json"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 )
+
+func TestRunWorktreeCreateJSON(t *testing.T) {
+	if worktreeCreateCmd.Flags().Lookup("json") == nil {
+		t.Fatal("worktree create has no --json flag")
+	}
+
+	base := t.TempDir()
+	repo := filepath.Join(base, "repo")
+	if err := os.Mkdir(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit := func(args ...string) {
+		t.Helper()
+		gitArgs := append([]string{"-C", repo}, args...)
+		out, err := exec.Command("git", gitArgs...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	runGit("init", "-q", "-b", "main")
+	runGit("config", "user.email", "t@t")
+	runGit("config", "user.name", "t")
+	runGit("commit", "-q", "--allow-empty", "-m", "initial")
+
+	previousDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(repo); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(previousDir) })
+
+	previousJSON, previousNoTmux := worktreeCreateJSON, worktreeCreateNoTmux
+	worktreeCreateJSON, worktreeCreateNoTmux = true, true
+	t.Cleanup(func() {
+		worktreeCreateJSON, worktreeCreateNoTmux = previousJSON, previousNoTmux
+	})
+
+	var stdout, stderr bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	if err := runWorktreeCreate(cmd, []string{"feature-json"}); err != nil {
+		t.Fatalf("runWorktreeCreate: %v\nstderr:\n%s", err, stderr.String())
+	}
+
+	var got worktreeCreateResult
+	decoder := json.NewDecoder(&stdout)
+	if err := decoder.Decode(&got); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nstdout:\n%s", err, stdout.String())
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		t.Fatalf("stdout contained data after the JSON document: %v\nstdout:\n%s", err, stdout.String())
+	}
+
+	repoRoot, err := getMainRepoRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPath := filepath.Join(filepath.Dir(repoRoot), "worktree-feature-json")
+	if got.Branch != "feature-json" || got.Path != wantPath || got.Base != "main" {
+		t.Errorf("JSON result = %+v, want branch feature-json, path %s, base main", got, wantPath)
+	}
+	if !strings.Contains(stderr.String(), "Branching feature-json off main") {
+		t.Errorf("progress was not written to stderr:\n%s", stderr.String())
+	}
+	if _, err := os.Stat(wantPath); err != nil {
+		t.Errorf("created worktree: %v", err)
+	}
+}
 
 // Which trunk a new worktree forks from decides which .wet.yaml it runs, so
 // both staleness directions have to be covered: a local checkout left behind,

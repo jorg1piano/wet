@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -27,15 +28,23 @@ configuration step.
 
 Pass ` + "`--no-tmux`" + ` to skip opening a tmux window — useful when a
 higher-level orchestrator (e.g. the Claude ` + "`/team`" + ` flow) manages
-sessions itself and doesn't want a stray window spawned.`,
+sessions itself and doesn't want a stray window spawned.
+
+Pass ` + "`--json`" + ` to write the created branch, its worktree path, and
+the base ref it branched from as JSON. Progress is written to stderr in this
+mode so stdout remains machine-readable.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runWorktreeCreate,
 }
 
-var worktreeCreateNoTmux bool
+var (
+	worktreeCreateNoTmux bool
+	worktreeCreateJSON   bool
+)
 
 func init() {
 	worktreeCreateCmd.Flags().BoolVar(&worktreeCreateNoTmux, "no-tmux", false, "don't open a new tmux window after creating the worktree")
+	worktreeCreateCmd.Flags().BoolVar(&worktreeCreateJSON, "json", false, "output the created worktree as JSON")
 	worktreeCmd.AddCommand(worktreeCreateCmd)
 }
 
@@ -109,7 +118,12 @@ func runWorktreeCreate(cmd *cobra.Command, args []string) error {
 	} else {
 		// Interactive prompt
 		m := newCreateModel()
-		p := tea.NewProgram(m)
+		programOptions := []tea.ProgramOption{}
+		if worktreeCreateJSON {
+			// Keep stdout reserved for the final JSON document.
+			programOptions = append(programOptions, tea.WithOutput(cmd.ErrOrStderr()))
+		}
+		p := tea.NewProgram(m, programOptions...)
 		finalModel, err := p.Run()
 		if err != nil {
 			return fmt.Errorf("TUI error: %w", err)
@@ -125,7 +139,32 @@ func runWorktreeCreate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("branch name cannot be empty")
 	}
 
-	return createWorktree(branchName, worktreeCreateNoTmux)
+	if !worktreeCreateJSON {
+		return createWorktree(branchName, worktreeCreateNoTmux)
+	}
+
+	result, err := createWorktreeWithWriters(
+		branchName,
+		worktreeCreateNoTmux,
+		cmd.ErrOrStderr(),
+		cmd.ErrOrStderr(),
+	)
+	if err != nil {
+		return err
+	}
+	if err := json.NewEncoder(cmd.OutOrStdout()).Encode(result); err != nil {
+		return fmt.Errorf("write JSON output: %w", err)
+	}
+	return nil
+}
+
+// worktreeCreateResult is the machine-readable result of `worktree create`.
+// Base records the exact ref chosen by baseRefForNewBranch, which may differ
+// from the configured trunk name when origin is ahead of the local checkout.
+type worktreeCreateResult struct {
+	Branch string `json:"branch"`
+	Path   string `json:"path"`
+	Base   string `json:"base"`
 }
 
 // createWorktree is the minimal worktree-create path. It:
@@ -138,9 +177,17 @@ func runWorktreeCreate(cmd *cobra.Command, args []string) error {
 // No .wet.yaml load, no port allocation, no state file write, no hooks. Run
 // `wet worktree setup` from inside the new worktree to configure the rest.
 func createWorktree(branchName string, noTmux bool) error {
+	_, err := createWorktreeWithWriters(branchName, noTmux, os.Stdout, os.Stderr)
+	return err
+}
+
+// createWorktreeWithWriters performs createWorktree while directing progress
+// and subprocess output to caller-selected streams. JSON mode uses stderr for
+// both so its stdout can contain exactly one JSON document.
+func createWorktreeWithWriters(branchName string, noTmux bool, out, errOut io.Writer) (worktreeCreateResult, error) {
 	repoRoot, err := getMainRepoRoot()
 	if err != nil {
-		return err
+		return worktreeCreateResult{}, err
 	}
 
 	worktreePath := worktreePathFor(repoRoot, branchName)
@@ -151,20 +198,28 @@ func createWorktree(branchName string, noTmux bool) error {
 	// worktree that state, and the first sign of it is a PR full of someone
 	// else's commits.
 	base := baseRefForNewBranch(mainBranchName())
-	fmt.Printf("  Branching %s off %s\n", branchName, base)
+	fmt.Fprintf(out, "  Branching %s off %s\n", branchName, base)
 
 	// --no-track: branching off origin/<main> would otherwise set the new
 	// branch's upstream to the trunk, so a plain `git push` from the worktree
 	// pushes the feature work straight onto it. `wet pr create` sets the
 	// upstream to the branch's own remote ref when it pushes.
 	gitCmd := exec.Command("git", "worktree", "add", "--no-track", "-b", branchName, worktreePath, base)
-	gitCmd.Stdout = os.Stdout
-	gitCmd.Stderr = os.Stderr
+	gitCmd.Stdout = out
+	gitCmd.Stderr = errOut
 	if err := gitCmd.Run(); err != nil {
-		return fmt.Errorf("failed to create worktree: %w", err)
+		return worktreeCreateResult{}, fmt.Errorf("failed to create worktree: %w", err)
 	}
 
-	return postWorktreeAdd(repoRoot, worktreePath, branchName, "Created", noTmux)
+	if err := postWorktreeAddWithWriter(repoRoot, worktreePath, branchName, "Created", noTmux, out); err != nil {
+		return worktreeCreateResult{}, err
+	}
+
+	return worktreeCreateResult{
+		Branch: branchName,
+		Path:   worktreePath,
+		Base:   base,
+	}, nil
 }
 
 // baseRefForNewBranch picks the ref a new worktree's branch starts from: the
@@ -216,27 +271,31 @@ func worktreePathFor(repoRoot, branchName string) string {
 // by orchestrators (e.g. the Claude `/team` flow) that manage sessions
 // themselves.
 func postWorktreeAdd(repoRoot, worktreePath, branchName, label string, noTmux bool) error {
+	return postWorktreeAddWithWriter(repoRoot, worktreePath, branchName, label, noTmux, os.Stdout)
+}
+
+func postWorktreeAddWithWriter(repoRoot, worktreePath, branchName, label string, noTmux bool, out io.Writer) error {
 	srcEnv := filepath.Join(repoRoot, ".env")
 	if _, statErr := os.Stat(srcEnv); statErr == nil {
 		dstEnv := filepath.Join(worktreePath, ".env")
 		if err := copyFile(srcEnv, dstEnv); err != nil {
 			return fmt.Errorf("copy .env: %w", err)
 		}
-		fmt.Printf("  Copied: .env\n")
+		fmt.Fprintln(out, "  Copied: .env")
 	}
 
-	fmt.Printf("\n  %s worktree '%s' at %s\n", label, branchName, worktreePath)
+	fmt.Fprintf(out, "\n  %s worktree '%s' at %s\n", label, branchName, worktreePath)
 
 	if !noTmux && os.Getenv("TMUX") != "" {
 		tmuxCmd := exec.Command("tmux", "new-window", "-n", branchName, "-c", worktreePath)
 		if err := tmuxCmd.Run(); err != nil {
-			fmt.Printf("  Warning: could not open tmux window: %v\n", err)
+			fmt.Fprintf(out, "  Warning: could not open tmux window: %v\n", err)
 		} else {
-			fmt.Printf("  Opened in new tmux window '%s'\n", branchName)
+			fmt.Fprintf(out, "  Opened in new tmux window '%s'\n", branchName)
 		}
 	}
 
-	fmt.Printf("\n  Next: cd %s && wet worktree setup\n", worktreePath)
+	fmt.Fprintf(out, "\n  Next: cd %s && wet worktree setup\n", worktreePath)
 	return nil
 }
 

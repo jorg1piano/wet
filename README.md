@@ -36,6 +36,15 @@ tracking branch first. Everything after the checkout is identical — copy
 `.env`, open a tmux window, then `wet worktree setup` inside. Both take
 `--no-tmux` when something else is managing sessions.
 
+For scripts and orchestrators, `create --json` keeps stdout machine-readable
+and reports the new branch, its absolute worktree path, and the ref it branched
+from; progress continues on stderr:
+
+```console
+$ wet worktree create feature/new-thing --no-tmux --json
+{"branch":"feature/new-thing","path":"/code/worktree-feature/new-thing","base":"main"}
+```
+
 ## Quick start
 
 A fully annotated config lives at
