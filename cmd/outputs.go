@@ -45,7 +45,7 @@ var reservedOutputPaths = map[string]bool{
 	wetConfigFileName:      true,
 	wetLocalConfigFileName: true,
 	envLocalFileName:       true,
-	".env.worktree":        true,
+	envWorktreeFileName:    true,
 	".wet-worktrees.json":  true,
 }
 
@@ -69,7 +69,7 @@ func (c *WetConfig) ordinaryValueNames() map[string]bool {
 		// breaks the promise the rest of this function makes: everything
 		// knowable from .wet.yaml fails at load. Their members are reachable
 		// as Pools.<name> through `values.from`.
-		if f == "Pools" || f == "Handles" {
+		if isPoolMapField(f) {
 			continue
 		}
 		names[f] = true

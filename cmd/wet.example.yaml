@@ -148,6 +148,15 @@ pools:
 # the handle; identify the resource by the item. For a pool of plain strings
 # the two are identical.
 #
+# .AllPools.<name> and .AllHandles.<name> are the LIST forms: every item this
+# worktree claims from the pool, primary first. A worktree claims one device by
+# default, so these are one entry long until `wet mobile add` claims a second
+# (two phones on one stack — a chat between two accounts). The scalar forms
+# above always mean the primary, so a config rendering a single device never
+# has to change. Range over the list form when a value must cover them all:
+#
+#   ALL_DEVICE_IDS: "{{range $i, $h := .AllHandles.devices}}{{if $i}},{{end}}{{$h}}{{end}}"
+#
 # Entries may reference each other in any order — they resolve to a fixed
 # point, not in sorted order. That is what makes this the single source of
 # truth for a monorepo: derive a URL from a port ONCE here, and every output
@@ -478,6 +487,10 @@ outputs:
 # the worktree — so pipes, &&, and globs all work. Every ordinary value above
 # is also available as a real environment variable ($APP_PORT, $POOL_DEVICES,
 # $SLOT, $BRANCH_SAFE), which is what non-templatable scripts should read.
+# Pools come in both shapes: $POOL_DEVICES / $POOL_HANDLE_DEVICES are the
+# primary device, and $POOL_DEVICES_ALL / $POOL_HANDLE_DEVICES_ALL are every
+# device this worktree claims, space-separated, primary first — one entry
+# until `wet mobile add` claims another.
 # Secrets are not exported to hooks: they reach the files that selected them
 # and nothing else.
 #
@@ -496,12 +509,18 @@ hooks:
     # so the app finds the stack the hook above just booted. It reads the ports
     # from the hook environment, so it is correct on every slot without naming
     # one, and it re-runs safely — after a reboot, or by hand, whenever the
-    # device drops its forwards.
+    # device drops its forwards. It covers every device this worktree claims,
+    # so a second one added with `wet mobile add` needs no extra line.
     # - wet mobile reverse-tcp
 
   pre_remove:
     - docker compose down -v
     # - ./scripts/release-device.sh "$POOL_DEVICES" # the item, e.g. emulator:pixel-a
+    #
+    # Stopping a claimed emulator is a project decision, so it lives here and
+    # not in wet. Loop over the _ALL form rather than killing $POOL_DEVICES
+    # alone, or the devices `wet mobile add` booted keep running after the pop:
+    # - 'for h in $POOL_HANDLE_DEVICES_ALL; do case "$h" in emulator-*) adb -s "$h" emu kill ;; esac; done; true'
 
 # ---------------------------------------------------------------------------
 # Pull requests — `wet pr create`

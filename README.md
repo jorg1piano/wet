@@ -19,7 +19,10 @@ wet env pull [output]           # regenerate the env files declared under output
 wet env explain [output]        # what each output contains, and where its secrets live
 wet env push <output> --from …  # write that output's declared secrets back to the store
 wet mobile setup                # point this checkout's dev URLs at the device you test on
-wet mobile reverse-tcp          # adb reverse this worktree's ports onto its device
+wet mobile add [item]           # claim a second (third, …) device for this worktree
+wet mobile list                 # what devices this worktree claims, and are they up (alias: ls)
+wet mobile remove <item>        # release a device `add` claimed, and stop it
+wet mobile reverse-tcp          # adb reverse this worktree's ports onto its devices
 wet pr create                   # push branch + open a GitHub PR (via gh)
 wet install wet-skill           # install the Claude Code helper skill
 ```
@@ -158,6 +161,14 @@ the same values, but by bare name rather than as a template — `include:
 | `{{.APP_PORT}}`, `{{.DB_PORT}}`, … | One key per declared port with its resolved value | `8090` |
 | `{{.Pools.devices}}`, `{{.Pools.fixtures}}`, … | Allocated item per declared pool | `emulator:pixel-a` |
 | `{{.Handles.devices}}`, … | The address that item answers to *now* | `emulator-5554` |
+| `{{.AllPools.devices}}`, … | Every item this worktree claims from the pool, primary first | `[emulator:pixel-a emulator:pixel-b]` |
+| `{{.AllHandles.devices}}`, … | The address each of those answers to now | `[emulator-5554 emulator-5556]` |
+
+`Pools`/`Handles` are the single device — the primary, the one `wet setup`
+claimed. `AllPools`/`AllHandles` are lists that additionally carry whatever
+[`wet mobile add`](#several-devices-on-one-worktree) claimed. A worktree with
+one device has one-entry lists, so a template written for several is right on
+every worktree.
 
 Templates run with `missingkey=error`, so a typo fails at render rather than
 producing an empty value. Branch sanitization follows
@@ -182,6 +193,8 @@ Hook commands run via `sh -c` with:
 | `APP_PORT`, `DB_PORT`, … | One per declared port |
 | `POOL_DEVICES`, `POOL_FIXTURES`, … | One per declared pool (`POOL_<NAME>` in upper snake case) |
 | `POOL_HANDLE_DEVICES`, … | The resolved handle for each pool |
+| `POOL_DEVICES_ALL`, … | Every claimed item, primary first, space-separated |
+| `POOL_HANDLE_DEVICES_ALL`, … | Every claimed handle, same order |
 | `COMPOSE_PROJECT_NAME`, … | One per `env:` entry, rendered, with `.env.local` overrides applied |
 
 So hook commands can use either template interpolation (expanded before `sh`
@@ -217,6 +230,16 @@ create` — like ports and slots, and under the same lock. Each declared pool
 picks the lowest-indexed item not currently claimed by another worktree, so
 released items are reclaimed before trailing ones. Claims release implicitly
 when the owning worktree is popped; there is no explicit release step.
+
+A re-run of `wet setup` keeps the item this worktree already holds rather than
+re-picking. Re-picking would silently move a running worktree onto a different
+emulator, and the file it just regenerated would name a device nobody is
+looking at.
+
+A worktree may hold more than one item of a pool: `wet setup` claims the
+primary, and [`wet mobile add`](#several-devices-on-one-worktree) claims the
+rest. Every claim counts as claimed for allocation and for the exhaustion
+message, and all of them release together when the worktree is popped.
 
 Because allocation happens in `setup`, the worktree and its branch are already
 on disk when a pool comes up empty — an exhausted pool fails the setup, not the
@@ -863,6 +886,9 @@ list.
 
 ## Mobile — `wet mobile setup` and `wet mobile reverse-tcp`
 
+(For running two phones against one worktree, see
+[Several devices on one worktree](#several-devices-on-one-worktree).)
+
 `wet mobile setup` points this checkout at the device you are about to run on.
 It finds the `env:` keys the committed `.wet.yaml` declares as `localhost` (the
 `DEV_HOST` convention every URL derives from), lists the connected devices
@@ -913,10 +939,11 @@ hooks:
 Ports come from `.wet-worktrees.json` — or from that hook environment, which is
 what lets it run before setup has written the state file.
 
-The target device is this worktree's own claim: a pool item naming an emulator
-(booted first if it isn't running, `--headless` to boot without a window) or a
-pool item that is an attached adb serial. A pool item that is neither — a
-fixture snapshot — is never passed to `adb`.
+The target is this worktree's own claims — the device `wet setup` picked and
+every one `wet mobile add` added, in pool order with the primary first. A claim
+counts as a device when it names an emulator (booted first if it isn't running,
+`--headless` to boot without a window) or is an attached adb serial. A pool item
+that is neither — a fixture snapshot — is never passed to `adb`.
 
 `wet mobile setup` runs the same reverses itself, on the device you pick there,
 so choosing a device and making it reach the stack are one step. An emulator
@@ -925,6 +952,63 @@ failure fails the command); a phone pointed at the LAN IP does not, so there
 they are a bonus for anything still dialling localhost and a failure is only
 reported. Reach for `wet mobile reverse-tcp` when the ports change without the
 device changing, in a hook, or for a serial wet knows nothing about.
+
+## Several devices on one worktree
+
+Some work needs two phones on one backend: a chat between two accounts, a
+share flow, anything where the second user is the point. That is not a second
+worktree — same branch, same stack, same database — and it is not a second
+pool, because the devices are interchangeable. It is this worktree holding one
+more claim.
+
+```
+wet mobile add                      # the next free item of the devices pool
+wet mobile add emulator:pixel-b     # or a specific pool item / any AVD
+wet mobile add RFCR921L4DP          # or an attached adb serial
+wet mobile add --headless           # boot the emulator without a window
+wet mobile list                     # what this worktree claims, and is it up
+wet mobile list --all --json        # every worktree, for scripts
+wet mobile remove emulator:pixel-b  # release it, and stop it
+```
+
+`add` claims the device, boots it if it is an emulator, `adb reverse`s this
+worktree's ports onto it, and regenerates `.env.worktree` and the declared
+outputs. So the device it prints is one you can `flutter run -d` against
+immediately.
+
+The claim is real, and that is the point: no other worktree's `wet setup` can
+be handed a device you added, the exhaustion message names it, `wet worktree
+pop` releases it with the rest, and a `wet setup` re-run boots it again after a
+reboot along with the primary.
+
+**What it does not change is what a single-device template renders.**
+`{{.Handles.devices}}` and `$POOL_HANDLE_DEVICES` keep meaning the primary —
+the one `wet setup` claimed — so a config that renders one `FLUTTER_DEVICE_ID`
+is untouched. The whole set lives in the list forms:
+
+```yaml
+env:
+  FLUTTER_DEVICE_ID: "{{.Handles.devices}}"                      # the primary, as before
+  ALL_DEVICE_IDS: "{{range $i, $h := .AllHandles.devices}}{{if $i}},{{end}}{{$h}}{{end}}"
+hooks:
+  pre_remove:
+    # kills every emulator this worktree booted, not only the first
+    - 'for h in $POOL_HANDLE_DEVICES_ALL; do case "$h" in emulator-*) adb -s "$h" emu kill ;; esac; done; true'
+```
+
+`wet mobile reverse-tcp` reverses onto every claimed device, so the second
+phone reaches the same stack the first one does with no extra step.
+
+Only devices `add` claimed can be `remove`d. The primary belongs to the
+worktree's lifecycle — `wet worktree pop` is what releases it — and removing it
+would leave `{{.Handles.devices}}` rendering a device nothing claims.
+
+**Teardown of an emulator stays a hook's job**, as it already was. `wet mobile
+remove` stops the emulator it releases (that is the explicit undo of an
+explicit command, and `--keep-running` opts out), but `wet worktree pop` runs
+your `pre_remove` hooks and nothing else — so a hook that kills only
+`$POOL_HANDLE_DEVICES` leaves the added emulators running. The loop above is
+the version that doesn't.
 
 ## Items and handles
 
@@ -1007,9 +1091,12 @@ status` to verify.
 ## Worktree state
 
 Per-worktree bookkeeping lives in `.wet-worktrees.json` at the repo root.
-Each entry records the branch, path, creation time, slot index, and resolved
-ports. Legacy entries (created before `.wet.yaml` existed) omit `index` and
-`ports` — they load cleanly and are treated as slot 0.
+Each entry records the branch, path, creation time, slot index, resolved
+ports, the pool item claimed per pool (`pools`), and any further items
+`wet mobile add` claimed (`pool_extras`). Legacy entries (created before
+`.wet.yaml` existed) omit `index` and `ports` — they load cleanly and are
+treated as slot 0, and an entry written before `pool_extras` existed simply
+has none.
 
 ## No config, no setup
 

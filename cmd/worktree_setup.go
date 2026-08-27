@@ -20,9 +20,10 @@ repo root, allocates a slot + pool items + ports for this worktree, copies
 files declared in .wet.yaml's copy: list, writes .env.worktree, runs
 post_create hooks, and persists the entry to .wet-worktrees.json.
 
-If the current worktree already has an entry in the state file, its slot,
-pools, and ports are re-allocated and the existing entry is updated in
-place (no duplicate entries). This makes setup idempotent.`,
+If the current worktree already has an entry in the state file, it keeps its
+slot, its pool picks and the extra devices ` + "`wet mobile add`" + ` claimed,
+its ports are re-resolved, and the existing entry is updated in place (no
+duplicate entries). This makes setup idempotent.`,
 	RunE: runWorktreeSetup,
 }
 
@@ -169,6 +170,7 @@ func runSetupCore(repoRoot, worktreePath, branchName string, headless, isMain bo
 	// the same slot, and `wet worktree pop` releases it.
 	var slot int
 	var pools map[string]string
+	var extras map[string][]string
 	var copiedFiles []string
 	var copySkipped string
 	if err := withStateLock(func() error {
@@ -220,7 +222,32 @@ func runSetupCore(repoRoot, worktreePath, branchName string, headless, isMain bo
 			slot = cfg.NextFreeSlotWithFreePorts(used)
 		}
 
-		allocated, err := AllocatePools(cfg, others, localRoot, headless)
+		// A re-run keeps what this worktree already holds: its primary picks
+		// (so the emulator it has been running on stays its emulator) and the
+		// extras `wet mobile add` recorded. The extras are offered to the
+		// allocator as a claimant of their own, because `others` excludes this
+		// tree's entry and a primary re-pick could otherwise land on one of
+		// them. Extras from a pool the config no longer declares are dropped
+		// — there is nothing left for them to be an extra of.
+		var keep map[string]string
+		claimants := others
+		if existingIdx >= 0 {
+			prev := state.Worktrees[existingIdx]
+			keep = prev.Pools
+			for name, items := range prev.PoolExtras {
+				if _, declared := cfg.Pools[name]; declared && len(items) > 0 {
+					if extras == nil {
+						extras = map[string][]string{}
+					}
+					extras[name] = append([]string{}, items...)
+				}
+			}
+			if len(extras) > 0 {
+				claimants = append(append([]WorktreeState{}, others...),
+					WorktreeState{Branch: branchName, PoolExtras: extras})
+			}
+		}
+		allocated, err := AllocatePoolsKeeping(cfg, claimants, keep, localRoot, headless)
 		if err != nil {
 			return err
 		}
@@ -255,6 +282,9 @@ func runSetupCore(repoRoot, worktreePath, branchName string, headless, isMain bo
 				entry.Pools[k] = v
 			}
 		}
+		if len(extras) > 0 {
+			entry.PoolExtras = extras
+		}
 		if existingIdx >= 0 {
 			state.Worktrees[existingIdx] = entry
 		} else {
@@ -281,9 +311,16 @@ func runSetupCore(repoRoot, worktreePath, branchName string, headless, isMain bo
 	if err != nil {
 		return err
 	}
+	// The extras come up too: a re-run is how a machine reboot gets every
+	// device of a two-phone worktree back, not only the first.
+	extraHandles, err := resolveExtraHandles(extras, headless)
+	if err != nil {
+		return err
+	}
 
 	ports := cfg.ResolvePorts(slot)
 	data := WithPoolHandles(BuildTemplateData(cfg, branchName, slot, ports, pools), handles)
+	WithPoolExtras(data, extras, extraHandles)
 	if len(pools) > 0 {
 		names := make([]string, 0, len(pools))
 		for n := range pools {
@@ -292,6 +329,9 @@ func runSetupCore(repoRoot, worktreePath, branchName string, headless, isMain bo
 		sort.Strings(names)
 		for _, n := range names {
 			fmt.Printf("  Allocated: pool %s = %s\n", n, pools[n])
+			if more := extras[n]; len(more) > 0 {
+				fmt.Printf("  Kept:      pool %s extras %s (from `wet mobile add`)\n", n, strings.Join(more, ", "))
+			}
 		}
 	}
 
@@ -307,13 +347,8 @@ func runSetupCore(repoRoot, worktreePath, branchName string, headless, isMain bo
 		fmt.Printf("  Overrides: %s (%d %s)\n", envLocalFileName, n, plural)
 	}
 
-	envContent, err := RenderEnvFileContent(cfg, data, ports, local)
-	if err != nil {
-		return fmt.Errorf("render .env.worktree: %w", err)
-	}
-	envPath := filepath.Join(worktreePath, ".env.worktree")
-	if err := os.WriteFile(envPath, []byte(envContent), 0o644); err != nil {
-		return fmt.Errorf("write .env.worktree: %w", err)
+	if err := writeEnvWorktree(cfg, worktreePath, data, ports, local); err != nil {
+		return err
 	}
 	fmt.Printf("  Wrote: .env.worktree (slot %d)\n", slot)
 
@@ -383,7 +418,7 @@ func runSetupCore(repoRoot, worktreePath, branchName string, headless, isMain bo
 	if len(pools) > 0 {
 		names := make([]string, 0, len(pools))
 		for n := range pools {
-			names = append(names, fmt.Sprintf("%s=%s", n, pools[n]))
+			names = append(names, fmt.Sprintf("%s=%s", n, strings.Join(append([]string{pools[n]}, extras[n]...), "+")))
 		}
 		sort.Strings(names)
 		fmt.Printf("  Pools:  %s\n", strings.Join(names, ", "))
@@ -447,4 +482,29 @@ func runSetup(cmd *cobra.Command, args []string) error {
 
 	headless, _ := cmd.Flags().GetBool("headless")
 	return runSetupCore(repoRoot, treePath, branchName, headless, isMain)
+}
+
+// envWorktreeFileName is the dotenv `wet setup` renders into the tree root —
+// every `env:` value, resolved for this checkout.
+const envWorktreeFileName = ".env.worktree"
+
+// writeEnvWorktree renders and writes that file.
+//
+// It exists as its own function because setup is no longer the only thing
+// that invalidates it. `wet mobile add` changes what {{.AllHandles.devices}}
+// resolves to, and a file left holding one device while the worktree drives
+// two is worse than no file: it is a file that looks current. The render is
+// the same one setup does — same data, same order, same `.env.local` layer —
+// so there is one definition of the file's contents and no second way to
+// write it.
+func writeEnvWorktree(cfg *WetConfig, treePath string, data map[string]any, ports []ResolvedPort, local map[string]string) error {
+	content, err := RenderEnvFileContent(cfg, data, ports, local)
+	if err != nil {
+		return fmt.Errorf("render %s: %w", envWorktreeFileName, err)
+	}
+	path := filepath.Join(treePath, envWorktreeFileName)
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", envWorktreeFileName, err)
+	}
+	return nil
 }

@@ -325,6 +325,9 @@ type worktreeAllocation struct {
 	Slot   int
 	Ports  []ResolvedPort
 	Pools  map[string]string
+	// Extras are the claims beyond the primary pick per pool — what
+	// `wet mobile add` recorded. See WorktreeState.PoolExtras.
+	Extras map[string][]string
 }
 
 // Port returns the resolved value of a declared port by name.
@@ -367,7 +370,7 @@ func readWorktreeAllocation(cfg *WetConfig, worktreePath string) (worktreeAlloca
 			ports = append(ports, ResolvedPort{Name: p.Name, Value: v})
 		}
 	}
-	return worktreeAllocation{Branch: wt.Branch, Slot: wt.Index, Ports: ports, Pools: wt.Pools}, nil
+	return worktreeAllocation{Branch: wt.Branch, Slot: wt.Index, Ports: ports, Pools: wt.Pools, Extras: wt.PoolExtras}, nil
 }
 
 // buildWorktreeData assembles the ordinary value set for an env command.
@@ -376,7 +379,17 @@ func buildWorktreeData(cfg *WetConfig, worktreePath string) (map[string]any, err
 	if err != nil {
 		return nil, err
 	}
-	return withRenderedEnv(cfg, worktreePath, BuildTemplateData(cfg, alloc.Branch, alloc.Slot, alloc.Ports, alloc.Pools))
+	return withRenderedEnv(cfg, worktreePath, allocationTemplateData(cfg, alloc))
+}
+
+// allocationTemplateData is the template data for a render that must not
+// boot anything — a pull, a device command, a pre_remove hook. Handles are
+// peeked: a running emulator renders as its live serial, exactly as the
+// setup that booted it rendered it, and a stopped one as its item.
+func allocationTemplateData(cfg *WetConfig, alloc worktreeAllocation) map[string]any {
+	data := BuildTemplateData(cfg, alloc.Branch, alloc.Slot, alloc.Ports, alloc.Pools)
+	WithPoolHandles(data, peekPrimaryHandles(alloc.Pools))
+	return WithPoolExtras(data, alloc.Extras, peekExtraHandles(alloc.Extras))
 }
 
 func slotFromEnv() (int, bool) {
@@ -413,12 +426,20 @@ func allocationFromEnv(cfg *WetConfig, slot int) (worktreeAllocation, error) {
 		ports = append(ports, ResolvedPort{Name: p.Name, Value: v})
 	}
 	pools := map[string]string{}
+	extras := map[string][]string{}
 	for name := range cfg.Pools {
 		if v, ok := os.LookupEnv("POOL_" + strings.ToUpper(name)); ok {
 			pools[name] = v
 		}
+		// POOL_X_ALL is every claim with the primary first; what follows it
+		// is the extras. Read back rather than trusted to match POOL_X: a
+		// hook environment assembled by hand may set one without the other.
+		all := strings.Fields(os.Getenv("POOL_" + strings.ToUpper(name) + "_ALL"))
+		if len(all) > 1 {
+			extras[name] = all[1:]
+		}
 	}
-	return worktreeAllocation{Branch: branch, Slot: slot, Ports: ports, Pools: pools}, nil
+	return worktreeAllocation{Branch: branch, Slot: slot, Ports: ports, Pools: pools, Extras: extras}, nil
 }
 
 // withRenderedEnv layers .env.local and the resolved cfg.Env values onto the

@@ -19,6 +19,25 @@ type WorktreeState struct {
 	Index     int               `json:"index,omitempty"`
 	Ports     map[string]int    `json:"ports,omitempty"`
 	Pools     map[string]string `json:"pools,omitempty"`
+	// PoolExtras holds the items a worktree claimed beyond its primary pick
+	// — `wet mobile add` claiming a second emulator so two phones can talk
+	// through one stack. They are kept apart from Pools rather than turning
+	// it into a list because the primary is what every `{{.Pools.x}}`,
+	// `$POOL_X` and `from: Handles.x` in the world already renders; an extra
+	// is a claim the allocator must honour and the device commands act on,
+	// never a change to what those render.
+	PoolExtras map[string][]string `json:"pool_extras,omitempty"`
+}
+
+// poolClaims lists every item this worktree holds from pool, primary first.
+// It is the one place the allocator and the device commands ask "what does
+// this tree own?", so an extra can never be handed out twice.
+func (ws WorktreeState) poolClaims(pool string) []string {
+	var claims []string
+	if v := ws.Pools[pool]; v != "" {
+		claims = append(claims, v)
+	}
+	return append(claims, ws.PoolExtras[pool]...)
 }
 
 type WorktreeConfig struct {

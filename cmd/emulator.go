@@ -172,15 +172,90 @@ func ensureAVDExists(avdName string) error {
 func resolvePoolHandles(items map[string]string, headless bool) (map[string]string, error) {
 	handles := make(map[string]string, len(items))
 	for pool, item := range items {
-		if !strings.HasPrefix(item, emulatorItemPrefix) {
-			handles[pool] = item
-			continue
-		}
-		serial, err := ensureEmulatorRunning(strings.TrimPrefix(item, emulatorItemPrefix), headless)
+		serial, err := resolveItemHandle(item, headless)
 		if err != nil {
 			return nil, fmt.Errorf("pool %q: %w", pool, err)
 		}
 		handles[pool] = serial
 	}
 	return handles, nil
+}
+
+// resolveExtraHandles is resolvePoolHandles for the extra claims: every
+// emulator among them is booted too, so a setup re-run brings the whole
+// set back up and `wet mobile reverse-tcp` in a hook reaches all of them.
+func resolveExtraHandles(extras map[string][]string, headless bool) (map[string][]string, error) {
+	handles := make(map[string][]string, len(extras))
+	for pool, items := range extras {
+		for _, item := range items {
+			serial, err := resolveItemHandle(item, headless)
+			if err != nil {
+				return nil, fmt.Errorf("pool %q (extra %s): %w", pool, item, err)
+			}
+			handles[pool] = append(handles[pool], serial)
+		}
+	}
+	return handles, nil
+}
+
+// resolveItemHandle turns one pool item into the address it answers to,
+// booting an emulator item that isn't running. Anything else is its own
+// handle.
+func resolveItemHandle(item string, headless bool) (string, error) {
+	avd, ok := strings.CutPrefix(item, emulatorItemPrefix)
+	if !ok {
+		return item, nil
+	}
+	return ensureEmulatorRunning(avd, headless)
+}
+
+// peekItemHandle resolves what it can without starting anything: a running
+// emulator answers with its serial, a stopped one keeps its item name, and
+// everything else is its own handle. running reports whether the address is
+// one adb can be pointed at right now.
+//
+// This is what every render outside `wet setup` uses. A pull must not boot
+// an emulator to write a dotenv, but it must not write `emulator:pixel-a`
+// where the last setup wrote `emulator-5554` either — the file it
+// regenerates is the one `flutter run -d` reads.
+func peekItemHandle(item string) (handle string, running bool) {
+	avd, ok := strings.CutPrefix(item, emulatorItemPrefix)
+	if !ok {
+		return item, true
+	}
+	if serial, up := lookupRunningEmulator(avd); up {
+		return serial, true
+	}
+	return item, false
+}
+
+// peekPoolHandles and peekExtraHandles are the no-boot counterparts of
+// resolvePoolHandles and resolveExtraHandles.
+func peekPrimaryHandles(items map[string]string) map[string]string {
+	handles := make(map[string]string, len(items))
+	for pool, item := range items {
+		handles[pool], _ = peekItemHandle(item)
+	}
+	return handles
+}
+
+func peekExtraHandles(extras map[string][]string) map[string][]string {
+	handles := make(map[string][]string, len(extras))
+	for pool, items := range extras {
+		for _, item := range items {
+			h, _ := peekItemHandle(item)
+			handles[pool] = append(handles[pool], h)
+		}
+	}
+	return handles
+}
+
+// killEmulator stops a running emulator through its console. It is a seam so
+// the unit suite never reaches a device.
+var killEmulator = func(serial string) error {
+	out, err := exec.Command("adb", "-s", serial, "emu", "kill").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("adb -s %s emu kill: %w: %s", serial, err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }

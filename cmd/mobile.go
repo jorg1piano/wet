@@ -86,6 +86,7 @@ func runMobileReverseTCP(cmd *cobra.Command, args []string) error {
 	// serial, so it is shown as its pool item, labelled as such.
 	targets, err := reverseTargets(reverseRequest{
 		Pools:    alloc.Pools,
+		Extras:   alloc.Extras,
 		Devices:  mobileReverseDevices,
 		DryRun:   mobileReverseDryRun,
 		Headless: mobileReverseHeadless,
@@ -99,7 +100,8 @@ func runMobileReverseTCP(cmd *cobra.Command, args []string) error {
 			return nil
 		}
 		return fmt.Errorf("no device to reverse onto: this worktree claims no emulator or attached "+
-			"adb device (pools: %s) — pass --device <serial>", describePools(alloc.Pools))
+			"adb device (pools: %s) — pass --device <serial>, or claim one with `wet mobile add`",
+			describeClaims(alloc.Pools, alloc.Extras))
 	}
 
 	for _, target := range targets {
@@ -234,6 +236,7 @@ func allocatedPortNames(alloc worktreeAllocation) []string {
 // read once, in RunE, as every other command in this package does it.
 type reverseRequest struct {
 	Pools   map[string]string
+	Extras  map[string][]string
 	Devices []string
 	// DryRun resolves without starting anything and tolerates an adb that
 	// cannot answer. It is named for the flag rather than for "don't boot",
@@ -254,9 +257,10 @@ type reverseTarget struct {
 //
 // Devices is taken literally, because naming a serial is the escape hatch for
 // a device wet knows nothing about. Otherwise only this worktree's own claims
-// count: unless DryRun is set, an emulator item is booted and resolved to its
-// serial (a dry run peeks instead, see peekPoolHandles), and any other item is
-// used only when it is actually an attached adb serial — a `fixtures` pool holding
+// count — the primary pick per pool and every extra `wet mobile add` recorded:
+// unless DryRun is set, an emulator item is booted and resolved to its serial
+// (a dry run peeks instead, see peekItemHandle), and any other item is used
+// only when it is actually an attached adb serial — a `fixtures` pool holding
 // "snap-alpha" must not become an adb argument.
 func reverseTargets(req reverseRequest) ([]reverseTarget, error) {
 	if len(req.Devices) > 0 {
@@ -286,40 +290,24 @@ func reverseTargets(req reverseRequest) ([]reverseTarget, error) {
 	for _, serial := range serials {
 		attached[serial] = true
 	}
-	deviceItems := map[string]string{}
-	for pool, item := range req.Pools {
-		if strings.HasPrefix(item, emulatorItemPrefix) || attached[item] {
-			deviceItems[pool] = item
-		}
-	}
-	if len(deviceItems) == 0 {
-		return nil, nil
-	}
 
-	var targets map[string]reverseTarget
-	if !req.DryRun {
-		handles, err := bootPoolHandles(deviceItems, req.Headless)
+	// Claims in pool order, primary before extras, so a two-device worktree
+	// reverses in a stable order and the output reads the same on every run.
+	var ordered []reverseTarget
+	for _, claim := range orderedPoolClaims(req.Pools, req.Extras) {
+		if !strings.HasPrefix(claim.Item, emulatorItemPrefix) && !attached[claim.Item] {
+			continue
+		}
+		if req.DryRun {
+			handle, running := peekItemHandle(claim.Item)
+			ordered = append(ordered, reverseTarget{Address: handle, Booted: running})
+			continue
+		}
+		serial, err := bootPoolItem(claim.Item, req.Headless)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("pool %q: %w", claim.Pool, err)
 		}
-		targets = make(map[string]reverseTarget, len(handles))
-		for pool, serial := range handles {
-			targets[pool] = reverseTarget{Address: serial, Booted: true}
-		}
-	} else {
-		targets = peekPoolHandles(deviceItems)
-	}
-
-	// Sorted by pool name so a two-device worktree reverses in a stable order
-	// and the output reads the same on every run.
-	pools := make([]string, 0, len(targets))
-	for pool := range targets {
-		pools = append(pools, pool)
-	}
-	sort.Strings(pools)
-	ordered := make([]reverseTarget, 0, len(pools))
-	for _, pool := range pools {
-		ordered = append(ordered, targets[pool])
+		ordered = append(ordered, reverseTarget{Address: serial, Booted: true})
 	}
 	// Two pools can hold the same device — or one pool an `emulator:` item and
 	// another the serial it boots as. Issuing every reverse twice is harmless
@@ -328,13 +316,49 @@ func reverseTargets(req reverseRequest) ([]reverseTarget, error) {
 	return dedupeTargets(ordered), nil
 }
 
+// poolClaim is one (pool, item) a worktree holds.
+type poolClaim struct {
+	Pool string
+	Item string
+}
+
+// orderedPoolClaims flattens a worktree's claims: pools in name order, and
+// within a pool the primary first, then the extras in the order they were
+// added.
+func orderedPoolClaims(pools map[string]string, extras map[string][]string) []poolClaim {
+	seen := map[string]bool{}
+	for pool := range pools {
+		seen[pool] = true
+	}
+	for pool, items := range extras {
+		if len(items) > 0 {
+			seen[pool] = true
+		}
+	}
+	names := make([]string, 0, len(seen))
+	for pool := range seen {
+		names = append(names, pool)
+	}
+	sort.Strings(names)
+	var claims []poolClaim
+	for _, pool := range names {
+		if item := pools[pool]; item != "" {
+			claims = append(claims, poolClaim{Pool: pool, Item: item})
+		}
+		for _, item := range extras[pool] {
+			claims = append(claims, poolClaim{Pool: pool, Item: item})
+		}
+	}
+	return claims
+}
+
 // listAttachedSerials is a seam: tests replace it so the unit suite never
 // starts an adb server or depends on what is plugged into the machine.
 var listAttachedSerials = attachedSerials
 
-// bootPoolHandles and lookupRunningEmulator are the same seam for the boot and
+// bootPoolItem and lookupRunningEmulator are the same seam for the boot and
 // peek paths.
-var bootPoolHandles = resolvePoolHandles
+var bootPoolItem = resolveItemHandle
 
 var lookupRunningEmulator = runningEmulatorSerial
 
@@ -344,22 +368,6 @@ func bootedTargets(serials []string) []reverseTarget {
 		out = append(out, reverseTarget{Address: serial, Booted: true})
 	}
 	return out
-}
-
-// peekPoolHandles resolves what it can without starting anything: a running
-// emulator answers with its serial, a stopped one keeps its item name.
-func peekPoolHandles(items map[string]string) map[string]reverseTarget {
-	targets := make(map[string]reverseTarget, len(items))
-	for pool, item := range items {
-		target := reverseTarget{Address: item, Booted: !strings.HasPrefix(item, emulatorItemPrefix)}
-		if avd, ok := strings.CutPrefix(item, emulatorItemPrefix); ok {
-			if serial, running := lookupRunningEmulator(avd); running {
-				target = reverseTarget{Address: serial, Booted: true}
-			}
-		}
-		targets[pool] = target
-	}
-	return targets
 }
 
 // dedupeTargets keeps the first occurrence of each address and drops
@@ -379,13 +387,19 @@ func dedupeTargets(targets []reverseTarget) []reverseTarget {
 }
 
 func describePools(pools map[string]string) string {
-	if len(pools) == 0 {
+	return describeClaims(pools, nil)
+}
+
+// describeClaims names every claim, `devices=emulator:a, devices=emulator:b`,
+// in the order orderedPoolClaims gives them.
+func describeClaims(pools map[string]string, extras map[string][]string) string {
+	claims := orderedPoolClaims(pools, extras)
+	if len(claims) == 0 {
 		return "none claimed"
 	}
-	parts := make([]string, 0, len(pools))
-	for pool, item := range pools {
-		parts = append(parts, fmt.Sprintf("%s=%s", pool, item))
+	parts := make([]string, 0, len(claims))
+	for _, c := range claims {
+		parts = append(parts, fmt.Sprintf("%s=%s", c.Pool, c.Item))
 	}
-	sort.Strings(parts)
 	return strings.Join(parts, ", ")
 }

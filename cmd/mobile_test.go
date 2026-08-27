@@ -79,9 +79,9 @@ func stubADB(t *testing.T, attached []string, running map[string]string) {
 	// Booting is stubbed to a hard failure by default: a unit test must never
 	// start an AVD, and a test that means to exercise the boot path replaces
 	// this itself.
-	bootPoolHandles = func(items map[string]string, headless bool) (map[string]string, error) {
-		t.Errorf("resolvePoolHandles must not be reached: it boots emulators (items %v)", items)
-		return nil, errors.New("boot not stubbed")
+	bootPoolItem = func(item string, headless bool) (string, error) {
+		t.Errorf("resolveItemHandle must not be reached: it boots emulators (item %s)", item)
+		return "", errors.New("boot not stubbed")
 	}
 	lookupRunningEmulator = func(avd string) (string, bool) {
 		serial, ok := running[avd]
@@ -90,7 +90,7 @@ func stubADB(t *testing.T, attached []string, running map[string]string) {
 	t.Cleanup(func() {
 		listAttachedSerials = attachedSerials
 		lookupRunningEmulator = runningEmulatorSerial
-		bootPoolHandles = resolvePoolHandles
+		bootPoolItem = resolveItemHandle
 	})
 }
 
@@ -182,21 +182,16 @@ func TestReverseTargetsDedupesAndDropsEmptyDevices(t *testing.T) {
 // A dry run must not boot: a stopped emulator keeps its item name and is
 // marked unbooted, which is what makes the printed command honest about not
 // being copy-pasteable.
-func TestPeekPoolHandlesKeepsStoppedEmulatorItems(t *testing.T) {
+func TestPeekItemHandleKeepsStoppedEmulatorItems(t *testing.T) {
 	stubADB(t, nil, map[string]string{"pixel-b": "emulator-5556"})
-	got := peekPoolHandles(map[string]string{
-		"stopped": "emulator:pixel-a",
-		"running": "emulator:pixel-b",
-		"phone":   "RFCR921L4DP",
-	})
-	if got["stopped"].Address != "emulator:pixel-a" || got["stopped"].Booted {
-		t.Errorf("stopped emulator = %+v, want the unresolved item, unbooted", got["stopped"])
+	if h, up := peekItemHandle("emulator:pixel-a"); h != "emulator:pixel-a" || up {
+		t.Errorf("stopped emulator = %q/%v, want the unresolved item, not running", h, up)
 	}
-	if got["running"].Address != "emulator-5556" || !got["running"].Booted {
-		t.Errorf("running emulator = %+v, want its live serial", got["running"])
+	if h, up := peekItemHandle("emulator:pixel-b"); h != "emulator-5556" || !up {
+		t.Errorf("running emulator = %q/%v, want its live serial", h, up)
 	}
-	if got["phone"].Address != "RFCR921L4DP" || !got["phone"].Booted {
-		t.Errorf("physical device = %+v, want it addressable as-is", got["phone"])
+	if h, up := peekItemHandle("RFCR921L4DP"); h != "RFCR921L4DP" || !up {
+		t.Errorf("physical device = %q/%v, want it addressable as-is", h, up)
 	}
 }
 
@@ -242,16 +237,18 @@ func TestIsMissingListenerRejectsAMissingDevice(t *testing.T) {
 // live serial, ordered by pool name so two devices reverse the same way twice.
 func TestReverseTargetsBootsClaimedEmulatorsInPoolOrder(t *testing.T) {
 	stubADB(t, nil, nil)
-	bootPoolHandles = func(items map[string]string, headless bool) (map[string]string, error) {
+	bootPoolItem = func(item string, headless bool) (string, error) {
 		if !headless {
 			t.Error("headless must reach the boot path, or --headless is a no-op")
 		}
 		// The booter must never see a fixture: it would try to start an AVD
 		// named after a database snapshot.
-		if _, leaked := items["fixtures"]; leaked {
-			t.Errorf("non-device pool item reached the booter: %v", items)
+		serials := map[string]string{"emulator:pixel-a": "emulator-5554", "emulator:pixel-b": "emulator-5556"}
+		serial, ok := serials[item]
+		if !ok {
+			t.Errorf("non-device pool item reached the booter: %s", item)
 		}
-		return map[string]string{"alpha": "emulator-5554", "beta": "emulator-5556"}, nil
+		return serial, nil
 	}
 	got, err := reverseTargets(reverseRequest{
 		Pools: map[string]string{

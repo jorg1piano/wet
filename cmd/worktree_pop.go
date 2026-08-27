@@ -110,9 +110,10 @@ func runWorktreePop(cmd *cobra.Command, args []string) error {
 	//
 	// Pool allocations release implicitly: AllocatePools scans existing
 	// state entries for claimed items, so once we drop this entry from
-	// `state.Worktrees` at the end of this function, its pool picks are
-	// automatically available to the next `wet worktree create`. No
-	// explicit release step needed.
+	// `state.Worktrees` at the end of this function, its pool picks — the
+	// primary and every `wet mobile add` extra — are automatically
+	// available to the next `wet worktree create`. No explicit release
+	// step needed.
 	// An untracked worktree, or one recorded before ports existed, has no
 	// hooks to run — there is no config state to tear down.
 	isUnconfigured := found == nil || (found.Index == 0 && len(found.Ports) == 0)
@@ -127,7 +128,19 @@ func runWorktreePop(cmd *cobra.Command, args []string) error {
 					ports = append(ports, ResolvedPort{Name: p.Name, Value: v})
 				}
 			}
-			data := BuildTemplateData(cfg, found.Branch, found.Index, ports, found.Pools)
+			// Handles are peeked, not booted: a teardown must not start the
+			// emulator it is about to kill, but `$POOL_HANDLE_DEVICES` (and
+			// whatever `env:` derives from {{.Handles.devices}}) must be the
+			// live serial while it is running, or the kill hook is handed
+			// `emulator:pixel-a` and adb finds no such device. The extras
+			// `wet mobile add` claimed ride along in `$POOL_HANDLE_DEVICES_ALL`.
+			data := allocationTemplateData(cfg, worktreeAllocation{
+				Branch: found.Branch,
+				Slot:   found.Index,
+				Ports:  ports,
+				Pools:  found.Pools,
+				Extras: found.PoolExtras,
+			})
 			// pre_remove hooks tear down what setup brought up, so they need
 			// the same machine overrides setup used — resolved the same way,
 			// or a compose project named after a DEV_HOST from .env.local

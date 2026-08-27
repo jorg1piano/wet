@@ -712,7 +712,7 @@ const PoolGrowAndroidEmulator = "android-emulator"
 // automatically into every `env:` and hook render. A port or pool declared
 // with one of these names (case-insensitively) would shadow the reserved
 // field and confuse users, so we reject at load time.
-var reservedTemplateFields = []string{"ProjectName", "Branch", "BranchSafe", "Slot", "Pools", "Handles"}
+var reservedTemplateFields = []string{"ProjectName", "Branch", "BranchSafe", "Slot", "Pools", "Handles", "AllPools", "AllHandles"}
 
 // Validate enforces the schema rules documented in .wet.yaml's comments.
 // All error paths return errors actionable from the user's perspective.
@@ -1233,21 +1233,107 @@ func BuildTemplateData(cfg *WetConfig, branch string, slot int, ports []Resolved
 		handles[k] = v
 	}
 	data["Handles"] = handles
+	// The list forms start as the primary alone. WithPoolExtras appends the
+	// extra claims; until then a one-device worktree and a config that never
+	// heard of extras render {{index .AllHandles.devices 0}} identically to
+	// {{.Handles.devices}}.
+	allPools := make(map[string][]string, len(pools))
+	allHandles := make(map[string][]string, len(pools))
+	for k, v := range pools {
+		allPools[k] = []string{v}
+		allHandles[k] = []string{v}
+	}
+	data["AllPools"] = allPools
+	data["AllHandles"] = allHandles
 	return data
 }
 
+// isPoolMapField reports whether a reserved template field is one of the
+// pool maps rather than a scalar — the ones an `include:` cannot name.
+func isPoolMapField(name string) bool {
+	switch name {
+	case "Pools", "Handles", "AllPools", "AllHandles":
+		return true
+	}
+	return false
+}
+
 // WithPoolHandles replaces the default handle map with resolved addresses.
+// The primary's slot in AllHandles follows, so the two views never disagree
+// about what the first device is called.
 func WithPoolHandles(data map[string]any, handles map[string]string) map[string]any {
-	if len(handles) > 0 {
-		data["Handles"] = handles
+	if len(handles) == 0 {
+		return data
+	}
+	data["Handles"] = handles
+	allHandles, _ := data["AllHandles"].(map[string][]string)
+	if allHandles == nil {
+		allHandles = map[string][]string{}
+		data["AllHandles"] = allHandles
+	}
+	for pool, handle := range handles {
+		if len(allHandles[pool]) == 0 {
+			allHandles[pool] = []string{handle}
+			continue
+		}
+		allHandles[pool][0] = handle
 	}
 	return data
 }
 
+// WithPoolExtras appends a worktree's extra claims to the list views —
+// `{{.AllPools.x}}` gets the items, `{{.AllHandles.x}}` the addresses they
+// answer to. handles may be nil, in which case each extra's handle is the
+// item itself, exactly as BuildTemplateData defaults the primary. Pools and
+// Handles are untouched: an extra device is never the one a template that
+// asks for *the* device gets.
+func WithPoolExtras(data map[string]any, extras map[string][]string, handles map[string][]string) map[string]any {
+	if len(extras) == 0 {
+		return data
+	}
+	allPools, _ := data["AllPools"].(map[string][]string)
+	allHandles, _ := data["AllHandles"].(map[string][]string)
+	if allPools == nil {
+		allPools = map[string][]string{}
+		data["AllPools"] = allPools
+	}
+	if allHandles == nil {
+		allHandles = map[string][]string{}
+		data["AllHandles"] = allHandles
+	}
+	for pool, items := range extras {
+		if len(items) == 0 {
+			continue
+		}
+		resolved := handles[pool]
+		// Truncate to the primary before appending, so applying the same
+		// extras twice (a caller reusing data) cannot double them.
+		allPools[pool] = append(firstOrNone(allPools[pool]), items...)
+		heads := firstOrNone(allHandles[pool])
+		for i, item := range items {
+			if i < len(resolved) && resolved[i] != "" {
+				heads = append(heads, resolved[i])
+			} else {
+				heads = append(heads, item)
+			}
+		}
+		allHandles[pool] = heads
+	}
+	return data
+}
+
+func firstOrNone(list []string) []string {
+	if len(list) == 0 {
+		return nil
+	}
+	return []string{list[0]}
+}
+
 // AllocatePools picks one item per declared pool for a new worktree,
-// avoiding items already claimed by any entry in `existing`. For each pool,
-// iteration is in declared order and the first unclaimed item wins — so a
-// claim set of {items[0], items[2]} releases items[1] before items[3].
+// avoiding items already claimed by any entry in `existing` — primary picks
+// and `wet mobile add` extras alike. For each pool, iteration is in declared
+// order and the first unclaimed item wins — so a claim set of {items[0],
+// items[2]} releases items[1] before items[3].
 //
 // When a pool is exhausted and pool_grow has a strategy for it (e.g.
 // "android-emulator"), the pool is auto-expanded: a new resource is created,
@@ -1262,6 +1348,19 @@ func WithPoolHandles(data map[string]any, handles map[string]string) map[string]
 // Repos without a `pools:` block get an empty map and no error, which is
 // the back-compat path: existing configs keep working unchanged.
 func AllocatePools(cfg *WetConfig, existing []WorktreeState, repoRoot string, headless ...bool) (map[string]string, error) {
+	hl := len(headless) > 0 && headless[0]
+	return AllocatePoolsKeeping(cfg, existing, nil, repoRoot, hl)
+}
+
+// AllocatePoolsKeeping is AllocatePools for a worktree that already holds
+// picks: any entry in keep that still names an item of its pool is kept
+// rather than re-picked. A setup re-run otherwise hands a worktree the
+// lowest free item, which can be a different AVD from the one it has been
+// running on — and, once a tree can hold extras, could be one of its own
+// extras. A kept item is not checked against existing, because the caller
+// has already excluded this worktree's own entry from that list and the
+// item was this worktree's to begin with.
+func AllocatePoolsKeeping(cfg *WetConfig, existing []WorktreeState, keep map[string]string, repoRoot string, headless bool) (map[string]string, error) {
 	out := make(map[string]string, len(cfg.Pools))
 	if len(cfg.Pools) == 0 {
 		return out, nil
@@ -1272,46 +1371,61 @@ func AllocatePools(cfg *WetConfig, existing []WorktreeState, repoRoot string, he
 	}
 	sort.Strings(poolNames)
 	for _, name := range poolNames {
-		items := cfg.Pools[name]
-		claimed := make(map[string]bool, len(existing))
-		for _, ws := range existing {
-			if v, ok := ws.Pools[name]; ok && v != "" {
-				claimed[v] = true
-			}
+		if kept := keep[name]; kept != "" && slices.Contains(cfg.Pools[name], kept) {
+			out[name] = kept
+			continue
 		}
-		picked := ""
-		for _, item := range items {
-			if !claimed[item] {
-				picked = item
-				break
-			}
-		}
-		if picked == "" {
-			// Check for a grow strategy before erroring.
-			strategy := cfg.PoolGrow[name]
-			if strategy == PoolGrowAndroidEmulator {
-				hl := len(headless) > 0 && headless[0]
-				newItem, err := growAndroidEmulatorPool(cfg, name, repoRoot, hl)
-				if err != nil {
-					return nil, fmt.Errorf("pool %q exhausted and auto-grow failed: %w", name, err)
-				}
-				picked = newItem
-			} else {
-				claims := make([]string, 0, len(existing))
-				for _, ws := range existing {
-					if v, ok := ws.Pools[name]; ok && v != "" {
-						claims = append(claims, fmt.Sprintf("branch=%s item=%s", ws.Branch, v))
-					}
-				}
-				return nil, fmt.Errorf(
-					"pool %q exhausted — all %d items claimed by existing worktrees (%s). Pop a worktree first or add more items to the pool",
-					name, len(items), strings.Join(claims, ", "),
-				)
-			}
+		picked, err := allocatePoolItem(cfg, name, existing, repoRoot, headless)
+		if err != nil {
+			return nil, err
 		}
 		out[name] = picked
 	}
 	return out, nil
+}
+
+// allocatePoolItem claims one more item from a single pool: the first
+// declared item nobody in existing holds, or a grown one when the pool is
+// dry and has a strategy. It is the unit both a fresh setup (once per pool)
+// and `wet mobile add` (once, for the pool it names) are built from, so the
+// two cannot disagree about what "free" means.
+func allocatePoolItem(cfg *WetConfig, name string, existing []WorktreeState, repoRoot string, headless bool) (string, error) {
+	items := cfg.Pools[name]
+	claimed := make(map[string]bool, len(existing))
+	for _, ws := range existing {
+		for _, item := range ws.poolClaims(name) {
+			claimed[item] = true
+		}
+	}
+	for _, item := range items {
+		if !claimed[item] {
+			return item, nil
+		}
+	}
+	// Check for a grow strategy before erroring.
+	if cfg.PoolGrow[name] == PoolGrowAndroidEmulator {
+		newItem, err := growAndroidEmulatorPool(cfg, name, repoRoot, headless)
+		if err != nil {
+			return "", fmt.Errorf("pool %q exhausted and auto-grow failed: %w", name, err)
+		}
+		return newItem, nil
+	}
+	return "", fmt.Errorf(
+		"pool %q exhausted — all %d items claimed by existing worktrees (%s). Pop a worktree first or add more items to the pool",
+		name, len(items), describePoolClaims(existing, name),
+	)
+}
+
+// describePoolClaims lists who holds what from one pool, for an exhaustion
+// message: `branch=main item=emulator:a, branch=chat item=emulator:b`.
+func describePoolClaims(existing []WorktreeState, name string) string {
+	var claims []string
+	for _, ws := range existing {
+		for _, item := range ws.poolClaims(name) {
+			claims = append(claims, fmt.Sprintf("branch=%s item=%s", ws.Branch, item))
+		}
+	}
+	return strings.Join(claims, ", ")
 }
 
 // SanitizeBranch produces a Docker-Compose-safe variant of a git branch name.
@@ -1599,6 +1713,27 @@ func BuildHookEnv(cfg *WetConfig, data map[string]any, ports []ResolvedPort, loc
 			for _, n := range names {
 				env = append(env, fmt.Sprintf("POOL_%s=%s", strings.ToUpper(n), pools[n]))
 			}
+		}
+	}
+	// Every claim, primary first, space-separated — so a hook written as
+	// `for h in $POOL_HANDLE_DEVICES_ALL` is right for one device and for
+	// three, and a teardown that loops over it kills what `wet mobile add`
+	// booted as well as what setup did.
+	for _, field := range []struct{ key, prefix string }{
+		{"AllPools", "POOL_%s_ALL"},
+		{"AllHandles", "POOL_HANDLE_%s_ALL"},
+	} {
+		lists, ok := data[field.key].(map[string][]string)
+		if !ok || len(lists) == 0 {
+			continue
+		}
+		names := make([]string, 0, len(lists))
+		for n := range lists {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		for _, n := range names {
+			env = append(env, fmt.Sprintf(field.prefix+"=%s", strings.ToUpper(n), strings.Join(lists[n], " ")))
 		}
 	}
 	values, err := ResolveEnvValues(cfg, data, local)

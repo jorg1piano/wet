@@ -255,6 +255,48 @@ more than one device/emulator" as soon as a second device is attached, which is
 the normal state once you run worktrees in parallel. wet resolves by asking each
 console its AVD name, which is the only method that survives a crowd.
 
+## Why a second device is an extra claim, not a second pool
+
+Some work needs two phones on one backend: a chat between two accounts, a
+share flow. Two worktrees cannot do it. They are two stacks and two databases,
+so the two accounts never see each other, which is the only thing the test is
+for.
+
+Two pools cannot do it either. `devices` and `devices_2` would be sized and
+filled separately, and a worktree wanting one device would have to claim from
+both or from neither.
+
+The second device is another claim on the pool the first came from, recorded
+in the worktree's state entry as `pool_extras`. The pool stays one list of
+interchangeable devices, sized by how many devices the machine has.
+
+State keeps the primary apart from the extras instead of holding one flat
+list. `{{.Handles.devices}}`, `$POOL_HANDLE_DEVICES` and `from: Handles.devices`
+each render one string, which is what `flutter run -d` takes. A flat list
+breaks every config that renders a single device. Extras therefore reach
+templates and hooks only through the list forms, `{{.AllHandles.devices}}` and
+`$POOL_HANDLE_DEVICES_ALL`. A one-device worktree carries those too, one entry
+long, so a template written for several devices is correct on all of them.
+
+The code that reasons about claims rather than about the device reads both
+together: the allocator, the exhaustion message, `reverse-tcp`, and pop.
+
+## Why pop leaves a claimed emulator running
+
+`wet mobile remove` kills the emulator it releases. `wet worktree pop` does not.
+
+wet boots emulators because it has to. An AVD has no serial until something
+starts it, and every rendered file needs that serial. Stopping one is a
+separate decision that belongs to the project, and `pre_remove` is where it
+lived before extras existed. It stays there.
+
+`remove` is the exception. You named one device and asked for it gone, so it
+goes, and `--keep-running` releases the claim while leaving the emulator up.
+
+Pop still defers to the hook, so write the hook to loop over
+`$POOL_HANDLE_DEVICES_ALL`. Killing `$POOL_HANDLE_DEVICES` alone leaves every
+added emulator running.
+
 ## Why allocation holds a lock
 
 Two `wet setup` runs started at the same moment used to hand out the same slot,
