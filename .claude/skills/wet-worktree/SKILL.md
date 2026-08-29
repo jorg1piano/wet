@@ -62,6 +62,8 @@ When the user asks to start a new worktree, assume the default is: **create a gi
 
 7. Report back with branch, path, and that it is running in the background. If screenshots or other artifacts are part of the user request, include that requirement verbatim in the agent prompt and require absolute paths in the final report.
 
+Default completion policy: if the orchestrator watches the agent through completion (for example because the user asked for screenshots/results back here), then after the worktree agent reports a clean committed branch, land and remove it: rebase on main, fast-forward main, stop the slot runtime, pop the worktree, and close its Herdr workspace. Leave the worktree open only when the user explicitly says to keep it for review or manual poking. This prevents finished worktrees with live helper processes from lingering after the branch has landed.
+
 ## Fallback when Herdr is unavailable
 
 If `herdr` is not on PATH, create/configure the worktree and then work from that path:
