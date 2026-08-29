@@ -55,6 +55,7 @@ When the user asks to start a new worktree, assume the default is: **create a gi
    herdr agent prompt "<slug>" "<user task verbatim>
 
    Work only in this worktree: $WT.
+   This worktree has already been created for you. Do not create, mount, pop, or switch to another worktree.
    The repo root is $WT; if your shell cwd drifts into a subdirectory, cd back to $WT before running root-relative commands.
    When done, run the relevant checks/formatters and commit the branch. Do not report done with a dirty worktree."
    ```
