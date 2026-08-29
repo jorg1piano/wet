@@ -40,7 +40,11 @@ func ensureEmulatorRunning(avdName string, headless bool) (string, error) {
 	if headless {
 		args = append(args, "-no-window")
 	}
-	cmd := exec.Command("emulator", args...)
+	emulator, err := androidTool("emulator")
+	if err != nil {
+		return "", err
+	}
+	cmd := exec.Command(emulator, args...)
 	if err := cmd.Start(); err != nil {
 		return "", fmt.Errorf("emulator start failed for %s: %w", avdName, err)
 	}
@@ -139,7 +143,11 @@ func attachedEmulatorSerials() []string {
 // it — .wet.local.yaml is per-machine, but it gets copied, and a teammate's
 // item is otherwise a dead end.
 func ensureAVDExists(avdName string) error {
-	out, err := exec.Command("emulator", "-list-avds").Output()
+	emulator, err := androidTool("emulator")
+	if err != nil {
+		return err
+	}
+	out, err := exec.Command(emulator, "-list-avds").Output()
 	if err == nil {
 		for _, line := range strings.Split(string(out), "\n") {
 			if strings.TrimSpace(line) == avdName {
@@ -151,8 +159,12 @@ func ensureAVDExists(avdName string) error {
 	if err != nil {
 		return fmt.Errorf("cannot create AVD %s: %w", avdName, err)
 	}
+	avdmanager, err := androidTool("avdmanager")
+	if err != nil {
+		return err
+	}
 	fmt.Printf("  Creating AVD %s...\n", avdName)
-	create := exec.Command("avdmanager", "create", "avd",
+	create := exec.Command(avdmanager, "create", "avd",
 		"-n", avdName, "-k", sysImage, "-d", device, "--force")
 	create.Stdout, create.Stderr = os.Stdout, os.Stderr
 	create.Stdin = strings.NewReader("no\n")

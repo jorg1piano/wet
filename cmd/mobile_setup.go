@@ -520,13 +520,34 @@ func readLocalOverlay(path string) (*yaml.Node, *yaml.Node, error) {
 	return root, &doc, nil
 }
 
+// writeLocalOverlay replaces .wet.local.yaml atomically: the content is
+// staged beside the file and renamed over it, so a failure partway through
+// leaves the old overlay intact rather than a truncated one.
+//
+// It matters more here than the small size suggests. This file is the only
+// record of things nothing else can rederive — the emulators pool_grow
+// created, the LAN IP a device was pointed at, the port cluster this clone
+// drew — and a half-written one fails every later command in the clone with
+// a parse error, in a gitignored file nobody thinks to open.
+//
+// An existing file keeps its mode; a new one is 0644 like every overlay wet
+// has written.
 func writeLocalOverlay(path string, doc *yaml.Node) error {
 	out, err := MarshalYAMLDocument(doc)
 	if err != nil {
 		return fmt.Errorf("marshal %s: %w", path, err)
 	}
-	if err := os.WriteFile(path, out, 0o644); err != nil {
-		return fmt.Errorf("write %s: %w", path, err)
+	mode := os.FileMode(0o644)
+	if info, err := os.Stat(path); err == nil {
+		mode = info.Mode().Perm()
+	}
+	staged, err := stageOutputFile(path, string(out), mode, 0o755)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(staged.tmp)
+	if err := os.Rename(staged.tmp, staged.path); err != nil {
+		return fmt.Errorf("replace %s: %w", path, err)
 	}
 	return nil
 }

@@ -273,6 +273,16 @@ pool_grow:
   devices: android-emulator
 ```
 
+A new AVD clones the system image and device profile of an AVD the machine
+already has. A machine with none — a fresh workstation, or one whose AVDs were
+deleted while `.wet.local.yaml` still lists them — gets the newest installed
+phone system image for its ABI (`arm64-v8a` on Apple silicon, `x86_64`
+elsewhere). With no such image installed, wet downloads
+`system-images;android-36;google_apis;<abi>` through `sdkmanager` first. The
+SDK is `$ANDROID_HOME` (or `$ANDROID_SDK_ROOT`), else the directory Android
+Studio installs to; `avdmanager`, `sdkmanager` and `emulator` are found on
+`PATH` or under that root.
+
 An empty pool *without* a strategy is rejected at load: nothing can ever fill
 it, so it can only fail later at allocation, and failing at load names the file
 to fix.
@@ -884,6 +894,11 @@ all works the same way.
 this machine. Because sequences replace, the local file gets the full merged
 list.
 
+**So does the port cluster.** `port_cluster:` is which band of ports this clone
+drew on this machine — see
+[Several clones at once](#several-clones-at-once--wet-port-cluster). Committing
+it would hand the whole team one clone's answer.
+
 ## Mobile — `wet mobile setup` and `wet mobile reverse-tcp`
 
 (For running two phones against one worktree, see
@@ -1039,6 +1054,61 @@ target and `$POOL_HANDLE_DEVICES` is the same value in hooks. Don't reimplement
 this in a hook —
 [the obvious shell version breaks](docs/design.md#dont-resolve-emulator-serials-in-a-hook)
 as soon as a second device is attached.
+
+## Several clones at once — `wet port-cluster`
+
+Slots spread ports out inside **one** checkout. Nothing spreads two *clones* of
+the same repo apart: both start at slot 0, both resolve to the declared bases,
+and the second stack to boot dies with "port is already allocated".
+
+A **port cluster** is the band of ports one clone owns across all of its
+worktrees. `cluster_slots:` (default `10`) is how wide that band is;
+`port_cluster:` says which band this clone took:
+
+```
+cluster 0 -> APP_PORT 4000 .. 4090     (slot 0 = 4000, slot 1 = 4010, ...)
+cluster 1 -> APP_PORT 4100 .. 4190
+cluster 2 -> APP_PORT 4200 .. 4290
+```
+
+`wet port-cluster next` binds every port in every candidate band, lowest
+cluster first, and claims the first one where nothing answers:
+
+```
+wet port-cluster next             claim the lowest free cluster
+wet port-cluster next --dry-run   report which one that is, change nothing
+wet port-cluster next --force     re-probe even though this clone has a cluster
+```
+
+Each port shifts by **its own stride**, so a port declared `stride: 5` moves 50
+per cluster while one on `stride: 10` moves 100. That keeps the bands disjoint
+whatever mix of strides a config declares — a flat per-cluster offset would let
+a wide-stride port walk into the next cluster at a high enough slot.
+
+**Where the number lives.** In the `.wet.local.yaml` beside the trunk checkout,
+which every worktree of the clone reads — a cluster belongs to the clone, not to
+one worktree, or its worktrees would interleave with each other. It's
+gitignored, so nobody inherits this machine's answer. `cluster_slots:` is the
+opposite: it goes in the committed `.wet.yaml`, because every clone has to agree
+on the width.
+
+**It is a claim, not a migration.** Generated env files still hold the old
+numbers afterwards — re-run `wet env pull` in each checkout of the clone, with
+its stack down.
+
+**A re-run keeps the band it has.** Once a clone has a `port_cluster:`, a bare
+`next` reports it and changes nothing. The probe cannot tell "a neighbour is on
+this band" from "my own stack is on this band", and walking away from a band
+this clone is actively serving would strand every generated file and every
+running container on it. `--force` re-probes anyway, and will also move *down*
+to a lower band that has since freed up.
+
+**What the probe can and can't see.** It finds anything currently serving —
+including a loopback-only Postgres and a server bound to IPv4 only, both of
+which a naive wildcard-bind check reads as free. What it cannot see is a
+neighbouring clone whose stack is simply **down**: an idle band looks free, so
+two clones run on a quiet machine can pick the same cluster. Claim a cluster
+while the neighbours you care about are up, or set `port_cluster:` by hand.
 
 ## Running several worktrees at once
 

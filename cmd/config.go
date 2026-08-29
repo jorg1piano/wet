@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"text/template"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -24,18 +25,38 @@ import (
 // and which shell commands to run on create/remove. The CLI contains no
 // project-specific knowledge — everything lives here.
 type WetConfig struct {
-	ProjectName string              `yaml:"project_name"`
-	MainBranch  string              `yaml:"main_branch,omitempty"`
-	Copy        CopyConfig          `yaml:"copy"`
-	PortStride  int                 `yaml:"port_stride"`
-	Ports       []PortConfig        `yaml:"ports"`
-	Env         map[string]string   `yaml:"env"`
-	Hooks       HooksConfig         `yaml:"hooks"`
-	Outputs     []OutputConfig      `yaml:"outputs,omitempty"`
-	Secrets     *SecretsConfig      `yaml:"secrets,omitempty"`
-	Pools       map[string][]string `yaml:"pools,omitempty"`
-	PoolGrow    map[string]string   `yaml:"pool_grow,omitempty"`
-	PR          PRConfig            `yaml:"pr,omitempty"`
+	ProjectName string       `yaml:"project_name"`
+	MainBranch  string       `yaml:"main_branch,omitempty"`
+	Copy        CopyConfig   `yaml:"copy"`
+	PortStride  int          `yaml:"port_stride"`
+	Ports       []PortConfig `yaml:"ports"`
+
+	// PortCluster shifts every declared base clear of another clone of this
+	// repo on the same machine. Slots spread ports out *within* a checkout;
+	// nothing spreads two clones apart, because both start at slot 0 and
+	// both resolve to the declared bases. A cluster is the band of ports one
+	// clone owns across all of its worktrees, and the number says which band
+	// this clone took: cluster 1 sits ClusterSlots slots above cluster 0, so
+	// clone A can fill every slot it has room for without ever reaching
+	// clone B's first one.
+	//
+	// It belongs in .wet.local.yaml, not in .wet.yaml: which clone on which
+	// laptop drew which band is a fact about a machine, and committing it
+	// would hand the whole team one clone's answer. `wet port-cluster next`
+	// writes it there.
+	PortCluster int `yaml:"port_cluster,omitempty"`
+	// ClusterSlots is how many slots' worth of room one cluster reserves per
+	// port — the headroom a clone gets before its band would touch the next
+	// one's. Committed in .wet.yaml when the default is too tight, because
+	// every clone has to agree on the width or their bands interleave.
+	ClusterSlots int                 `yaml:"cluster_slots,omitempty"`
+	Env          map[string]string   `yaml:"env"`
+	Hooks        HooksConfig         `yaml:"hooks"`
+	Outputs      []OutputConfig      `yaml:"outputs,omitempty"`
+	Secrets      *SecretsConfig      `yaml:"secrets,omitempty"`
+	Pools        map[string][]string `yaml:"pools,omitempty"`
+	PoolGrow     map[string]string   `yaml:"pool_grow,omitempty"`
+	PR           PRConfig            `yaml:"pr,omitempty"`
 
 	// LocalKeys lists the top-level keys .wet.local.yaml overrode, so setup
 	// can say where a surprising value came from. Not part of the file format.
@@ -666,9 +687,30 @@ func (c *WetConfig) MainBranchName() string {
 	return DefaultMainBranch
 }
 
+// DefaultClusterSlots is how many slots one port cluster reserves room for
+// with no `cluster_slots:` in the config: a main checkout plus nine
+// worktrees. It matches the default `port_stride:` of 10, so a base of 4000
+// gives each clone a clean round hundred (4000-4090, 4100-4190, ...) — the
+// band a reader can work out in their head from the number in the file.
+const DefaultClusterSlots = 10
+
+// ClusterSlotCount is `cluster_slots:` with its default applied. Read through
+// this rather than the field: a WetConfig built in a test or by a caller that
+// never went through the loader has a zero there, and a zero width collapses
+// every cluster onto cluster 0's ports.
+func (c *WetConfig) ClusterSlotCount() int {
+	if c != nil && c.ClusterSlots > 0 {
+		return c.ClusterSlots
+	}
+	return DefaultClusterSlots
+}
+
 func applyWetConfigDefaults(cfg *WetConfig) {
 	if cfg.PortStride <= 0 {
 		cfg.PortStride = 10
+	}
+	if cfg.ClusterSlots <= 0 {
+		cfg.ClusterSlots = DefaultClusterSlots
 	}
 	for i := range cfg.Ports {
 		if cfg.Ports[i].Stride <= 0 {
@@ -735,6 +777,13 @@ func (c *WetConfig) Validate() error {
 		}
 	}
 
+	if c.PortCluster < 0 {
+		return fmt.Errorf("port_cluster %d must not be negative", c.PortCluster)
+	}
+	if c.ClusterSlots < 0 {
+		return fmt.Errorf("cluster_slots %d must not be negative", c.ClusterSlots)
+	}
+
 	seen := make(map[string]bool, len(c.Ports))
 	for i, port := range c.Ports {
 		if !portNameRE.MatchString(port.Name) {
@@ -753,6 +802,18 @@ func (c *WetConfig) Validate() error {
 		}
 		if port.Stride <= 0 {
 			return fmt.Errorf("ports[%d] %q: stride must be positive", i, port.Name)
+		}
+		// Only the shift the cluster itself introduces is checked, not the
+		// top of the band: a config on cluster 0 has to validate exactly as
+		// it did before this key existed, or adding the key would start
+		// rejecting configs that have worked for years.
+		if c.PortCluster > 0 {
+			shifted := port.Base + c.PortCluster*c.ClusterSlotCount()*port.Stride
+			if shifted >= 65536 {
+				return fmt.Errorf("ports[%d] %q: port_cluster %d puts base %d at %d, past 65535 — "+
+					"lower port_cluster, or lower this port's base so the clusters fit",
+					i, port.Name, c.PortCluster, port.Base, shifted)
+			}
 		}
 	}
 
@@ -1125,14 +1186,29 @@ type ResolvedPort struct {
 	Value int
 }
 
-// ResolvePorts computes concrete port values for `slot`, honoring each port's
-// (possibly overridden) stride.
+// ResolvePorts computes concrete port values for `slot` in the cluster this
+// config is on, honoring each port's (possibly overridden) stride.
 func (c *WetConfig) ResolvePorts(slot int) []ResolvedPort {
+	return c.ResolvePortsIn(c.PortCluster, slot)
+}
+
+// ResolvePortsIn computes port values for `slot` as if the config were on
+// `cluster`, which is what lets `wet port-cluster next` probe a band it has
+// not taken yet.
+//
+// The cluster shift is per-port rather than one flat number added to every
+// base, because a port carries its own stride. Shifting DEBUG_PORT (stride 5)
+// and APP_PORT (stride 10) by the same amount would leave one of them either
+// wasting range or — for a stride wider than the flat shift — walking into
+// the next cluster's band at a high enough slot. Scaling each port's shift by
+// its own stride makes the bands provably disjoint for every port.
+func (c *WetConfig) ResolvePortsIn(cluster, slot int) []ResolvedPort {
+	offset := cluster*c.ClusterSlotCount() + slot
 	out := make([]ResolvedPort, len(c.Ports))
 	for i, p := range c.Ports {
 		out[i] = ResolvedPort{
 			Name:  p.Name,
-			Value: p.Base + slot*p.Stride,
+			Value: p.Base + offset*p.Stride,
 		}
 	}
 	return out
@@ -1161,16 +1237,186 @@ func NextFreeSlot(used []int) int {
 // booted as its own compose project, a worktree popped without teardown — is
 // invisible to NextFreeSlot. Probing the actual port is the only way to keep
 // the allocator from handing out a slot that then dies at `docker compose up`
-// with "port is already allocated".
+// with "port is already allocated". See portFree for what "currently
+// bindable" has to mean to catch every way a dev machine holds a port.
 func (c *WetConfig) portsFree(slot int) bool {
-	for _, p := range c.ResolvePorts(slot) {
-		// Bind on all interfaces (":port"), matching Docker's default
-		// 0.0.0.0 host mapping, so a docker-proxy holding the port is seen.
-		ln, err := net.Listen("tcp", fmt.Sprintf(":%d", p.Value))
-		if err != nil {
+	return portsBindable(c.ResolvePorts(slot))
+}
+
+// portProbeTimeout bounds the connect half of the probe. Loopback refuses
+// instantly when nothing is listening, so this only ever matters if something
+// filters loopback traffic — in which case the answer wet needs is "assume
+// it's free" rather than "hang".
+const portProbeTimeout = 200 * time.Millisecond
+
+// portsBindable reports whether every port in the set is free on this host,
+// holding each listener until the whole set has been acquired rather than
+// taking and releasing them one at a time.
+//
+// Holding buys two things a port-at-a-time probe cannot have. It narrows the
+// window in which something else takes a port wet has already walked past and
+// called free — the set is only free if it can ALL be held at one instant.
+// And it catches a set that collides with itself: two declared ports that
+// resolve to the same number make the second acquisition fail, so a band that
+// could never work is never handed out.
+func portsBindable(ports []ResolvedPort) bool {
+	values := make([]int, len(ports))
+	for i, p := range ports {
+		values[i] = p.Value
+	}
+	return portSetFree(values)
+}
+
+// portSetFree is portsBindable's arithmetic-free core.
+func portSetFree(ports []int) bool {
+	// Dial before binding anything. A listener of wet's own on :P answers a
+	// dial to 127.0.0.1:P, so probing in the other order would make every
+	// port in the set look occupied by the very sockets used to test it.
+	for _, port := range ports {
+		if port <= 0 || port > 65535 {
 			return false
 		}
-		_ = ln.Close()
+		if servedOnLoopback(port) {
+			return false
+		}
+	}
+
+	held := make([]net.Listener, 0, 2*len(ports))
+	defer func() {
+		for _, ln := range held {
+			_ = ln.Close()
+		}
+	}()
+	for _, port := range ports {
+		// Each family explicitly, never the dual-stack ":port" form. Two
+		// reasons, and they point the same way:
+		//
+		// A dual-stack listen alone reports an IPv4-only server free, because
+		// an IPv6 wildcard bind does not conflict with an IPv4 one. And a
+		// dual-stack listener wet is HOLDING covers IPv4 too, so the IPv4
+		// probe that follows collides with wet's own socket and calls a free
+		// port busy — which is only survivable if each listener is released
+		// before the next is taken, and releasing them is the thing this
+		// function exists not to do.
+		//
+		// Go sets IPV6_V6ONLY on a "tcp6" listener, so these two carve the
+		// families apart cleanly and can be held at the same instant:
+		//
+		//	nothing listening        both held
+		//	IPv4 wildcard            tcp4 refused
+		//	IPv6 dual-stack (docker) tcp4 refused
+		//	IPv6-only                tcp6 refused
+		for _, probe := range [][2]string{
+			{"tcp4", fmt.Sprintf("0.0.0.0:%d", port)},
+			{"tcp6", fmt.Sprintf("[::]:%d", port)},
+		} {
+			ln, err := net.Listen(probe[0], probe[1])
+			if err != nil {
+				return false
+			}
+			held = append(held, ln)
+		}
+	}
+	return true
+}
+
+// portFree reports whether nothing is serving on `port`.
+//
+// It asks two different questions because on macOS neither one alone is
+// right, and the version that only tried to bind the wildcard called ports
+// free that plainly weren't. Measured against three real listeners:
+//
+//	                            bind :P   bind 0.0.0.0:P   dial loopback
+//	docker, IPv6 wildcard        busy         busy             busy
+//	postgres, loopback only      FREE         FREE             busy
+//	a server on 0.0.0.0 only     FREE         busy             busy
+//
+// Binding misses those two because SO_REUSEADDR — which Go sets on every
+// listener — lets a wildcard bind sit happily over a socket bound to a
+// specific address, and lets an IPv6 wildcard sit over an IPv4 one. A
+// loopback-only Postgres is exactly the case that matters here: it is what a
+// developer has running when they declare `DB_PORT, base: 5432`.
+//
+// Dialing catches all three, so why still bind? Because the two failures are
+// not the same failure. Dialing finds a socket that ANSWERS; binding finds a
+// port this process could not take even if nothing answers on it — a
+// listener with a full accept queue, a socket held on a non-loopback
+// interface. A port is free only when both agree it is.
+func portFree(port int) bool {
+	return portSetFree([]int{port})
+}
+
+// servedOnLoopback reports whether something answers on `port` on either
+// loopback address — the check that finds a server bound to 127.0.0.1 or
+// [::1] alone, which no wildcard bind can detect. Both are tried, for the
+// server that listens on only one of them.
+func servedOnLoopback(port int) bool {
+	for _, addr := range []string{
+		fmt.Sprintf("127.0.0.1:%d", port),
+		fmt.Sprintf("[::1]:%d", port),
+	} {
+		if c, err := net.DialTimeout("tcp", addr, portProbeTimeout); err == nil {
+			_ = c.Close()
+			return true
+		}
+	}
+	return false
+}
+
+// ClusterFree reports whether an entire cluster's band is bindable — every
+// declared port at every slot the cluster reserves, not just the slot-0 row.
+//
+// The whole band has to be probed because a cluster is claimed by a clone,
+// not by a checkout. A neighbouring clone sitting idle on its main checkout
+// while its third worktree runs a stack shows nothing at slot 0; taking that
+// band anyway would collide the moment either side made one more worktree.
+//
+// Listeners are held one slot-row at a time rather than across the entire
+// band. A row is the set that is actually used together, so that is where
+// holding earns its keep, and it bounds the open descriptors to twice the
+// declared port count — a wide cluster_slots on a config with many ports
+// would otherwise ask for thousands at once and start failing to bind for a
+// reason that has nothing to do with the ports being taken.
+func (c *WetConfig) ClusterFree(cluster int) bool {
+	for slot := 0; slot < c.ClusterSlotCount(); slot++ {
+		if !portsBindable(c.ResolvePortsIn(cluster, slot)) {
+			return false
+		}
+	}
+	return true
+}
+
+// BandConflict reports two declared ports that land on the same number
+// somewhere inside `cluster`'s band, which makes the band unusable however
+// free the host is: one of the two worktrees holding them could never boot.
+//
+// Within a single slot the simultaneous hold in portSetFree already catches
+// this — the second bind fails. Across slots it cannot, because those rows
+// are probed separately, and that is the case a config drifts into: two
+// ports with different strides converge at a high enough slot, so the config
+// works until someone creates the seventh worktree.
+func (c *WetConfig) BandConflict(cluster int) (first, second string, port int, found bool) {
+	owner := make(map[int]string)
+	for slot := 0; slot < c.ClusterSlotCount(); slot++ {
+		for _, p := range c.ResolvePortsIn(cluster, slot) {
+			if prev, taken := owner[p.Value]; taken {
+				return prev, p.Name, p.Value, true
+			}
+			owner[p.Value] = p.Name
+		}
+	}
+	return "", "", 0, false
+}
+
+// ClusterFitsPortRange reports whether shifting to `cluster` keeps every
+// declared base a legal port. It bounds the search in `wet port-cluster
+// next`, which would otherwise climb past 65535 on a repo whose every
+// cluster is occupied.
+func (c *WetConfig) ClusterFitsPortRange(cluster int) bool {
+	for _, p := range c.Ports {
+		if p.Base+cluster*c.ClusterSlotCount()*p.Stride >= 65536 {
+			return false
+		}
 	}
 	return true
 }

@@ -842,6 +842,11 @@ func livePath(live map[string]bool, path string) bool {
 // Adding an entry here is how you turn the strict check off for one path, so
 // it should stay short and each addition should be argued for in review.
 var commentedSchemaKeys = map[string]*regexp.Regexp{
+	// Which port cluster a clone took belongs in the gitignored
+	// .wet.local.yaml, so it is illustrated as that snippet rather than
+	// declared here. A live entry would be copied into real repos and commit
+	// one machine's band as the whole team's.
+	"port_cluster": regexp.MustCompile(`(?m)^#   port_cluster: \d+$`),
 	// Optional per-pool auto-grow strategy; shown commented so the example
 	// config doesn't create emulators on anyone's machine.
 	"pool_grow": regexp.MustCompile(`(?m)^# pool_grow:$`),

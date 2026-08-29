@@ -96,17 +96,28 @@ func nextAVDName(projectName string, items []string) string {
 	}
 }
 
-// pickAVDTemplate reads the first existing AVD's config.ini to determine
-// its system image and device type.
+// pickAVDTemplate names the system image and device profile a new AVD gets:
+// those of the first AVD this machine already has, so a grown emulator
+// matches the ones beside it. A machine with no AVD at all — a fresh
+// workstation, or one whose AVDs were wiped while .wet.local.yaml still
+// lists them — gets the best installed system image instead (see
+// pickSystemImage), which is what lets `wet setup` bootstrap unattended.
 func pickAVDTemplate() (sysImage, device string, err error) {
-	// List existing AVDs
-	out, err := exec.Command("avdmanager", "list", "avd", "-c").Output()
+	avdmanager, err := androidTool("avdmanager")
+	if err != nil {
+		return "", "", err
+	}
+	out, err := exec.Command(avdmanager, "list", "avd", "-c").Output()
 	if err != nil {
 		return "", "", fmt.Errorf("avdmanager list avd: %w", err)
 	}
 	names := strings.Fields(strings.TrimSpace(string(out)))
 	if len(names) == 0 {
-		return "", "", fmt.Errorf("no existing AVDs found — create one manually first")
+		sysImage, err := pickSystemImage()
+		if err != nil {
+			return "", "", fmt.Errorf("no existing AVD to clone, and %w", err)
+		}
+		return sysImage, defaultAVDDevice, nil
 	}
 
 	// Read the first AVD's config.ini
@@ -153,13 +164,13 @@ func pickAVDTemplate() (sysImage, device string, err error) {
 	}
 	if sysImage == "" && tagId != "" && abi != "" {
 		// Fallback: construct from tag + abi
-		sysImage = fmt.Sprintf("system-images;android-36;%s;%s", tagId, abi)
+		sysImage = systemImage{Platform: defaultSystemImagePlatform, Tag: tagId, ABI: abi}.Package()
 	}
 	if sysImage == "" {
 		return "", "", fmt.Errorf("could not determine system image from %s", configPath)
 	}
 	if hwDevice == "" {
-		hwDevice = "pixel"
+		hwDevice = defaultAVDDevice
 	}
 
 	return sysImage, hwDevice, nil
