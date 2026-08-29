@@ -20,7 +20,8 @@ wet env explain [output]        # what each output contains, and where its secre
 wet env push <output> --from …  # write that output's declared secrets back to the store
 wet mobile setup                # point this checkout's dev URLs at the device you test on
 wet mobile open                 # put this worktree's emulator on screen, booting it if it is down
-wet mobile add [item]           # claim a second (third, …) device for this worktree
+wet mobile add [item]           # claim one more device for this worktree
+wet mobile ensure --count 4     # idempotently claim/boot enough devices for a 4-actor scenario
 wet mobile list                 # what devices this worktree claims, and are they up (alias: ls)
 wet mobile remove <item>        # release a device `add` claimed, and stop it
 wet mobile reverse-tcp          # adb reverse this worktree's ports onto its devices
@@ -1014,16 +1015,24 @@ wet mobile add                      # the next free item of the devices pool
 wet mobile add emulator:pixel-b     # or a specific pool item / any AVD
 wet mobile add RFCR921L4DP          # or an attached adb serial
 wet mobile add --headless           # boot the emulator without a window
+wet mobile ensure --count 4         # claim/boot/reverse until this worktree has 4 devices
 wet mobile list                     # what this worktree claims, and is it up
 wet mobile list --all --json        # every worktree, for scripts
 wet mobile remove emulator:pixel-b  # release it, and stop it
 wet mobile open --all               # put every emulator it claims on screen
 ```
 
-`add` claims the device, boots it if it is an emulator, `adb reverse`s this
+`add` claims one device, boots it if it is an emulator, `adb reverse`s this
 worktree's ports onto it, and regenerates `.env.worktree` and the declared
 outputs. So the device it prints is one you can `flutter run -d` against
 immediately.
+
+`ensure --count N` is the deterministic version for agent workflows and
+multi-actor scenarios: it counts the primary plus extras, adds only the missing
+claims, and boots/reverses every claimed device so retries heal half-booted
+emulators. It reuses free predeclared pool items before `pool_grow` creates new
+AVDs. It never shrinks the set; use `wet mobile remove` when releasing an extra
+is the goal.
 
 The claim is real, and that is the point: no other worktree's `wet setup` can
 be handed a device you added, the exhaustion message names it, `wet worktree

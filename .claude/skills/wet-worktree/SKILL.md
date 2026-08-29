@@ -105,6 +105,15 @@ If a slot is dirty or reset fails:
 cd "$WT" && wet slot rebuild --headless
 ```
 
+For multi-actor/device tasks, keep one worktree/backend/database and add devices to it. Do not create one worktree per actor. Use the deterministic WET command:
+
+```bash
+cd "$WT" && wet mobile ensure --count 4 --headless
+cd "$WT" && wet mobile list
+```
+
+`ensure` counts the primary device from setup plus extras, reuses free predeclared pool items before growing new AVDs, boots/reverses every claimed device, and is safe to re-run after a half boot.
+
 After restarting the machine, warm every claimed worktree from the main checkout:
 
 ```bash

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -45,11 +46,14 @@ func ensureEmulatorRunning(avdName string, headless bool) (string, error) {
 		return "", err
 	}
 	cmd := exec.Command(emulator, args...)
+	var emulatorOutput bytes.Buffer
+	cmd.Stdout = &emulatorOutput
+	cmd.Stderr = &emulatorOutput
 	if err := cmd.Start(); err != nil {
 		return "", fmt.Errorf("emulator start failed for %s: %w", avdName, err)
 	}
 	fmt.Printf("  Booting %s (cold boot, port %d)...\n", avdName, port)
-	if err := waitForDevice(serial, 120*time.Second); err != nil {
+	if err := waitForStartedEmulator(cmd, serial, 120*time.Second, &emulatorOutput); err != nil {
 		return "", err
 	}
 	fmt.Printf("  %s is online (%s).\n", serial, avdName)

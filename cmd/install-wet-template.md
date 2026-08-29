@@ -1,6 +1,6 @@
 ---
 name: wet
-description: "wet parallel-worktree helper: write/edit .wet.yaml configs AND boot the stack + spawn an agent team. Detects worktree context automatically. Triggers on: wet, wet.yaml, worktree create, parallel worktrees, port allocator, worktree hooks, wet outputs, wet env pull, wet env push, wet env explain, wet secrets, secrets policy, wet pr, pull request, wet mobile, wet mobile add, wet mobile open, second device, two emulators, second emulator, multiple devices, reverse-tcp, adb reverse, open emulator, show emulator, start team, spawn team, boot team, wet team."
+description: "wet parallel-worktree helper: write/edit .wet.yaml configs AND boot the stack + spawn an agent team. Detects worktree context automatically. Triggers on: wet, wet.yaml, worktree create, parallel worktrees, port allocator, worktree hooks, wet outputs, wet env pull, wet env push, wet env explain, wet secrets, secrets policy, wet pr, pull request, wet mobile, wet mobile add, wet mobile ensure, wet mobile open, second device, two emulators, four emulators, multi-actor devices, second emulator, multiple devices, reverse-tcp, adb reverse, open emulator, show emulator, start team, spawn team, boot team, wet team."
 allowed-tools: [Bash, Read, Glob]
 context: inherit
 ---
@@ -698,15 +698,20 @@ wet mobile add                      # next free item of the devices pool
 wet mobile add emulator:pixel-b     # or a named pool item / any AVD
 wet mobile add RFCR921L4DP          # or an attached adb serial
 wet mobile add --headless           # boot it without a window
+wet mobile ensure --count 4         # idempotently claim/boot/reverse four devices
 wet mobile list                     # what this worktree claims, and is it up
 wet mobile list --all --json        # every worktree, machine-readable
 wet mobile remove emulator:pixel-b  # release it and stop it
 wet mobile open --all               # put every emulator it claims on screen
 ```
 
-`add` claims the device, boots it if it is an emulator, `adb reverse`s this
+`add` claims one device, boots it if it is an emulator, `adb reverse`s this
 worktree's ports onto it, and regenerates `.env.worktree` and the outputs — so
 the handle it prints is ready for `flutter run -d <handle>` immediately.
+`ensure --count N` is the deterministic agent path: it counts the primary plus
+extras, adds only missing devices, then boots/reverses every claimed device so a
+retry heals a half-booted emulator. It reuses free predeclared pool items before
+`pool_grow` creates new AVDs.
 
 **Never spin up a second worktree for a second device.** A worktree is a
 separate stack and a separate database, so two users in two worktrees cannot
@@ -935,7 +940,7 @@ Only boot components that exist in this project. Skip sections that don't apply.
 - Android: `wet mobile reverse-tcp` first — it reverses every port this worktree was allocated onto every device it claimed. Never hand-roll `adb reverse`: without `-s` it dies with "more than one device/emulator" the moment a second worktree has a device up.
 - Launch with `flutter run -d $FLUTTER_DEVICE_ID` in background (`run_in_background: true`).
 - Confirm the app is running on the device before proceeding to Step 3.
-- If the task needs TWO devices on this one stack (a chat between two accounts, a share flow), run `wet mobile add` and launch a second `flutter run -d <the printed handle>`. Do NOT create a second worktree for it — that would be a second backend and a second database, so the two users could not see each other. `wet mobile list` shows what this worktree holds.
+- If the task needs a fixed number of devices on one stack (chat, share flow, four actors), run `wet mobile ensure --count N` and launch one `flutter run -d <handle>` per row from `wet mobile list`. Do NOT create extra worktrees for extra actors — that would create separate backends and databases, so the users could not see each other.
 
 ## Step 3 — Discover and spawn teammates
 

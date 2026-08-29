@@ -184,6 +184,40 @@ func pickAVDTemplate() (sysImage, device string, err error) {
 // kill the boot it is waiting for. A machine with no adb at all is a different
 // fact, so that one is checked once, up front. Whatever the last poll said is
 // carried into the timeout, so a genuinely broken adb still explains itself.
+func waitForStartedEmulator(cmd *exec.Cmd, serial string, timeout time.Duration, output fmt.Stringer) error {
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		select {
+		case err := <-done:
+			trimmed := strings.TrimSpace(output.String())
+			if trimmed == "" {
+				trimmed = "emulator exited without output"
+			}
+			if err != nil {
+				return fmt.Errorf("emulator process for %s exited before adb reported it online: %w\n%s", serial, err, trimmed)
+			}
+			return fmt.Errorf("emulator process for %s exited before adb reported it online\n%s", serial, trimmed)
+		default:
+		}
+		serials, err := attachedSerials()
+		lastErr = err
+		for _, s := range serials {
+			if s == serial {
+				return nil
+			}
+		}
+		time.Sleep(3 * time.Second)
+	}
+	if lastErr != nil {
+		return fmt.Errorf("timed out waiting for %s to come online (%v); last adb error: %w",
+			serial, timeout, lastErr)
+	}
+	return fmt.Errorf("timed out waiting for %s to come online (%v)", serial, timeout)
+}
+
 func waitForDevice(serial string, timeout time.Duration) error {
 	if err := requireADB(); err != nil {
 		return err

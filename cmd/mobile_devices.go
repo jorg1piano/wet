@@ -55,6 +55,25 @@ nothing that renders a single device changes.`,
 	RunE: runMobileAdd,
 }
 
+var mobileEnsureCmd = &cobra.Command{
+	Use:   "ensure --count N",
+	Short: "Ensure this worktree claims N devices",
+	Long: `Ensure this worktree has a fixed number of devices claimed, booted, and
+reversed onto its ports.
+
+  wet mobile ensure --count 4
+  wet mobile ensure -n 4 --headless
+  wet mobile ensure --count 4 --no-reverse
+
+The primary device from ` + "`wet setup`" + ` counts as one. Missing devices are added
+with the same allocator as ` + "`wet mobile add`" + `, so predeclared free pool items are
+reused before pool_grow creates new AVDs. Existing extra devices are kept; this
+command never releases devices just because the count is lower. Use
+` + "`wet mobile remove`" + ` for that explicit teardown.`,
+	Args: cobra.NoArgs,
+	RunE: runMobileEnsure,
+}
+
 var mobileRemoveCmd = &cobra.Command{
 	Use:   "remove ITEM|SERIAL",
 	Short: "Release a device this worktree added",
@@ -85,13 +104,17 @@ booted to answer.
 }
 
 var (
-	mobileAddPool       string
-	mobileAddHeadless   bool
-	mobileAddNoReverse  bool
-	mobileRemovePool    string
-	mobileRemoveKeepRun bool
-	mobileListAll       bool
-	mobileListJSON      bool
+	mobileAddPool         string
+	mobileAddHeadless     bool
+	mobileAddNoReverse    bool
+	mobileEnsureCount     int
+	mobileEnsurePool      string
+	mobileEnsureHeadless  bool
+	mobileEnsureNoReverse bool
+	mobileRemovePool      string
+	mobileRemoveKeepRun   bool
+	mobileListAll         bool
+	mobileListJSON        bool
 )
 
 func init() {
@@ -101,6 +124,14 @@ func init() {
 		"boot an emulator without a visible window")
 	mobileAddCmd.Flags().BoolVar(&mobileAddNoReverse, "no-reverse", false,
 		"claim and boot only; skip `adb reverse` for this worktree's ports")
+	mobileEnsureCmd.Flags().IntVarP(&mobileEnsureCount, "count", "n", 0,
+		"total number of devices this worktree should claim, including the primary")
+	mobileEnsureCmd.Flags().StringVar(&mobileEnsurePool, "pool", "",
+		"pool to claim from (default: `devices`, or the only pool declared)")
+	mobileEnsureCmd.Flags().BoolVar(&mobileEnsureHeadless, "headless", false,
+		"boot any added emulators without visible windows")
+	mobileEnsureCmd.Flags().BoolVar(&mobileEnsureNoReverse, "no-reverse", false,
+		"claim and boot only; skip `adb reverse` for this worktree's ports")
 	mobileRemoveCmd.Flags().StringVar(&mobileRemovePool, "pool", "",
 		"pool the item belongs to (default: search every pool)")
 	mobileRemoveCmd.Flags().BoolVar(&mobileRemoveKeepRun, "keep-running", false,
@@ -109,7 +140,7 @@ func init() {
 		"list every worktree's devices, not only this one's")
 	mobileListCmd.Flags().BoolVar(&mobileListJSON, "json", false,
 		"write the list as JSON")
-	mobileCmd.AddCommand(mobileAddCmd, mobileRemoveCmd, mobileListCmd)
+	mobileCmd.AddCommand(mobileAddCmd, mobileEnsureCmd, mobileRemoveCmd, mobileListCmd)
 }
 
 // loadConfigForDevices is loadConfigForTree with the error naming the
@@ -318,6 +349,99 @@ func runMobileAdd(cmd *cobra.Command, args []string) error {
 	fmt.Printf("\n  Added %s as %s\n", item, handle)
 	printDeviceSummary(treePath, attached)
 	fmt.Printf("  Run on it:  flutter run -d %s   (hooks: $POOL_HANDLE_%s_ALL)\n", handle, strings.ToUpper(pool))
+	return nil
+}
+
+// --- ensure ---
+
+func runMobileEnsure(cmd *cobra.Command, args []string) error {
+	if mobileEnsureCount < 1 {
+		return fmt.Errorf("--count must be at least 1 (the primary device from `wet setup` counts as one)")
+	}
+	cfg, treePath, repoRoot, err := loadConfigForDevices("wet mobile ensure")
+	if err != nil {
+		return err
+	}
+	pool, err := devicePoolName(cfg, mobileEnsurePool)
+	if err != nil {
+		return err
+	}
+	if err := requireADB(); err != nil {
+		return err
+	}
+	attached, err := attachedSet()
+	if err != nil {
+		return err
+	}
+	localRoot := LocalConfigDir(treePath, repoRoot)
+
+	var branch string
+	var added []string
+	var claims []string
+	if err := withStateLock(func() error {
+		state, err := loadConfig()
+		if err != nil {
+			return fmt.Errorf("load wet state: %w", err)
+		}
+		own := worktreeStateForPath(state, treePath)
+		if own == nil {
+			return fmt.Errorf("no wet state for %s — run `wet setup` first; it claims the primary device", treePath)
+		}
+		branch = own.Branch
+		current := len(own.poolClaims(pool))
+		if own.PoolExtras == nil {
+			own.PoolExtras = map[string][]string{}
+		}
+		for current < mobileEnsureCount {
+			item, err := allocatePoolItem(cfg, pool, state.Worktrees, localRoot, mobileEnsureHeadless)
+			if err != nil {
+				return err
+			}
+			own.PoolExtras[pool] = append(own.PoolExtras[pool], item)
+			added = append(added, item)
+			current++
+		}
+		claims = append([]string{}, own.poolClaims(pool)...)
+		if len(added) == 0 {
+			return nil
+		}
+		return saveConfig(state)
+	}); err != nil {
+		return err
+	}
+
+	if len(added) == 0 {
+		fmt.Printf("  Already claimed %d devices for %s; checking boot/reverse on all of them\n", len(claims), branch)
+	} else {
+		fmt.Printf("  Ensuring %d devices for %s: added %s\n", mobileEnsureCount, branch, strings.Join(added, ", "))
+	}
+
+	alloc, err := readWorktreeAllocation(cfg, treePath)
+	if err != nil {
+		return err
+	}
+	for _, item := range claims {
+		handle, err := resolveItemHandle(item, mobileEnsureHeadless)
+		if err != nil {
+			return fmt.Errorf("%w\n  The claim is recorded. Fix the cause and re-run `wet mobile ensure --count %d`, or release extras with `wet mobile remove ITEM`", err, mobileEnsureCount)
+		}
+		if mobileEnsureNoReverse {
+			fmt.Printf("  %s is %s; reverses skipped (--no-reverse)\n", item, handle)
+			continue
+		}
+		if len(alloc.Ports) == 0 {
+			fmt.Println("  No allocated ports to reverse — declare ports: in .wet.yaml and run `wet setup`.")
+			continue
+		}
+		fmt.Printf("  Reversing this worktree's ports onto %s:\n", handle)
+		if err := reversePorts(handle, alloc.Ports, false); err != nil {
+			return fmt.Errorf("%w\n  The device is claimed and up; re-run `wet mobile ensure --count %d` once adb answers", err, mobileEnsureCount)
+		}
+	}
+
+	regenerateAfterClaimChange(cfg, treePath, repoRoot)
+	attached, _ = attachedSet()
+	printDeviceSummary(treePath, attached)
 	return nil
 }
 
