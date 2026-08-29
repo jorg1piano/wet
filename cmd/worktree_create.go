@@ -26,9 +26,9 @@ port allocation, template rendering, or hook execution. Run
 ` + "`wet worktree setup`" + ` from inside the new worktree to perform the full
 configuration step.
 
-Pass ` + "`--no-tmux`" + ` to skip opening a tmux window — useful when a
-higher-level orchestrator (e.g. the Claude ` + "`/team`" + ` flow) manages
-sessions itself and doesn't want a stray window spawned.
+Pass ` + "`--no-multiplexer`" + ` to skip opening a configured terminal
+multiplexer window — useful when a higher-level orchestrator manages sessions
+itself. ` + "`--no-tmux`" + ` is kept as a backward-compatible alias.
 
 Pass ` + "`--json`" + ` to write the created branch, its worktree path, and
 the base ref it branched from as JSON. Progress is written to stderr in this
@@ -43,7 +43,8 @@ var (
 )
 
 func init() {
-	worktreeCreateCmd.Flags().BoolVar(&worktreeCreateNoTmux, "no-tmux", false, "don't open a new tmux window after creating the worktree")
+	worktreeCreateCmd.Flags().BoolVar(&worktreeCreateNoTmux, "no-multiplexer", false, "don't open a new terminal multiplexer window after creating the worktree")
+	worktreeCreateCmd.Flags().BoolVar(&worktreeCreateNoTmux, "no-tmux", false, "deprecated alias for --no-multiplexer")
 	worktreeCreateCmd.Flags().BoolVar(&worktreeCreateJSON, "json", false, "output the created worktree as JSON")
 	worktreeCmd.AddCommand(worktreeCreateCmd)
 }
@@ -172,7 +173,7 @@ type worktreeCreateResult struct {
 //  2. Runs `git worktree add -b <branch> ../worktree-<branch>`.
 //  3. Copies `.env` from the main repo root if present (single-file copy,
 //     no config lookup, no templating).
-//  4. Opens a tmux window named <branch> when inside tmux (unless noTmux).
+//  4. Opens a configured multiplexer window (unless noTmux).
 //
 // No .wet.yaml load, no port allocation, no state file write, no hooks. Run
 // `wet worktree setup` from inside the new worktree to configure the rest.
@@ -265,11 +266,10 @@ func worktreePathFor(repoRoot, branchName string) string {
 
 // postWorktreeAdd runs the shared steps after `git worktree add` succeeds,
 // for both `create` and `mount`: copy `.env` from the main repo root (if
-// present), open a tmux window when inside tmux (unless noTmux), and print
+// present), open a configured multiplexer window (unless noTmux), and print
 // the next-step hint. `label` is the past-tense verb used in the success
-// line ("Created" or "Mounted"). `noTmux` suppresses the tmux window — used
-// by orchestrators (e.g. the Claude `/team` flow) that manage sessions
-// themselves.
+// line ("Created" or "Mounted"). `noTmux` suppresses that window — used by
+// orchestrators that manage sessions themselves.
 func postWorktreeAdd(repoRoot, worktreePath, branchName, label string, noTmux bool) error {
 	return postWorktreeAddWithWriter(repoRoot, worktreePath, branchName, label, noTmux, os.Stdout)
 }
@@ -286,17 +286,37 @@ func postWorktreeAddWithWriter(repoRoot, worktreePath, branchName, label string,
 
 	fmt.Fprintf(out, "\n  %s worktree '%s' at %s\n", label, branchName, worktreePath)
 
-	if !noTmux && os.Getenv("TMUX") != "" {
+	if !noTmux {
+		openMultiplexerWindow(repoRoot, worktreePath, branchName, out)
+	}
+
+	fmt.Fprintf(out, "\n  Next: cd %s && wet worktree setup\n", worktreePath)
+	return nil
+}
+
+func openMultiplexerWindow(repoRoot, worktreePath, branchName string, out io.Writer) {
+	multiplexer := "tmux"
+	if cfg, err := LoadWetConfig(repoRoot); err == nil && cfg.Multiplexer != "" {
+		multiplexer = cfg.Multiplexer
+	}
+	switch multiplexer {
+	case "none":
+		return
+	case "tmux":
+		if os.Getenv("TMUX") == "" {
+			return
+		}
 		tmuxCmd := exec.Command("tmux", "new-window", "-n", branchName, "-c", worktreePath)
 		if err := tmuxCmd.Run(); err != nil {
 			fmt.Fprintf(out, "  Warning: could not open tmux window: %v\n", err)
 		} else {
 			fmt.Fprintf(out, "  Opened in new tmux window '%s'\n", branchName)
 		}
+	default:
+		// LoadWetConfig validates known values; this fallback keeps create/mount
+		// non-fatal if config loading was unavailable above.
+		return
 	}
-
-	fmt.Fprintf(out, "\n  Next: cd %s && wet worktree setup\n", worktreePath)
-	return nil
 }
 
 // printSetupHookFailure writes a multi-line recovery block to stderr when a

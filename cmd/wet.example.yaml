@@ -31,6 +31,15 @@ project_name: myapp
 # wet refuses to open a PR from. Optional; defaults to "main".
 main_branch: main
 
+# Optional. What `wet worktree create` / `wet worktree mount` should open after
+# adding the checkout. Valid values: `tmux` (default) or `none`. Put
+# `multiplexer: none` in .wet.local.yaml when another tool like Herdr manages
+# panes/tabs for you.
+multiplexer: tmux
+# After a reboot, warm every currently claimed worktree with:
+#   wet slot warm --all --headless
+# Add --reset when you also want each slot cleaned before it starts.
+
 # ---------------------------------------------------------------------------
 # Files copied into each new worktree
 # ---------------------------------------------------------------------------
@@ -99,6 +108,14 @@ ports:
   - name: DEBUG_PORT
     base: 40000
     stride: 5 # per-port override of port_stride
+
+# Optional. Normal wet setup skips slots whose host ports are already bound,
+# catching stale untracked stacks before Docker reports "port is allocated".
+# Set slot_pool when released slots intentionally keep warm resources bound to
+# their ports — for example a DB container/volume that survives worktree pop.
+# Then the state file, not host-port probing, decides which slot is free, and
+# your `hooks.slot_reset` must clean/verify the warm resource before use.
+slot_pool: false
 
 # ---------------------------------------------------------------------------
 # Pools — exclusive resources, one item per worktree
@@ -529,25 +546,49 @@ outputs:
 
 hooks:
   post_create:
-    # `outputs:` above already covers env files — hooks are for actions.
-    - echo "slot {{.Slot}} ready at {{.APP_URL}}"
-    - docker compose up -d
-    # An Android app talks to localhost, and on a device that IS the device.
-    # This points the claimed device's localhost back at this worktree's ports,
-    # so the app finds the stack the hook above just booted. It reads the ports
-    # from the hook environment, so it is correct on every slot without naming
-    # one, and it re-runs safely — after a reboot, or by hand, whenever the
-    # device drops its forwards. It covers every device this worktree claims,
-    # so a second one added with `wet mobile add` needs no extra line.
+    # `outputs:` above already covers env files — hooks are for actions that
+    # are safe every time `wet setup` is re-run.
+    - echo "slot {{.Slot}} allocated at {{.APP_URL}}"
+
+  # Slot lifecycle hooks are run explicitly with `wet slot <verb>`. They are
+  # for projects that keep expensive resources warm per slot: a DB container,
+  # an emulator, a fixture checkout, etc. wet owns the slot/device/port
+  # bookkeeping; the project defines what "clean", "started" and "rebuilt"
+  # mean for its stack.
+  slot_reset:
+    # Reset reusable state here: drop/recreate the DB schema, uninstall the
+    # Android app from the claimed emulator, restore fixtures, re-apply adb
+    # reverses. Run on acquire/start, not on release, so a failed cleanup can
+    # be fixed before the next task uses the slot.
+    # - ./scripts/reset-db-schema.sh
+    # - 'adb -s "$POOL_HANDLE_DEVICES" uninstall com.example.app >/dev/null 2>&1 || true'
     # - wet mobile reverse-tcp
 
-  pre_remove:
+  slot_start:
+    # Start this checkout's runtime. If a container bind-mounts the worktree,
+    # recreate that container when a slot moves to a different branch.
+    - docker compose up -d
+
+  slot_stop:
+    # Stop worktree-specific runtime while keeping warm slot resources alive.
+    - docker compose stop || true
+
+  slot_rebuild:
+    # Slow-path recovery for a dirty slot.
     - docker compose down -v
+    - docker compose up -d
+
+  slot_doctor:
+    - docker compose ps
+
+  pre_remove:
+    # Release-time teardown. Keep this small: with pooled slots, prefer
+    # `slot_stop` for runtime shutdown and `slot_reset` before the next use.
+    - docker compose stop || true
     # - ./scripts/release-device.sh "$POOL_DEVICES" # the item, e.g. emulator:pixel-a
     #
-    # Stopping a claimed emulator is a project decision, so it lives here and
-    # not in wet. Loop over the _ALL form rather than killing $POOL_DEVICES
-    # alone, or the devices `wet mobile add` booted keep running after the pop:
+    # Stopping a claimed emulator is a project decision. In a warm slot pool,
+    # leave it running and uninstall the app in `slot_reset` instead.
     # - 'for h in $POOL_HANDLE_DEVICES_ALL; do case "$h" in emulator-*) adb -s "$h" emu kill ;; esac; done; true'
 
 # ---------------------------------------------------------------------------

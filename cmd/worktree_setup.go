@@ -216,10 +216,16 @@ func runSetupCore(repoRoot, worktreePath, branchName string, headless, isMain bo
 			// see those ports busy and reassign it to a different slot.
 			slot = state.Worktrees[existingIdx].Index
 		default:
-			// New worktree: the lowest slot whose ports are both unclaimed in
-			// the state file AND actually free on the host, so we never
-			// collide with a stack the state file doesn't track.
-			slot = cfg.NextFreeSlotWithFreePorts(used)
+			// New worktree: normally require both an unclaimed state slot and
+			// free host ports. A slot pool intentionally leaves warm resources
+			// (usually the DB container) bound after release, so in that mode
+			// the state file is the authority and the project's slot_reset hook
+			// is responsible for proving the reused resources are sane.
+			if cfg.SlotPool {
+				slot = NextFreeSlot(used)
+			} else {
+				slot = cfg.NextFreeSlotWithFreePorts(used)
+			}
 		}
 
 		// A re-run keeps what this worktree already holds: its primary picks

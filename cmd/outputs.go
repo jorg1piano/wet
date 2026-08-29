@@ -350,7 +350,7 @@ func (c *WetConfig) UnusedSecrets() []string {
 	// A hook body is shell, so the honest test is a substring match: wet
 	// cannot parse it, and a false "used" is far better than telling someone
 	// to delete a credential their post_create depends on.
-	hooks := strings.Join(append(append([]string{}, c.Hooks.PostCreate...), c.Hooks.PreRemove...), "\n")
+	hooks := strings.Join(allHookBodies(c.Hooks), "\n")
 
 	var unused []string
 	for _, name := range sortedKeys(c.Secrets.Definitions) {

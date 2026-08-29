@@ -30,6 +30,15 @@ type WetConfig struct {
 	Copy        CopyConfig   `yaml:"copy"`
 	PortStride  int          `yaml:"port_stride"`
 	Ports       []PortConfig `yaml:"ports"`
+	// SlotPool lets released slots keep warm resources bound to their ports
+	// (for example a reusable DB container). New worktrees then reuse the
+	// lowest unclaimed slot from the state file without rejecting it just
+	// because one of its own warm resources is still listening.
+	SlotPool bool `yaml:"slot_pool,omitempty"`
+	// Multiplexer controls whether worktree create/mount opens an extra terminal
+	// multiplexer window. It belongs in .wet.local.yaml when it is personal:
+	// one developer may want tmux, another may use Herdr and want none.
+	Multiplexer string `yaml:"multiplexer,omitempty"`
 
 	// PortCluster shifts every declared base clear of another clone of this
 	// repo on the same machine. Slots spread ports out *within* a checkout;
@@ -310,8 +319,13 @@ type PortConfig struct {
 
 // HooksConfig lists shell commands to run around worktree lifecycle events.
 type HooksConfig struct {
-	PostCreate []string `yaml:"post_create,omitempty"`
-	PreRemove  []string `yaml:"pre_remove,omitempty"`
+	PostCreate  []string `yaml:"post_create,omitempty"`
+	PreRemove   []string `yaml:"pre_remove,omitempty"`
+	SlotReset   []string `yaml:"slot_reset,omitempty"`
+	SlotStart   []string `yaml:"slot_start,omitempty"`
+	SlotStop    []string `yaml:"slot_stop,omitempty"`
+	SlotRebuild []string `yaml:"slot_rebuild,omitempty"`
+	SlotDoctor  []string `yaml:"slot_doctor,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -875,6 +889,9 @@ func (c *WetConfig) Validate() error {
 	if err := c.validateOutputs(); err != nil {
 		return err
 	}
+	if c.Multiplexer != "" && c.Multiplexer != "tmux" && c.Multiplexer != "none" {
+		return fmt.Errorf("multiplexer %q is not supported (known: tmux, none)", c.Multiplexer)
+	}
 
 	// Parse env templates eagerly so syntax errors fail at load, not at apply.
 	for key, tmpl := range c.Env {
@@ -892,14 +909,20 @@ func (c *WetConfig) Validate() error {
 		}
 	}
 
-	for i, cmd := range c.Hooks.PostCreate {
-		if _, err := template.New(fmt.Sprintf("hooks.post_create[%d]", i)).Parse(cmd); err != nil {
-			return fmt.Errorf("hooks.post_create[%d]: %w", i, err)
-		}
+	hookSets := map[string][]string{
+		"post_create":  c.Hooks.PostCreate,
+		"pre_remove":   c.Hooks.PreRemove,
+		"slot_reset":   c.Hooks.SlotReset,
+		"slot_start":   c.Hooks.SlotStart,
+		"slot_stop":    c.Hooks.SlotStop,
+		"slot_rebuild": c.Hooks.SlotRebuild,
+		"slot_doctor":  c.Hooks.SlotDoctor,
 	}
-	for i, cmd := range c.Hooks.PreRemove {
-		if _, err := template.New(fmt.Sprintf("hooks.pre_remove[%d]", i)).Parse(cmd); err != nil {
-			return fmt.Errorf("hooks.pre_remove[%d]: %w", i, err)
+	for name, hooks := range hookSets {
+		for i, cmd := range hooks {
+			if _, err := template.New(fmt.Sprintf("hooks.%s[%d]", name, i)).Parse(cmd); err != nil {
+				return fmt.Errorf("hooks.%s[%d]: %w", name, i, err)
+			}
 		}
 	}
 	return nil
@@ -1108,6 +1131,18 @@ func sortedKeys[V any](m map[string]V) []string {
 		out = append(out, k)
 	}
 	sort.Strings(out)
+	return out
+}
+
+func allHookBodies(h HooksConfig) []string {
+	var out []string
+	out = append(out, h.PostCreate...)
+	out = append(out, h.PreRemove...)
+	out = append(out, h.SlotReset...)
+	out = append(out, h.SlotStart...)
+	out = append(out, h.SlotStop...)
+	out = append(out, h.SlotRebuild...)
+	out = append(out, h.SlotDoctor...)
 	return out
 }
 

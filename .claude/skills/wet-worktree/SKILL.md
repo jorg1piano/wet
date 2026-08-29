@@ -1,44 +1,73 @@
 ---
 name: wet-worktree
-description: Create and manage wet worktrees with claimed slots. Use when the user asks to create a worktree, start work on X in parallel, spin up a branch, fix X in a new worktree, or implies new work should happen away from main.
+description: Create and manage wet worktrees with claimed slots, preferably in a separate Herdr worktree workspace. Use when the user asks to create a worktree, start work on X in parallel, spin up a branch, fix X in a new worktree, or implies new work should happen away from main.
 ---
 
 # wet worktree companion
 
-When the user asks to start a new worktree, assume the default is: **create a git worktree, claim a wet slot, reset/start the slot if configured, then work from that worktree path while managing it from the current/main checkout.**
+When the user asks to start a new worktree, assume the default is: **create a git worktree, claim a wet slot, open it as its own Herdr worktree workspace when Herdr is available, and run the implementation there — not inline in main.**
 
 ## Rules
 
 - Do not edit the main checkout for the requested feature/fix unless explicitly asked.
-- Do not use tmux by default; pass `--no-tmux` and manage the worktree with `cd <path> && ...` commands.
-- Run `wet setup` in the new worktree; that is what claims the slot, ports, env files, and pools.
-- If `.wet.yaml` declares slot lifecycle hooks, run `wet slot reset` before `wet slot start`.
-- Keep reporting the worktree path and slot-oriented commands clearly.
+- Use `wet worktree create <slug> --no-multiplexer --json` from the repo root.
+- Run `wet setup` in the new worktree; that claims the slot, ports, env files, and pools.
+- If slot lifecycle hooks exist, run `wet slot reset --headless` before `wet slot start --headless`.
+- If Herdr is available, open the worktree with `herdr worktree open` and start the agent there; do not continue the feature work inline in the main pane.
 
-## New worktree flow
+## Preferred Herdr flow
 
-1. From the repo root, choose a short branch slug from the task:
-
-   ```bash
-   wet worktree create <slug> --no-tmux --json
-   ```
-
-2. Read the JSON output and use its `path` for all further commands.
-
-3. Claim/configure the slot:
+1. Create the worktree:
 
    ```bash
-   cd <path> && wet setup --headless
+   wet worktree create <slug> --no-multiplexer --json
    ```
 
-4. If slot hooks exist in `.wet.yaml`, prepare the runtime:
+2. Parse the JSON `path` as `$WT`.
+
+3. Open it as a Herdr worktree workspace, nested under the repo. Prefer `--cwd` + `--branch`; `--path` can resolve against the wrong Herdr source workspace when the controlling pane is not the repo workspace.
 
    ```bash
-   cd <path> && wet slot reset --headless
-   cd <path> && wet slot start --headless
+   herdr worktree open --cwd "$REPO_ROOT" --path "$WT" --branch "<slug>" --label "<slug>" --no-focus
    ```
 
-5. Do the user’s requested implementation from `<path>`, not from main.
+4. Parse the returned `workspace_id`, then find its pane:
+
+   ```bash
+   herdr pane list --workspace "<workspace_id>"
+   ```
+
+5. Run setup/reset/start in that pane so progress is visible there:
+
+   ```bash
+   herdr pane run "<pane_id>" 'wet setup --headless && wet slot reset --headless && wet slot start --headless'
+   herdr pane wait-output "<pane_id>" --regex '(?i)slot .* start complete|worktree configured|hook failed|slot hook failed' --timeout 900000
+   ```
+
+6. Start the agent in that pane and submit the user’s task verbatim:
+
+   ```bash
+   herdr agent start "<slug>" --kind <Claude-or-Codex> --pane "<pane_id>"
+   herdr agent prompt "<slug>" "<user task verbatim>
+
+   Work only in this worktree: $WT.
+   The repo root is $WT; if your shell cwd drifts into a subdirectory, cd back to $WT before running root-relative commands.
+   When done, run the relevant checks/formatters and commit the branch. Do not report done with a dirty worktree."
+   ```
+
+7. Report back with branch, path, and that it is running in the background. If screenshots or other artifacts are part of the user request, include that requirement verbatim in the agent prompt and require absolute paths in the final report.
+
+## Fallback when Herdr is unavailable
+
+If `herdr` is not on PATH, create/configure the worktree and then work from that path:
+
+```bash
+cd "$WT" && wet setup --headless
+cd "$WT" && wet slot reset --headless
+cd "$WT" && wet slot start --headless
+```
+
+Do not use tmux; `--no-multiplexer` already prevented wet from opening one.
 
 ## Detecting slot hooks
 
@@ -53,28 +82,26 @@ hooks:
   slot_doctor:
 ```
 
-If absent, do not invent lifecycle commands; rely on the repo’s existing `post_create`/`pre_remove` behavior.
+If absent, skip `wet slot reset/start` and rely on the repo’s existing `post_create` behavior.
 
 ## Useful commands
 
 ```bash
-cd <path> && wet slot doctor --headless
-cd <path> && wet slot stop --headless
-cd <path> && wet worktree pop
+cd "$WT" && wet slot doctor --headless
+cd "$WT" && wet slot stop --headless
+cd "$WT" && wet worktree pop
 ```
 
 If a slot is dirty or reset fails:
 
 ```bash
-cd <path> && wet slot rebuild --headless
+cd "$WT" && wet slot rebuild --headless
 ```
 
-## Completion
+After restarting the machine, warm every claimed worktree from the main checkout:
 
-When done, summarize:
+```bash
+wet slot warm --all --headless
+```
 
-- branch name
-- worktree path
-- slot number, if visible in `wet setup` output
-- whether `wet slot reset/start` ran
-- next command for the user, usually `cd <path>` or `wet worktree pop`
+Use `wet slot warm --all --headless --reset` only when you also want every claimed slot cleaned before startup.

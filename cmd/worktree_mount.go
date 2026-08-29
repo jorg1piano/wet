@@ -25,8 +25,9 @@ tmux window when inside tmux. Run ` + "`wet worktree setup`" + ` from inside the
 worktree to perform the ` + "`.wet.yaml`" + `-driven configuration step (port
 allocation, file copy list, hooks).
 
-Pass ` + "`--no-tmux`" + ` to skip opening a tmux window when an orchestrator
-is managing sessions itself.`,
+Pass ` + "`--no-multiplexer`" + ` to skip opening a configured terminal
+multiplexer window when an orchestrator is managing sessions itself.
+` + "`--no-tmux`" + ` is kept as a backward-compatible alias.`,
 	Args: cobra.ExactArgs(1),
 	RunE: runWorktreeMount,
 }
@@ -34,7 +35,8 @@ is managing sessions itself.`,
 var worktreeMountNoTmux bool
 
 func init() {
-	worktreeMountCmd.Flags().BoolVar(&worktreeMountNoTmux, "no-tmux", false, "don't open a new tmux window after mounting the worktree")
+	worktreeMountCmd.Flags().BoolVar(&worktreeMountNoTmux, "no-multiplexer", false, "don't open a new terminal multiplexer window after mounting the worktree")
+	worktreeMountCmd.Flags().BoolVar(&worktreeMountNoTmux, "no-tmux", false, "deprecated alias for --no-multiplexer")
 	worktreeCmd.AddCommand(worktreeMountCmd)
 }
 

@@ -19,6 +19,7 @@ wet env pull [output]           # regenerate the env files declared under output
 wet env explain [output]        # what each output contains, and where its secrets live
 wet env push <output> --from …  # write that output's declared secrets back to the store
 wet mobile setup                # point this checkout's dev URLs at the device you test on
+wet mobile open                 # put this worktree's emulator on screen, booting it if it is down
 wet mobile add [item]           # claim a second (third, …) device for this worktree
 wet mobile list                 # what devices this worktree claims, and are they up (alias: ls)
 wet mobile remove <item>        # release a device `add` claimed, and stop it
@@ -968,6 +969,38 @@ they are a bonus for anything still dialling localhost and a failure is only
 reported. Reach for `wet mobile reverse-tcp` when the ports change without the
 device changing, in a hook, or for a serial wet knows nothing about.
 
+## Seeing the emulator with `wet mobile open`
+
+A worktree's emulator is addressed by its serial from the moment `wet setup`
+claims it, which is all `flutter run -d` and `adb -s` need. Looking at it is a
+separate question: with eight AVDs up, the window you want is the one running
+this worktree's AVD, and if the emulator is stopped there is no window at all.
+
+```
+wet mobile open                     # the primary device of the devices pool
+wet mobile open emulator:pixel-b    # one claim, by item or by serial
+wet mobile open --all               # every emulator this worktree claims
+wet mobile open --restart           # reboot a headless emulator so it gets a window
+```
+
+A stopped emulator is booted with a window, the opposite of `--headless`, and
+this worktree's ports are reversed onto it, so the app on it reaches this
+worktree's stack straight away. One that is already up is only raised: its
+state and its reverses are untouched.
+
+The window is raised through macOS Accessibility, so the terminal running
+`wet` needs to be allowed under System Settings > Privacy & Security >
+Accessibility. Elsewhere the boot still happens and the raise reports that you
+have to switch windows yourself.
+
+A window cannot be attached to a live emulator, so one booted with
+`--headless` has to be restarted to get one. `--restart` does that, and it is
+opt-in because it costs whatever the emulator was holding.
+
+The device named has to be one this worktree claims. Opening any other AVD
+would put another worktree's device on screen, and print a serial this one must
+not run against.
+
 ## Several devices on one worktree
 
 Some work needs two phones on one backend: a chat between two accounts, a
@@ -984,6 +1017,7 @@ wet mobile add --headless           # boot the emulator without a window
 wet mobile list                     # what this worktree claims, and is it up
 wet mobile list --all --json        # every worktree, for scripts
 wet mobile remove emulator:pixel-b  # release it, and stop it
+wet mobile open --all               # put every emulator it claims on screen
 ```
 
 `add` claims the device, boots it if it is an emulator, `adb reverse`s this
