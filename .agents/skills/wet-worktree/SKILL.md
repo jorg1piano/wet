@@ -48,9 +48,9 @@ When the user asks to start a new worktree, assume the default is: **create a gi
    herdr pane wait-output "<pane_id>" --regex '(?i)slot .* start complete|worktree configured|hook failed|slot hook failed' --timeout 900000
    ```
 
-   Do not replace `herdr pane wait-output` with a hand-written sleep/poll loop. If the wait command itself times out, immediately read the pane. If the pane shows `Slot N start complete` and is back at a shell prompt, treat bootstrap as successful and continue to `herdr agent start`/`herdr agent prompt`; do not abandon a ready worktree because the watcher missed the line. If the pane is still booting, report that and leave the claim held. If it shows an error, stop before starting the agent.
+   Do not replace `herdr pane wait-output` with a hand-written sleep/poll loop, and do not park the orchestrator in a long `sleep`/poll Bash command that prevents it from handling the next user message. If the pane shows `Slot N start complete` and is back at a shell prompt, treat bootstrap as successful and continue to `herdr agent start`/`herdr agent prompt`; do not abandon a ready worktree because the watcher missed the line. If the pane is still booting, report that and leave the claim held. If it shows an error, stop before starting the agent.
 
-   After bootstrap succeeds, starting and prompting the worktree agent is part of the same orchestration step. Do it before accepting or working on another user request. A created/opened/bootstrapped Herdr worktree with no `herdr agent start` and no `herdr agent prompt` means the user's work has not started.
+   After bootstrap succeeds, starting and prompting the worktree agent is part of the same orchestration step. Do it before accepting or working on another user request. A created/opened/bootstrapped Herdr worktree with no `herdr agent start` and no `herdr agent prompt` means the user's work has not started. If another user message arrives that refers to updating that agent, but no agent exists yet, start the agent first and deliver both the original prompt and the update.
 
 6. Start the agent in that pane and submit the user’s task verbatim:
 
