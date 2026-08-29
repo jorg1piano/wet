@@ -48,6 +48,10 @@ When the user asks to start a new worktree, assume the default is: **create a gi
    herdr pane wait-output "<pane_id>" --regex '(?i)slot .* start complete|worktree configured|hook failed|slot hook failed' --timeout 900000
    ```
 
+   Do not replace `herdr pane wait-output` with a hand-written sleep/poll loop. If the wait command itself times out, immediately read the pane. If the pane shows `Slot N start complete` and is back at a shell prompt, treat bootstrap as successful and continue to `herdr agent start`/`herdr agent prompt`; do not abandon a ready worktree because the watcher missed the line. If the pane is still booting, report that and leave the claim held. If it shows an error, stop before starting the agent.
+
+   After bootstrap succeeds, starting and prompting the worktree agent is part of the same orchestration step. Do it before accepting or working on another user request. A created/opened/bootstrapped Herdr worktree with no `herdr agent start` and no `herdr agent prompt` means the user's work has not started.
+
 6. Start the agent in that pane and submit the user’s task verbatim:
 
    ```bash
@@ -59,6 +63,10 @@ When the user asks to start a new worktree, assume the default is: **create a gi
    The repo root is $WT; if your shell cwd drifts into a subdirectory, cd back to $WT before running root-relative commands.
    When done, run the relevant checks/formatters and commit the branch. Do not report done with a dirty worktree."
    ```
+
+If the user prompt depends on a design/MCP asset that the orchestrator cannot read because authentication is missing, do not delay or skip agent startup. Include the design URL/file names and the exact auth failure in the prompt, and tell the worktree agent to proceed once the user authorizes the design tool or to ask for the missing assets. Missing design auth is not a reason to leave a bootstrapped worktree idle.
+
+After `herdr agent prompt`, verify the agent actually started: `herdr agent list` should show the branch as `working`, or `herdr pane read` should show Claude responding. If it is still `idle` with the prompt sitting in Claude's input area, send one Enter to the pane and verify again. Do not report that the work is running until the prompt has been submitted and the agent has begun responding.
 
 7. Report back with branch, path, and that it is running in the background. If screenshots or other artifacts are part of the user request, include that requirement verbatim in the agent prompt and require absolute paths in the final report.
 
