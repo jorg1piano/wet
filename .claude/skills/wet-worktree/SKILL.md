@@ -14,6 +14,7 @@ When the user asks to start a new worktree, assume the default is: **create a gi
 - Run `wet setup` in the new worktree; that claims the slot, ports, env files, and pools.
 - If slot lifecycle hooks exist, run `wet slot reset --headless` before `wet slot start --headless`.
 - If Herdr is available, open the worktree with `herdr worktree open` and start the agent there; do not continue the feature work inline in the main pane.
+- Do not run `wet setup`, `wet worktree setup`, `just setup`, or slot hooks in the orchestrator/main pane. Open the Herdr worktree workspace first; then bootstrap inside its pane.
 
 ## Preferred Herdr flow
 
@@ -37,7 +38,7 @@ When the user asks to start a new worktree, assume the default is: **create a gi
    herdr pane list --workspace "<workspace_id>"
    ```
 
-5. Run setup/reset/start in that pane so progress is visible there:
+5. Run setup/reset/start in that pane so progress is visible there. This is mandatory; running setup inline from the main/orchestrator pane creates a claimed worktree without a nested Herdr workspace and hides long-running boot output from the user.
 
    ```bash
    herdr pane run "<pane_id>" 'wet setup --headless && wet slot reset --headless && wet slot start --headless'

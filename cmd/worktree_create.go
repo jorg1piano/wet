@@ -290,7 +290,12 @@ func postWorktreeAddWithWriter(repoRoot, worktreePath, branchName, label string,
 		openMultiplexerWindow(repoRoot, worktreePath, branchName, out)
 	}
 
-	fmt.Fprintf(out, "\n  Next: cd %s && wet worktree setup\n", worktreePath)
+	fmt.Fprintf(out, "\n  Next:\n")
+	fmt.Fprintf(out, "    Herdr: herdr worktree open --cwd %s --path %s --label %s --no-focus\n", repoRoot, worktreePath, branchName)
+	fmt.Fprintf(out, "           then run in that pane: wet setup --headless && wet slot reset --headless && wet slot start --headless\n")
+	fmt.Fprintf(out, "    Shell: cd %s && wet setup --headless\n", worktreePath)
+	fmt.Fprintf(out, "           then, if configured: wet slot reset --headless && wet slot start --headless\n")
+	return nil
 	return nil
 }
 
