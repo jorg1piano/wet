@@ -25,10 +25,10 @@ When the user asks to start a new worktree, assume the default is: **create a gi
 
 2. Parse the JSON `path` as `$WT`.
 
-3. Open it as a Herdr worktree workspace, nested under the repo. Prefer `--cwd` + `--branch`; `--path` can resolve against the wrong Herdr source workspace when the controlling pane is not the repo workspace.
+3. Open it as a Herdr worktree workspace, nested under the repo. Prefer `--cwd` + `--path`; `--path` without `--cwd` can resolve against the wrong Herdr source workspace when the controlling pane is not the repo workspace. Do not pass both `--path` and `--branch`; Herdr accepts exactly one selector.
 
    ```bash
-   herdr worktree open --cwd "$REPO_ROOT" --path "$WT" --branch "<slug>" --label "<slug>" --no-focus
+   herdr worktree open --cwd "$REPO_ROOT" --path "$WT" --label "<slug>" --no-focus
    ```
 
 4. Parse the returned `workspace_id`, then find its pane:
