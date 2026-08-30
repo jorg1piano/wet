@@ -1018,6 +1018,67 @@ func TestUnnamedDestinationFallsBack(t *testing.T) {
 	}
 }
 
+func TestEnvFileStoreReadsSecretsFromMainBranchEnv(t *testing.T) {
+	git := func(dir string, args ...string) {
+		t.Helper()
+		out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	base := t.TempDir()
+	main := filepath.Join(base, "main")
+	worktree := filepath.Join(base, "feature")
+	if err := os.MkdirAll(main, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	git(main, "init", "-q", "-b", "main")
+	git(main, "config", "user.email", "t@t")
+	git(main, "config", "user.name", "t")
+	cfgBody := `project_name: app
+ports:
+  - { name: PHX_PORT, base: 4000 }
+secrets:
+  store: env_file
+  policy: required
+  definitions:
+    SECRET_KEY_BASE:
+      field: secret_key_base
+    GOOGLE_CLIENT_ID:
+      ref: envfile://GOOGLE_CLIENT_ID
+outputs:
+  - name: backend
+    out: backend/.env.dev
+    format: dotenv
+    secrets: [SECRET_KEY_BASE, GOOGLE_CLIENT_ID]
+`
+	if err := os.WriteFile(filepath.Join(main, wetConfigFileName), []byte(cfgBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(main, ".env"), []byte("SECRET_KEY_BASE=from-main\nGOOGLE_CLIENT_ID=google-main\nNOT_SELECTED=ignored\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	git(main, "add", wetConfigFileName)
+	git(main, "commit", "-qm", "cfg")
+	git(main, "worktree", "add", "-q", "-b", "feature/x", worktree, "main")
+
+	cfg, err := LoadWetConfig(worktree)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	_, log, err := pullInto(t, PullRequest{Cfg: cfg, TreePath: worktree, Data: worktreeData(t, cfg, 1, nil)})
+	if err != nil {
+		t.Fatalf("pull: %v", err)
+	}
+	got := readOutput(t, worktree, "backend/.env.dev")
+	if !strings.Contains(got, "SECRET_KEY_BASE=from-main") || !strings.Contains(got, "GOOGLE_CLIENT_ID=google-main") {
+		t.Fatalf("output did not use main .env secrets:\n%s", got)
+	}
+	if !strings.Contains(log, "2 from main branch .env") {
+		t.Fatalf("provenance did not name env_file store:\n%s", log)
+	}
+}
+
 // A machine with no `op` installed is exactly what `fallback` exists for: the
 // client being unavailable is one of the failures it promises to survive. If
 // building the client were fatal, a fresh clone on a laptop without the
@@ -1266,7 +1327,7 @@ outputs:
 	if _, ok := cfg.Secrets.Definitions["K"]; !ok {
 		t.Errorf("overlay discarded the anchored definitions: %+v", cfg.Secrets.Definitions)
 	}
-	if cfg.Secrets.Store != secretsStoreOP {
+	if cfg.Secrets.Store != secretStoreProviderOnePassword {
 		t.Errorf("overlay discarded store: %q", cfg.Secrets.Store)
 	}
 

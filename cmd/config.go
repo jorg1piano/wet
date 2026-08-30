@@ -196,8 +196,8 @@ type PRConfig struct {
 // credential whether the backend or a deployment reads it, so the store stays
 // free of per-consumer duplicates and a rotation is one edit.
 type SecretsConfig struct {
-	// Store is the secret manager. Only "op" (1Password) is implemented; the
-	// field exists so a second store is a value here rather than a rewrite.
+	// Store is the secret manager: "op" (1Password) or "env_file" (the .env
+	// in the main-branch checkout).
 	Store string `yaml:"store"`
 	// Policy decides what happens when the store cannot answer. See
 	// SecretPolicy* — the default is "fallback".
@@ -272,6 +272,9 @@ func (d SecretDefinition) DefaultValue() string {
 	}
 	return *d.Default
 }
+
+// secretStoreProviders lists every accepted provider for secrets.store.
+var secretStoreProviders = []string{secretStoreProviderOnePassword, secretStoreProviderEnvFile}
 
 // Secret policies decide what wet does when the configured store cannot
 // answer. They exist because automatic secret loading must not make a fresh
@@ -951,8 +954,8 @@ func (c *WetConfig) validateSecrets() error {
 	if err := s.validateVaults(); err != nil {
 		return err
 	}
-	if s.Store != secretsStoreOP {
-		return fmt.Errorf("secrets.store %q is not supported (known: %s)", s.Store, secretsStoreOP)
+	if !slices.Contains(secretStoreProviders, s.Store) {
+		return fmt.Errorf("secrets.store %q is not supported (known: %s)", s.Store, strings.Join(secretStoreProviders, ", "))
 	}
 	if s.Policy != "" && !slices.Contains(SecretPolicies, s.Policy) {
 		return fmt.Errorf("secrets.policy %q is not one of %s", s.Policy, strings.Join(SecretPolicies, ", "))
@@ -990,9 +993,18 @@ func (c *WetConfig) validateSecrets() error {
 				return fmt.Errorf("secrets.definitions.%s: ref: is the whole reference — "+
 					"drop field:/vault:/item: or drop ref:", name)
 			}
-			if _, err := parseOPRef(def.Ref); err != nil {
+			var err error
+			if s.Store == secretStoreProviderEnvFile {
+				_, err = parseEnvFileRef(def.Ref)
+			} else {
+				_, err = parseOPRef(def.Ref)
+			}
+			if err != nil {
 				return fmt.Errorf("secrets.definitions.%s: %w", name, err)
 			}
+			continue
+		}
+		if s.Store == secretStoreProviderEnvFile {
 			continue
 		}
 		if def.Field == "" {

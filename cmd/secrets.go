@@ -8,21 +8,28 @@ import (
 	"strings"
 )
 
-// secretsStoreOP is the only implemented value of secrets.store. It is a
-// constant rather than a literal so adding a store is a compile error at every
-// place that assumes 1Password, instead of a silent wrong CLI.
-const secretsStoreOP = "op"
+// secretStoreProviderOnePassword and secretStoreProviderEnvFile are the implemented values of
+// secrets.store. Constants rather than literals make adding a store a compile
+// error at every place that assumes a particular backing provider.
+const (
+	secretStoreProviderOnePassword = "op"
+	secretStoreProviderEnvFile     = "env_file"
+)
 
 // SecretRef is one env key resolved to a place in the store.
 type SecretRef struct {
+	Store string
 	Key   string // env key, e.g. GOOGLE_CLIENT_ID
 	Vault string
 	Item  string
 	Field string
 }
 
-// URI renders the reference in `op read` syntax.
+// URI renders the reference in the provider's native syntax.
 func (r SecretRef) URI() string {
+	if r.Store == secretStoreProviderEnvFile {
+		return fmt.Sprintf("envfile://%s", r.Field)
+	}
 	return fmt.Sprintf("op://%s/%s/%s", r.Vault, r.Item, r.Field)
 }
 

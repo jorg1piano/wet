@@ -166,7 +166,7 @@ func scaffoldSecretDefinitions(root *yaml.Node, catalog map[string]SecretGroup, 
 		secretsNode = &yaml.Node{Kind: yaml.MappingNode}
 		secretsNode.Content = append(secretsNode.Content,
 			&yaml.Node{Kind: yaml.ScalarNode, Value: "store"},
-			&yaml.Node{Kind: yaml.ScalarNode, Value: secretsStoreOP},
+			&yaml.Node{Kind: yaml.ScalarNode, Value: secretStoreProviderOnePassword},
 			&yaml.Node{Kind: yaml.ScalarNode, Value: "policy"},
 			&yaml.Node{Kind: yaml.ScalarNode, Value: SecretPolicyFallback})
 		key := &yaml.Node{Kind: yaml.ScalarNode, Value: "secrets"}

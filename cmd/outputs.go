@@ -559,7 +559,18 @@ func parseOPRef(raw string) (SecretRef, error) {
 	if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
 		return SecretRef{}, fmt.Errorf("ref %q is not op://vault/item/field", raw)
 	}
-	return SecretRef{Vault: parts[0], Item: parts[1], Field: parts[2]}, nil
+	return SecretRef{Store: secretStoreProviderOnePassword, Vault: parts[0], Item: parts[1], Field: parts[2]}, nil
+}
+
+func parseEnvFileRef(raw string) (SecretRef, error) {
+	if !strings.HasPrefix(raw, "envfile://") {
+		return SecretRef{}, fmt.Errorf("ref %q must be an envfile://KEY reference", raw)
+	}
+	key := strings.TrimPrefix(raw, "envfile://")
+	if key == "" || strings.Contains(key, "/") {
+		return SecretRef{}, fmt.Errorf("ref %q is not envfile://KEY", raw)
+	}
+	return SecretRef{Store: secretStoreProviderEnvFile, Field: key}, nil
 }
 
 // ResolveSecretRef turns one definition into a concrete place in the store,
@@ -582,14 +593,25 @@ func (s *SecretsConfig) ResolveSecretRef(name, env string) (SecretRef, error) {
 		return SecretRef{}, fmt.Errorf("unknown secret %q (defined: %s)", name, strings.Join(sortedKeys(s.Definitions), ", "))
 	}
 	if def.Ref != "" {
-		ref, err := parseOPRef(def.Ref)
+		var (
+			ref SecretRef
+			err error
+		)
+		if s.Store == secretStoreProviderEnvFile {
+			ref, err = parseEnvFileRef(def.Ref)
+		} else {
+			ref, err = parseOPRef(def.Ref)
+		}
 		if err != nil {
 			return SecretRef{}, fmt.Errorf("secrets.definitions.%s: %w", name, err)
 		}
 		ref.Key = name
 		return ref, nil
 	}
-	ref := SecretRef{Key: name, Vault: s.VaultForEnv(env), Item: s.Item, Field: def.Field}
+	if s.Store == secretStoreProviderEnvFile {
+		return SecretRef{Store: secretStoreProviderEnvFile, Key: name, Field: name}, nil
+	}
+	ref := SecretRef{Store: secretStoreProviderOnePassword, Key: name, Vault: s.VaultForEnv(env), Item: s.Item, Field: def.Field}
 	if def.Vault != "" {
 		ref.Vault = def.Vault
 	}
@@ -960,7 +982,7 @@ func PullOutputs(req PullRequest) error {
 
 	reader := req.Reader
 	if reader == nil && len(needed) > 0 && policy != SecretPolicyDisabled {
-		reader, err = newStoreReader(req.Cfg)
+		reader, err = newStoreReader(req.Cfg, req.TreePath)
 		if err != nil {
 			// A machine with no `op` installed is precisely the case
 			// `fallback` exists for: the client being unavailable is one of
@@ -1087,28 +1109,70 @@ func writeOutputFiles(treePath string, outs []*ResolvedOutput) error {
 	return nil
 }
 
+// envFileSecretReader reads selected secrets from the trunk checkout's .env.
+type envFileSecretReader struct{ values map[string]string }
+
+func newEnvFileSecretReader(treePath, mainBranch string) (*envFileSecretReader, error) {
+	if treePath == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return nil, fmt.Errorf("find current directory: %w", err)
+		}
+		treePath = cwd
+	}
+	root, ok := checkoutForBranch(treePath, mainBranch)
+	if !ok {
+		return nil, fmt.Errorf("checkout for %s not found: %w", mainBranch, errStoreUnavailable)
+	}
+	envPath := filepath.Join(root, ".env")
+	values, _, err := ParseEnvFile(envPath)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", envPath, errors.Join(err, errStoreUnavailable))
+	}
+	return &envFileSecretReader{values: values}, nil
+}
+
+func (r *envFileSecretReader) Read(uri string) (string, error) {
+	ref, err := parseEnvFileRef(uri)
+	if err != nil {
+		return "", err
+	}
+	value, ok := r.values[ref.Field]
+	if !ok {
+		return "", fmt.Errorf("%s not found in main branch .env", ref.Field)
+	}
+	return value, nil
+}
+
 // newStoreReader builds the client for the configured store. The provider is
 // never named on the command line — `secrets.store` decides — so this is the
 // single place a store name turns into a client.
-func newStoreReader(cfg *WetConfig) (SecretReader, error) {
+func newStoreReader(cfg *WetConfig, treePath string) (SecretReader, error) {
 	if cfg.Secrets == nil {
 		return nil, errors.New("outputs select secrets, but .wet.yaml has no secrets: block")
 	}
 	switch cfg.Secrets.Store {
-	case secretsStoreOP:
+	case secretStoreProviderOnePassword:
 		if err := requireOP(); err != nil {
 			return nil, err
 		}
 		return newOPSecretReader(opClient{account: cfg.Secrets.Account}), nil
+	case secretStoreProviderEnvFile:
+		return newEnvFileSecretReader(treePath, cfg.MainBranchName())
 	default:
-		return nil, fmt.Errorf("secrets.store %q is not supported (known: %s)", cfg.Secrets.Store, secretsStoreOP)
+		return nil, fmt.Errorf("secrets.store %q is not supported (known: %s)", cfg.Secrets.Store, strings.Join(secretStoreProviders, ", "))
 	}
 }
 
 // storeLabel is the human name of the configured store, for provenance lines.
 func storeLabel(cfg *WetConfig) string {
-	if cfg.Secrets != nil && cfg.Secrets.Store == secretsStoreOP {
-		return "1Password"
+	if cfg.Secrets != nil {
+		switch cfg.Secrets.Store {
+		case secretStoreProviderOnePassword:
+			return "1Password"
+		case secretStoreProviderEnvFile:
+			return "main branch .env"
+		}
 	}
 	return "the secret store"
 }

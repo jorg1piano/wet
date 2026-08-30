@@ -399,11 +399,13 @@ outputs:
 #   vault     per-secret override of the block-level vault (which itself
 #             comes from .wet.local.yaml — see below).
 #   item      per-secret override of the block-level item.
-#   ref       a full "op://vault/item/field" for a secret that lives somewhere
-#             else entirely. Mutually exclusive with vault/item/field.
+#   ref       a full provider reference for a secret that lives somewhere else:
+#             "op://vault/item/field" for 1Password, or "envfile://KEY" for
+#             env_file when the trunk .env key differs from the definition
+#             name. Mutually exclusive with vault/item/field.
 #
-# A reference resolves only once BOTH an item and a vault are named, and both
-# belong here, in .wet.yaml:
+# With `store: op`, a reference resolves only once BOTH an item and a vault
+# are named, and both belong here, in .wet.yaml:
 #
 #   item     which item the fields sit on is a fact about the project, and
 #   vault    so is which vault holds it — everyone who clones the repo needs
@@ -471,7 +473,10 @@ outputs:
 # reach the store.
 
 # secrets:
-#   # The secret manager. `op` (1Password) is the only one implemented.
+#   # The secret manager. `op` reads 1Password. `env_file` reads values from
+#   # the `.env` in the checkout of `main_branch` on this machine, which is
+#   # useful for copying development secrets into new worktrees without another
+#   # 1Password prompt. Keep `op` for repos that should read the real vault.
 #   store: op
 #
 #   # What happens when the store cannot answer. Defaults to `fallback`.

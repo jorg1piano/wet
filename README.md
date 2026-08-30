@@ -506,7 +506,7 @@ called and where it lives. It holds no values.
 
 ```yaml
 secrets:
-  store: op                 # only 1Password is implemented
+  store: op                 # op (1Password) or env_file (main-branch .env)
   policy: fallback          # required | fallback | disabled — default fallback
   item: backend-development # the item the fields sit on — a project fact
   vault: Development        # the vault holding it — also a project fact
@@ -522,8 +522,15 @@ secrets:
       field: api_key
       item: stripe          # per-secret override of the block's item
     LEGACY_TOKEN:
-      ref: op://Shared/legacy/token   # or a full reference instead
+      ref: op://Shared/legacy/token   # or a full provider reference instead
 ```
+
+Use `store: env_file` when local development secrets should be read from the
+`.env` file in the checkout of `main_branch` on this machine. That lets new
+worktrees populate generated env files without prompting for 1Password again;
+keep `store: op` when the repo should read the vault. With `env_file`, the
+`.env` key defaults to the definition name (`SECRET_KEY_BASE`); use
+`ref: envfile://OTHER_KEY` only when it differs.
 
 A definition is `field:` plus optional `vault:` / `item:` overrides, **or** a
 full `ref:` — the two forms are mutually exclusive, because a half-overridden

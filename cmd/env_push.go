@@ -95,8 +95,8 @@ func runEnvPush(cmd *cobra.Command, args []string) error {
 	if cfg.Secrets == nil {
 		return errors.New(".wet.yaml has no secrets: block — nothing to push")
 	}
-	if cfg.Secrets.Store != secretsStoreOP {
-		return fmt.Errorf("secrets.store %q is not supported (known: %s)", cfg.Secrets.Store, secretsStoreOP)
+	if cfg.Secrets.Store != secretStoreProviderOnePassword {
+		return fmt.Errorf("secrets.store %q is not supported (known: %s)", cfg.Secrets.Store, secretStoreProviderOnePassword)
 	}
 	// Before requireOP: an undeclared --env is answerable from the config
 	// alone, and "op is not installed" is the wrong answer to `--env
