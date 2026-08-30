@@ -14,6 +14,7 @@ wet worktree mount <branch>     # same, for a branch that already exists (local 
 wet worktree setup              # worktree-only form of `wet setup`
 wet worktree list               # interactive list — pick one to open in tmux or VS Code (alias: ls)
 wet worktree pop                # remove the current worktree, keep the branch (runs pre_remove hooks)
+wet docker cleanup --dry-run    # find Compose stacks not referenced by panes or slot_pool
 wet secrets setup [group…]      # scaffold a provider's keys into .wet.yaml
 wet env pull [output]           # regenerate the env files declared under outputs:
 wet env explain [output]        # what each output contains, and where its secrets live
@@ -96,6 +97,13 @@ duplicate.
 
 To clean up, `cd` into the worktree and run `wet worktree pop`. That removes the
 worktree and tears down its containers; the branch is left alone.
+
+If Docker has stale Compose stacks from old worktrees, run
+`wet docker cleanup --dry-run`. It keeps stacks for worktrees currently open in
+any Herdr/tmux pane, and when `slot_pool: true` it also keeps reusable slot
+projects. Use `--verbose` only when you want the full kept-project list. Without
+`--dry-run` it runs `docker compose -p <project> down --remove-orphans` and then
+`docker rm -f` for any containers still listed for the stale project.
 
 ### Installing the Claude helper skill
 

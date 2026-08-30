@@ -1538,11 +1538,14 @@ func (c *WetConfig) slotPortsReusable(slot int) bool {
 }
 
 func (c *WetConfig) composeProjectNameForSlot(slot int) string {
-	data := BuildTemplateData(c, "", slot, c.ResolvePorts(slot), nil)
-	if _, err := ResolveEnvValues(c, data, nil); err != nil {
+	if c == nil || c.Env == nil || c.Env["COMPOSE_PROJECT_NAME"] == "" {
 		return ""
 	}
-	v, _ := data["COMPOSE_PROJECT_NAME"].(string)
+	data := BuildTemplateData(c, "", slot, c.ResolvePorts(slot), nil)
+	v, err := renderWetTemplate("env.COMPOSE_PROJECT_NAME", c.Env["COMPOSE_PROJECT_NAME"], data)
+	if err != nil {
+		return ""
+	}
 	return v
 }
 
