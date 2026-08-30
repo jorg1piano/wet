@@ -9,7 +9,7 @@ Core commands:
 
 ```
 wet setup                       # configure this checkout — main repo OR worktree
-wet worktree create [branch]    # minimal: `git worktree add` + copy .env + open tmux window
+wet worktree create [branch]    # minimal: `git worktree add` + open tmux window
 wet worktree mount <branch>     # same, for a branch that already exists (local or on origin)
 wet worktree setup              # worktree-only form of `wet setup`
 wet worktree list               # interactive list — pick one to open in tmux or VS Code (alias: ls)
@@ -506,7 +506,8 @@ called and where it lives. It holds no values.
 
 ```yaml
 secrets:
-  store: op                 # op (1Password) or env_file (main-branch .env)
+  store: op                 # main-branch provider: op or env_file
+  worktree_store: env_file  # optional worktree override; op is also allowed
   policy: fallback          # required | fallback | disabled — default fallback
   item: backend-development # the item the fields sit on — a project fact
   vault: Development        # the vault holding it — also a project fact
@@ -525,12 +526,13 @@ secrets:
       ref: op://Shared/legacy/token   # or a full provider reference instead
 ```
 
-Use `store: env_file` when local development secrets should be read from the
-`.env` file in the checkout of `main_branch` on this machine. That lets new
-worktrees populate generated env files without prompting for 1Password again;
-keep `store: op` when the repo should read the vault. With `env_file`, the
-`.env` key defaults to the definition name (`SECRET_KEY_BASE`); use
-`ref: envfile://OTHER_KEY` only when it differs.
+Use `worktree_store: env_file` when main should bootstrap from 1Password but
+worktrees should read local development secrets from the `.env` file in the
+checkout of `main_branch`. That lets new worktrees populate generated env files
+without prompting for 1Password again. `worktree_store` can name any supported
+provider, including `op`, so there is no special limitation on worktrees. With
+`env_file`, the `.env` key defaults to the definition name (`SECRET_KEY_BASE`),
+leaving `field:` free to keep naming the 1Password field when `store: op`.
 
 A definition is `field:` plus optional `vault:` / `item:` overrides, **or** a
 full `ref:` — the two forms are mutually exclusive, because a half-overridden

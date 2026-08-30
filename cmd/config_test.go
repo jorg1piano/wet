@@ -96,6 +96,27 @@ func TestNextFreeSlotWithFreePorts_SkipsBoundPort(t *testing.T) {
 	}
 }
 
+func TestNextFreeReusableSlotSkipsForeignBoundPort(t *testing.T) {
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	bound := ln.Addr().(*net.TCPAddr).Port
+
+	cfg := &WetConfig{
+		ProjectName: "myapp",
+		PortStride:  10,
+		Ports:       []PortConfig{{Name: "APP_PORT", Base: bound - 10, Stride: 10}},
+		Env: map[string]string{
+			"COMPOSE_PROJECT_NAME": "{{.ProjectName}}-slot-{{.Slot}}",
+		},
+	}
+	if got := cfg.NextFreeReusableSlot(nil); got != 2 {
+		t.Errorf("NextFreeReusableSlot(nil) = %d, want 2 (slot 1 port %d is held by a foreign listener)", got, bound)
+	}
+}
+
 func TestValidateAcceptsMyappShape(t *testing.T) {
 	cfg := &WetConfig{
 		ProjectName: "myapp",
@@ -880,11 +901,12 @@ var commentedSchemaKeys = map[string]*regexp.Regexp{
 	// a reindent is a deliberate edit — and re-pinning the regex beside it is
 	// cheaper than the alternative, which is a guard that passes while the
 	// illustration it vouches for has been deleted.
-	"secrets":             regexp.MustCompile(`(?m)^# secrets:$`),
-	"secrets.store":       regexp.MustCompile(`(?m)^#   store: op$`),
-	"secrets.policy":      regexp.MustCompile(`(?m)^#   policy: \w+`),
-	"secrets.item":        regexp.MustCompile(`(?m)^#   item: \S+`),
-	"secrets.definitions": regexp.MustCompile(`(?m)^#   definitions:$`),
+	"secrets":                regexp.MustCompile(`(?m)^# secrets:$`),
+	"secrets.store":          regexp.MustCompile(`(?m)^#   store: op$`),
+	"secrets.worktree_store": regexp.MustCompile(`(?m)^#   worktree_store: \w+`),
+	"secrets.policy":         regexp.MustCompile(`(?m)^#   policy: \w+`),
+	"secrets.item":           regexp.MustCompile(`(?m)^#   item: \S+`),
+	"secrets.definitions":    regexp.MustCompile(`(?m)^#   definitions:$`),
 	// The vault is a project fact, so the example documents it in the
 	// commented .wet.yaml block, at that block's depth. account — the one
 	// machine-local key — stays pinned to the .wet.local.yaml snippet below.

@@ -588,28 +588,32 @@ func parseEnvFileRef(raw string) (SecretRef, error) {
 // explain` marks such destinations rather than leaving a reader to infer that
 // `--env production` moved every secret but this one.
 func (s *SecretsConfig) ResolveSecretRef(name, env string) (SecretRef, error) {
+	return s.ResolveSecretRefForStore(name, env, s.Store)
+}
+
+func (s *SecretsConfig) ResolveSecretRefForStore(name, env, store string) (SecretRef, error) {
 	def, ok := s.Definitions[name]
 	if !ok {
 		return SecretRef{}, fmt.Errorf("unknown secret %q (defined: %s)", name, strings.Join(sortedKeys(s.Definitions), ", "))
 	}
-	if def.Ref != "" {
-		var (
-			ref SecretRef
-			err error
-		)
-		if s.Store == secretStoreProviderEnvFile {
-			ref, err = parseEnvFileRef(def.Ref)
-		} else {
-			ref, err = parseOPRef(def.Ref)
+	if store == secretStoreProviderEnvFile {
+		if strings.HasPrefix(def.Ref, "envfile://") {
+			ref, err := parseEnvFileRef(def.Ref)
+			if err != nil {
+				return SecretRef{}, fmt.Errorf("secrets.definitions.%s: %w", name, err)
+			}
+			ref.Key = name
+			return ref, nil
 		}
+		return SecretRef{Store: secretStoreProviderEnvFile, Key: name, Field: name}, nil
+	}
+	if def.Ref != "" {
+		ref, err := parseOPRef(def.Ref)
 		if err != nil {
 			return SecretRef{}, fmt.Errorf("secrets.definitions.%s: %w", name, err)
 		}
 		ref.Key = name
 		return ref, nil
-	}
-	if s.Store == secretStoreProviderEnvFile {
-		return SecretRef{Store: secretStoreProviderEnvFile, Key: name, Field: name}, nil
 	}
 	ref := SecretRef{Store: secretStoreProviderOnePassword, Key: name, Vault: s.VaultForEnv(env), Item: s.Item, Field: def.Field}
 	if def.Vault != "" {
@@ -651,7 +655,7 @@ func (s *SecretsConfig) ResolveSecretRef(name, env string) (SecretRef, error) {
 // view containing only the names it selected (see resolveOutput), because a
 // single merged map is exactly how a mobile `.env` ends up carrying a backend
 // credential.
-func resolveSecrets(cfg *WetConfig, names []string, policy, env string, reader SecretReader) (map[string]resolvedSecret, error) {
+func resolveSecrets(cfg *WetConfig, names []string, policy, env, store string, reader SecretReader) (map[string]resolvedSecret, error) {
 	out := make(map[string]resolvedSecret, len(names))
 	if len(names) == 0 {
 		return out, nil
@@ -672,7 +676,7 @@ func resolveSecrets(cfg *WetConfig, names []string, policy, env string, reader S
 		var uris []string
 		seen := map[string]bool{}
 		for _, name := range names {
-			ref, err := cfg.Secrets.ResolveSecretRef(name, env)
+			ref, err := cfg.Secrets.ResolveSecretRefForStore(name, env, store)
 			if err != nil || seen[ref.URI()] {
 				continue
 			}
@@ -698,7 +702,7 @@ func resolveSecrets(cfg *WetConfig, names []string, policy, env string, reader S
 		// not silent: every fallback is named out loud, and `wet env explain`
 		// reports the missing key. Choose `required` to make it fatal. A
 		// malformed ref: was already rejected at load.
-		ref, readErr := cfg.Secrets.ResolveSecretRef(name, env)
+		ref, readErr := cfg.Secrets.ResolveSecretRefForStore(name, env, store)
 		switch {
 		case readErr != nil:
 		case policy == SecretPolicyDisabled:
@@ -980,9 +984,10 @@ func PullOutputs(req PullRequest) error {
 		fmt.Fprintf(out, "environment: %s (of %s)\n", env, strings.Join(req.Cfg.Secrets.VaultEnvs(), ", "))
 	}
 
+	store := req.Cfg.secretStoreForTree(req.TreePath)
 	reader := req.Reader
 	if reader == nil && len(needed) > 0 && policy != SecretPolicyDisabled {
-		reader, err = newStoreReader(req.Cfg, req.TreePath)
+		reader, err = newStoreReader(req.Cfg, req.TreePath, store)
 		if err != nil {
 			// A machine with no `op` installed is precisely the case
 			// `fallback` exists for: the client being unavailable is one of
@@ -999,7 +1004,7 @@ func PullOutputs(req PullRequest) error {
 	if reader != nil {
 		reader = &latchingReader{inner: reader}
 	}
-	secrets, err := resolveSecrets(req.Cfg, sortedKeys(needed), policy, env, reader)
+	secrets, err := resolveSecrets(req.Cfg, sortedKeys(needed), policy, env, store, reader)
 	if err != nil {
 		return err
 	}
@@ -1015,7 +1020,7 @@ func PullOutputs(req PullRequest) error {
 	}
 
 	for _, r := range resolved {
-		reportSecretProvenance(out, req.Cfg, policy, r)
+		reportSecretProvenance(out, store, policy, r)
 		// Not an error — a repo may genuinely need a group-readable file for a
 		// container running as another user. But widening a file that holds
 		// credentials is a decision, and a silent one reads as the default.
@@ -1109,10 +1114,13 @@ func writeOutputFiles(treePath string, outs []*ResolvedOutput) error {
 	return nil
 }
 
-// envFileSecretReader reads selected secrets from the trunk checkout's .env.
+// envFileSecretReader reads selected secrets from env files in the trunk
+// checkout. It treats the main checkout's generated outputs as the local cache
+// of already-pulled credentials, and also accepts a root .env when a repo uses
+// that shape.
 type envFileSecretReader struct{ values map[string]string }
 
-func newEnvFileSecretReader(treePath, mainBranch string) (*envFileSecretReader, error) {
+func newEnvFileSecretReader(cfg *WetConfig, treePath string) (*envFileSecretReader, error) {
 	if treePath == "" {
 		cwd, err := os.Getwd()
 		if err != nil {
@@ -1120,16 +1128,46 @@ func newEnvFileSecretReader(treePath, mainBranch string) (*envFileSecretReader, 
 		}
 		treePath = cwd
 	}
+	mainBranch := cfg.MainBranchName()
 	root, ok := checkoutForBranch(treePath, mainBranch)
 	if !ok {
 		return nil, fmt.Errorf("checkout for %s not found: %w", mainBranch, errStoreUnavailable)
 	}
-	envPath := filepath.Join(root, ".env")
-	values, _, err := ParseEnvFile(envPath)
-	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", envPath, errors.Join(err, errStoreUnavailable))
+	values := map[string]string{}
+	var readAny bool
+	for _, rel := range mainEnvFilePaths(cfg) {
+		envPath := filepath.Join(root, rel)
+		fileValues, _, err := ParseEnvFile(envPath)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return nil, fmt.Errorf("read %s: %w", envPath, errors.Join(err, errStoreUnavailable))
+		}
+		readAny = true
+		for k, v := range fileValues {
+			if _, exists := values[k]; !exists {
+				values[k] = v
+			}
+		}
+	}
+	if !readAny {
+		return nil, fmt.Errorf("no env files found in checkout for %s: %w", mainBranch, errStoreUnavailable)
 	}
 	return &envFileSecretReader{values: values}, nil
+}
+
+func mainEnvFilePaths(cfg *WetConfig) []string {
+	seen := map[string]bool{".env": true}
+	paths := []string{".env"}
+	for _, o := range cfg.Outputs {
+		if o.Out == "" || seen[o.Out] {
+			continue
+		}
+		seen[o.Out] = true
+		paths = append(paths, o.Out)
+	}
+	return paths
 }
 
 func (r *envFileSecretReader) Read(uri string) (string, error) {
@@ -1147,32 +1185,44 @@ func (r *envFileSecretReader) Read(uri string) (string, error) {
 // newStoreReader builds the client for the configured store. The provider is
 // never named on the command line — `secrets.store` decides — so this is the
 // single place a store name turns into a client.
-func newStoreReader(cfg *WetConfig, treePath string) (SecretReader, error) {
+func newStoreReader(cfg *WetConfig, treePath, store string) (SecretReader, error) {
 	if cfg.Secrets == nil {
 		return nil, errors.New("outputs select secrets, but .wet.yaml has no secrets: block")
 	}
-	switch cfg.Secrets.Store {
+	switch store {
 	case secretStoreProviderOnePassword:
 		if err := requireOP(); err != nil {
 			return nil, err
 		}
 		return newOPSecretReader(opClient{account: cfg.Secrets.Account}), nil
 	case secretStoreProviderEnvFile:
-		return newEnvFileSecretReader(treePath, cfg.MainBranchName())
+		return newEnvFileSecretReader(cfg, treePath)
 	default:
-		return nil, fmt.Errorf("secrets.store %q is not supported (known: %s)", cfg.Secrets.Store, strings.Join(secretStoreProviders, ", "))
+		return nil, fmt.Errorf("secrets.store %q is not supported (known: %s)", store, strings.Join(secretStoreProviders, ", "))
 	}
 }
 
 // storeLabel is the human name of the configured store, for provenance lines.
-func storeLabel(cfg *WetConfig) string {
-	if cfg.Secrets != nil {
-		switch cfg.Secrets.Store {
-		case secretStoreProviderOnePassword:
-			return "1Password"
-		case secretStoreProviderEnvFile:
-			return "main branch .env"
-		}
+func (cfg *WetConfig) secretStoreForTree(treePath string) string {
+	if cfg == nil || cfg.Secrets == nil {
+		return ""
+	}
+	if cfg.Secrets.WorktreeStore == "" {
+		return cfg.Secrets.Store
+	}
+	mainRoot, ok := checkoutForBranch(treePath, cfg.MainBranchName())
+	if !ok || samePath(treePath, mainRoot) {
+		return cfg.Secrets.Store
+	}
+	return cfg.Secrets.WorktreeStore
+}
+
+func storeLabel(store string) string {
+	switch store {
+	case secretStoreProviderOnePassword:
+		return "1Password"
+	case secretStoreProviderEnvFile:
+		return "main branch .env"
 	}
 	return "the secret store"
 }
@@ -1183,7 +1233,7 @@ func storeLabel(cfg *WetConfig) string {
 // Falling back must not be silent. A developer who believes Sentry and Google
 // sign-in are configured, when wet actually wrote empty strings, debugs the
 // wrong thing for an hour.
-func reportSecretProvenance(w io.Writer, cfg *WetConfig, policy string, r *ResolvedOutput) {
+func reportSecretProvenance(w io.Writer, store string, policy string, r *ResolvedOutput) {
 	if len(r.FromStore)+len(r.FromDefault) == 0 {
 		return
 	}
@@ -1196,7 +1246,7 @@ func reportSecretProvenance(w io.Writer, cfg *WetConfig, policy string, r *Resol
 		return
 	}
 	fmt.Fprintf(w, "  Secrets for %s: %d from %s, %d defaults\n",
-		r.Config.Out, len(r.FromStore), storeLabel(cfg), len(r.FromDefault))
+		r.Config.Out, len(r.FromStore), storeLabel(store), len(r.FromDefault))
 	if len(r.FromDefault) > 0 {
 		fmt.Fprintf(w, "    defaults: %s\n", strings.Join(r.FromDefault, ", "))
 	}

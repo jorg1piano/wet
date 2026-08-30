@@ -222,7 +222,7 @@ func runSetupCore(repoRoot, worktreePath, branchName string, headless, isMain bo
 			// the state file is the authority and the project's slot_reset hook
 			// is responsible for proving the reused resources are sane.
 			if cfg.SlotPool {
-				slot = NextFreeSlot(used)
+				slot = cfg.NextFreeReusableSlot(used)
 			} else {
 				slot = cfg.NextFreeSlotWithFreePorts(used)
 			}

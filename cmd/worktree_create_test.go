@@ -13,6 +13,24 @@ import (
 	"github.com/spf13/cobra"
 )
 
+func TestPostWorktreeAddDoesNotCopyRootEnv(t *testing.T) {
+	repo := t.TempDir()
+	worktree := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repo, ".env"), []byte("SECRET=main\nPHX_PORT=4000\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := postWorktreeAddWithWriter(repo, worktree, "feature/x", "Created", true, &out); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(worktree, ".env")); !os.IsNotExist(err) {
+		t.Fatalf("postWorktreeAdd copied .env; worktree secrets must flow through providers and wet-owned ports must be reallocated")
+	}
+	if strings.Contains(out.String(), "Copied: .env") {
+		t.Fatalf("postWorktreeAdd still reports a raw .env copy:\n%s", out.String())
+	}
+}
+
 func TestRunWorktreeCreateJSON(t *testing.T) {
 	if worktreeCreateCmd.Flags().Lookup("json") == nil {
 		t.Fatal("worktree create has no --json flag")

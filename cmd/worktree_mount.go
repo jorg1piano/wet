@@ -56,8 +56,8 @@ func runWorktreeMount(cmd *cobra.Command, args []string) error {
 //     clearly if neither exists.
 //  3. Runs `git worktree add <path> <branch>` (no `-b` — the branch already
 //     exists, we're checking it out, not creating it).
-//  4. Runs the shared post-create steps (copy .env, tmux window, next-step
-//     hint) via postWorktreeAdd.
+//  4. Runs the shared post-create steps (tmux window, next-step hint) via
+//     postWorktreeAdd.
 //
 // No .wet.yaml load, no port allocation, no state file write, no hooks. Run
 // `wet worktree setup` from inside the new worktree to configure the rest.

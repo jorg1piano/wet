@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"text/template"
 	"time"
@@ -196,9 +198,12 @@ type PRConfig struct {
 // credential whether the backend or a deployment reads it, so the store stays
 // free of per-consumer duplicates and a rotation is one edit.
 type SecretsConfig struct {
-	// Store is the secret manager: "op" (1Password) or "env_file" (the .env
-	// in the main-branch checkout).
+	// Store is the secret manager used by the main-branch checkout: "op"
+	// (1Password) or "env_file" (the .env in the main-branch checkout).
 	Store string `yaml:"store"`
+	// WorktreeStore optionally overrides Store for non-main worktrees. It may
+	// name any supported provider, including "op".
+	WorktreeStore string `yaml:"worktree_store,omitempty"`
 	// Policy decides what happens when the store cannot answer. See
 	// SecretPolicy* — the default is "fallback".
 	Policy string `yaml:"policy,omitempty"`
@@ -957,6 +962,9 @@ func (c *WetConfig) validateSecrets() error {
 	if !slices.Contains(secretStoreProviders, s.Store) {
 		return fmt.Errorf("secrets.store %q is not supported (known: %s)", s.Store, strings.Join(secretStoreProviders, ", "))
 	}
+	if s.WorktreeStore != "" && !slices.Contains(secretStoreProviders, s.WorktreeStore) {
+		return fmt.Errorf("secrets.worktree_store %q is not supported (known: %s)", s.WorktreeStore, strings.Join(secretStoreProviders, ", "))
+	}
 	if s.Policy != "" && !slices.Contains(SecretPolicies, s.Policy) {
 		return fmt.Errorf("secrets.policy %q is not one of %s", s.Policy, strings.Join(SecretPolicies, ", "))
 	}
@@ -1484,6 +1492,81 @@ func (c *WetConfig) NextFreeSlotWithFreePorts(used []int) int {
 		}
 		taken = append(taken, slot)
 	}
+}
+
+// NextFreeReusableSlot is the slot-pool variant of NextFreeSlotWithFreePorts.
+// A released slot may deliberately keep warm containers bound, so plain port
+// probing would skip the slot forever. But a different compose project holding
+// those ports is not reusable warm state; it is exactly the collision wet is
+// supposed to avoid. Allow ports that are free or held by this slot's own
+// COMPOSE_PROJECT_NAME, and skip slots held by anything else.
+func (c *WetConfig) NextFreeReusableSlot(used []int) int {
+	taken := append([]int(nil), used...)
+	for {
+		slot := NextFreeSlot(taken)
+		if c.slotPortsReusable(slot) {
+			return slot
+		}
+		taken = append(taken, slot)
+	}
+}
+
+func (c *WetConfig) slotPortsReusable(slot int) bool {
+	if c.portsFree(slot) {
+		return true
+	}
+	expected := c.composeProjectNameForSlot(slot)
+	if expected == "" {
+		return false
+	}
+	held := dockerComposeProjectsHoldingPorts()
+	for _, p := range c.ResolvePorts(slot) {
+		if portSetFree([]int{p.Value}) {
+			continue
+		}
+		projects := held[p.Value]
+		if len(projects) == 0 {
+			return false
+		}
+		for _, project := range projects {
+			if project != expected {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func (c *WetConfig) composeProjectNameForSlot(slot int) string {
+	data := BuildTemplateData(c, "", slot, c.ResolvePorts(slot), nil)
+	if _, err := ResolveEnvValues(c, data, nil); err != nil {
+		return ""
+	}
+	v, _ := data["COMPOSE_PROJECT_NAME"].(string)
+	return v
+}
+
+var dockerPublishedPortRE = regexp.MustCompile(`:(\d+)->`)
+
+func dockerComposeProjectsHoldingPorts() map[int][]string {
+	out := map[int][]string{}
+	body, err := exec.Command("docker", "ps", "--format", `{{.Label "com.docker.compose.project"}} {{.Ports}}`).Output()
+	if err != nil {
+		return out
+	}
+	for _, line := range strings.Split(string(body), "\n") {
+		project, portsText, _ := strings.Cut(line, " ")
+		if project == "" || portsText == "" {
+			continue
+		}
+		for _, m := range dockerPublishedPortRE.FindAllStringSubmatch(portsText, -1) {
+			port, err := strconv.Atoi(m[1])
+			if err == nil {
+				out[port] = append(out[port], project)
+			}
+		}
+	}
+	return out
 }
 
 // ---------------------------------------------------------------------------

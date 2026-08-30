@@ -188,7 +188,7 @@ func valueSourceLabel(cfg *WetConfig, name string) string {
 }
 
 func runEnvExplain(cmd *cobra.Command, args []string) error {
-	cfg, _, err := loadConfigForTree()
+	cfg, treePath, err := loadConfigForTree()
 	if err != nil {
 		return err
 	}
@@ -215,6 +215,7 @@ func runEnvExplain(cmd *cobra.Command, args []string) error {
 	if env != "" && explainsASecret {
 		fmt.Printf("environment: %s (of %s)\n\n", env, strings.Join(cfg.Secrets.VaultEnvs(), ", "))
 	}
+	store := cfg.secretStoreForTree(treePath)
 	for i, o := range selected {
 		if i > 0 {
 			fmt.Println()
@@ -260,7 +261,7 @@ func runEnvExplain(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  secrets: 0\n")
 			continue
 		}
-		fmt.Printf("  secrets: %d (policy %s)\n", len(o.Secrets), cfg.Secrets.PolicyOrDefault())
+		fmt.Printf("  secrets: %d (policy %s, provider %s)\n", len(o.Secrets), cfg.Secrets.PolicyOrDefault(), store)
 		for _, name := range o.Secrets {
 			def := cfg.Secrets.Definitions[name]
 			fallback := "no default"
@@ -270,7 +271,7 @@ func runEnvExplain(cmd *cobra.Command, args []string) error {
 			// A missing vault or item is a gap in the config, not a broken
 			// config, and explain is the command you run to find out what is
 			// missing — so it reports the gap instead of failing on it.
-			ref, err := cfg.Secrets.ResolveSecretRef(name, env)
+			ref, err := cfg.Secrets.ResolveSecretRefForStore(name, env, store)
 			if err != nil {
 				// The resolver's own error is printed rather than one
 				// summary for all of them. A missing item and a missing
@@ -289,6 +290,10 @@ func runEnvExplain(cmd *cobra.Command, args []string) error {
 			fixed := ""
 			if env != "" && (def.Ref != "" || def.Vault != "") {
 				fixed = ", same in every environment"
+			}
+			if ref.Store == secretStoreProviderEnvFile {
+				fmt.Printf("    %s -> main-branch .env:%s (%s%s)\n", name, ref.Field, fallback, fixed)
+				continue
 			}
 			fmt.Printf("    %s -> %s/%s/%s (%s%s)\n", name, ref.Vault, ref.Item, ref.Field, fallback, fixed)
 		}

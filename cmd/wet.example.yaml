@@ -400,9 +400,8 @@ outputs:
 #             comes from .wet.local.yaml — see below).
 #   item      per-secret override of the block-level item.
 #   ref       a full provider reference for a secret that lives somewhere else:
-#             "op://vault/item/field" for 1Password, or "envfile://KEY" for
-#             env_file when the trunk .env key differs from the definition
-#             name. Mutually exclusive with vault/item/field.
+#             "op://vault/item/field" for 1Password. Mutually exclusive with
+#             vault/item/field.
 #
 # With `store: op`, a reference resolves only once BOTH an item and a vault
 # are named, and both belong here, in .wet.yaml:
@@ -478,6 +477,9 @@ outputs:
 #   # useful for copying development secrets into new worktrees without another
 #   # 1Password prompt. Keep `op` for repos that should read the real vault.
 #   store: op
+#   # Optional override for non-main worktrees. May be any supported provider,
+#   # including `op`; `env_file` means "use the main-branch checkout's .env".
+#   worktree_store: env_file
 #
 #   # What happens when the store cannot answer. Defaults to `fallback`.
 #   #

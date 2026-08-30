@@ -1018,6 +1018,46 @@ func TestUnnamedDestinationFallsBack(t *testing.T) {
 	}
 }
 
+func TestWorktreeStoreOnlyAppliesOutsideMainCheckout(t *testing.T) {
+	git := func(dir string, args ...string) {
+		t.Helper()
+		out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	base := t.TempDir()
+	main := filepath.Join(base, "main")
+	worktree := filepath.Join(base, "feature")
+	if err := os.MkdirAll(main, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	git(main, "init", "-q", "-b", "main")
+	git(main, "config", "user.email", "t@t")
+	git(main, "config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(main, wetConfigFileName), []byte("project_name: app\nsecrets:\n  store: op\n  worktree_store: env_file\n  vault: V\n  item: I\n  definitions:\n    API_KEY: {field: api_key}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git(main, "add", wetConfigFileName)
+	git(main, "commit", "-qm", "cfg")
+	git(main, "worktree", "add", "-q", "-b", "feature/x", worktree, "main")
+
+	cfg, err := LoadWetConfig(main)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if got := cfg.secretStoreForTree(main); got != secretStoreProviderOnePassword {
+		t.Fatalf("main checkout store = %q, want op", got)
+	}
+	if got := cfg.secretStoreForTree(worktree); got != secretStoreProviderEnvFile {
+		t.Fatalf("worktree store = %q, want env_file", got)
+	}
+	cfg.Secrets.WorktreeStore = secretStoreProviderOnePassword
+	if got := cfg.secretStoreForTree(worktree); got != secretStoreProviderOnePassword {
+		t.Fatalf("worktree_store=op was not honored, got %q", got)
+	}
+}
+
 func TestEnvFileStoreReadsSecretsFromMainBranchEnv(t *testing.T) {
 	git := func(dir string, args ...string) {
 		t.Helper()
@@ -1039,23 +1079,28 @@ func TestEnvFileStoreReadsSecretsFromMainBranchEnv(t *testing.T) {
 ports:
   - { name: PHX_PORT, base: 4000 }
 secrets:
-  store: env_file
+  store: op
+  worktree_store: env_file
   policy: required
   definitions:
     SECRET_KEY_BASE:
       field: secret_key_base
     GOOGLE_CLIENT_ID:
-      ref: envfile://GOOGLE_CLIENT_ID
+      field: google_client_id
 outputs:
   - name: backend
     out: backend/.env.dev
     format: dotenv
+    include: [PHX_PORT]
     secrets: [SECRET_KEY_BASE, GOOGLE_CLIENT_ID]
 `
 	if err := os.WriteFile(filepath.Join(main, wetConfigFileName), []byte(cfgBody), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(main, ".env"), []byte("SECRET_KEY_BASE=from-main\nGOOGLE_CLIENT_ID=google-main\nNOT_SELECTED=ignored\n"), 0o600); err != nil {
+	if err := os.MkdirAll(filepath.Join(main, "backend"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(main, "backend/.env.dev"), []byte("SECRET_KEY_BASE=from-main\nGOOGLE_CLIENT_ID=google-main\nNOT_SELECTED=ignored\nPHX_PORT=4000\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	git(main, "add", wetConfigFileName)
@@ -1073,6 +1118,9 @@ outputs:
 	got := readOutput(t, worktree, "backend/.env.dev")
 	if !strings.Contains(got, "SECRET_KEY_BASE=from-main") || !strings.Contains(got, "GOOGLE_CLIENT_ID=google-main") {
 		t.Fatalf("output did not use main .env secrets:\n%s", got)
+	}
+	if !strings.Contains(got, "PHX_PORT=4010") {
+		t.Fatalf("worktree output did not keep wet's slot-based port allocation:\n%s", got)
 	}
 	if !strings.Contains(log, "2 from main branch .env") {
 		t.Fatalf("provenance did not name env_file store:\n%s", log)

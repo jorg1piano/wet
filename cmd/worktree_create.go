@@ -18,8 +18,8 @@ import (
 var worktreeCreateCmd = &cobra.Command{
 	Use:   "create [branch-name]",
 	Short: "Create a new git worktree (minimal)",
-	Long: `Create a new git worktree at ../worktree-<branch>, copy .env from the
-main repo root if present, and open a new tmux window when inside tmux.
+	Long: `Create a new git worktree at ../worktree-<branch> and open a new tmux
+window when inside tmux.
 
 This command is intentionally minimal: it performs no .wet.yaml loading,
 port allocation, template rendering, or hook execution. Run
@@ -265,25 +265,15 @@ func worktreePathFor(repoRoot, branchName string) string {
 }
 
 // postWorktreeAdd runs the shared steps after `git worktree add` succeeds,
-// for both `create` and `mount`: copy `.env` from the main repo root (if
-// present), open a configured multiplexer window (unless noTmux), and print
-// the next-step hint. `label` is the past-tense verb used in the success
-// line ("Created" or "Mounted"). `noTmux` suppresses that window — used by
-// orchestrators that manage sessions themselves.
+// for both `create` and `mount`: open a configured multiplexer window (unless
+// noTmux), and print the next-step hint. `label` is the past-tense verb used
+// in the success line ("Created" or "Mounted"). `noTmux` suppresses that
+// window — used by orchestrators that manage sessions themselves.
 func postWorktreeAdd(repoRoot, worktreePath, branchName, label string, noTmux bool) error {
 	return postWorktreeAddWithWriter(repoRoot, worktreePath, branchName, label, noTmux, os.Stdout)
 }
 
 func postWorktreeAddWithWriter(repoRoot, worktreePath, branchName, label string, noTmux bool, out io.Writer) error {
-	srcEnv := filepath.Join(repoRoot, ".env")
-	if _, statErr := os.Stat(srcEnv); statErr == nil {
-		dstEnv := filepath.Join(worktreePath, ".env")
-		if err := copyFile(srcEnv, dstEnv); err != nil {
-			return fmt.Errorf("copy .env: %w", err)
-		}
-		fmt.Fprintln(out, "  Copied: .env")
-	}
-
 	fmt.Fprintf(out, "\n  %s worktree '%s' at %s\n", label, branchName, worktreePath)
 
 	if !noTmux {
