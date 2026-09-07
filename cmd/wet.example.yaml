@@ -253,30 +253,32 @@ env:
 #   out       required, relative to the checkout, must not escape it. Missing
 #             parent directories are created. No two outputs may write the
 #             same path — the loser's keys would silently vanish.
-#   format    required. `dotenv` is the only encoder implemented.
+#   format    required. `dotenv`, `properties`, or `file` for raw provider bytes.
+#   secret    required for format: file. Names a secrets.definitions entry.
 #   mode      optional octal string. Defaults to "0600": a generated env file
 #             may carry secrets and outlives the command that wrote it.
 #   include   ordinary values, ports, and reserved fields, keeping their own
 #             name as the output key.
 #   secrets   names from secrets.definitions below, keeping their own name.
-#             This list is the authorization boundary: a definition NOT named
-#             here is invisible to this file. That is why a mobile bundle
-#             cannot pick up a backend credential just because it is defined.
+#             Definitions reach an output only when explicitly selected here,
+#             through values.<key>.secret, or through a file output's secret:.
 #   values    renamed and literal keys, emitted in the order written here.
 #             `from:` reads an ordinary value, port, or Pools./Handles. entry;
-#             `literal:` emits a fixed scalar; the two are mutually exclusive.
+#             `literal:` emits a fixed scalar; `secret:` selects a definition;
+#             `file:` inserts a file output's absolute path and pulls that file.
+#             Exactly one source is required per key.
 #   on_demand optional. Keeps the output out of the sweep: `wet setup`, `wet
 #             worktree create` and a bare `wet env pull` skip it, and only
-#             `wet env pull <name>` generates it. For the files that are not
+#             `wet env pull <name>` generates it. A values.file dependency also
+#             selects an on-demand file. For the files that are not
 #             this checkout's at all — a deploy environment's dotenv, whose
 #             credentials belong to a running system and have no business
 #             being fetched onto every developer's disk. `wet env explain`
 #             still lists it, marked, because it is part of the inventory.
 #
-# Secrets are deliberately NOT reachable through `values.from` — they are
-# emitted only under their own logical name, so a rename can never smuggle one
-# into a file that did not select it. Any key declared twice, by any
-# combination of the three lists, is a load error.
+# Secrets are not reachable through values.from. Select them explicitly with
+# values.<key>.secret when the consumer needs a different key name.
+# Any output key declared twice is a load error.
 
 outputs:
   - name: backend
@@ -317,6 +319,23 @@ outputs:
         literal: myapp-mobile
       oidcRedirectUri:
         literal: "myapp://auth/callback"
+
+  # Any provider file can be downloaded in the same pull. Add a BUNDLE
+  # definition under secrets.definitions with field: bundle.bin or a full ref:.
+  #
+  # - name: bundle
+  #   out: private/bundle.bin
+  #   format: file
+  #   secret: BUNDLE
+  #   on_demand: true
+  # - name: bundle-config
+  #   out: config/bundle.properties
+  #   format: properties
+  #   values:
+  #     bundle.path: {file: bundle}
+  #
+  # Pulling bundle-config also downloads bundle. Defaults are literal file
+  # content. No file extension has special behavior. Add both paths to .gitignore.
 
   # A deploy environment. It is an output like any other — one inventory, one
   # place to read what the app is configured with — but it is `on_demand:`, so

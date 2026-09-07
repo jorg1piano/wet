@@ -691,7 +691,7 @@ func TestValidateOutputsRejects(t *testing.T) {
 		},
 		"unselected secret via values.from": {
 			"      host:\n        from: DEV_HOST", "      host:\n        from: SECRET_KEY_BASE",
-			"never renamed",
+			"use secret: to select it explicitly",
 		},
 		"unknown values.from": {
 			"      host:\n        from: DEV_HOST", "      host:\n        from: NOPE", "unknown value",

@@ -13,13 +13,14 @@ import (
 	"strings"
 )
 
-// OutputFormatDotenv is the only encoder wet implements. It is a constant so
-// adding a second format is a compile error at every place that assumes
-// dotenv, rather than a silently mis-encoded file.
-const OutputFormatDotenv = "dotenv"
+const (
+	OutputFormatDotenv     = "dotenv"
+	OutputFormatProperties = "properties"
+	OutputFormatFile       = "file"
+)
 
 // outputFormats lists every accepted format, for validation and errors.
-var outputFormats = []string{OutputFormatDotenv}
+var outputFormats = []string{OutputFormatDotenv, OutputFormatProperties, OutputFormatFile}
 
 // defaultOutputMode is what a generated file gets with no `mode:`. Generated
 // env files may carry secrets and outlive the command that wrote them, so the
@@ -128,19 +129,42 @@ func (c *WetConfig) validateOutputs() error {
 		if reserved := reservedOutputPaths[clean]; reserved {
 			return fmt.Errorf("%s: out %q is one of wet's own files and cannot be generated", where, o.Out)
 		}
+		if clean == "." {
+			return fmt.Errorf("%s: out must name a file, not the checkout directory", where)
+		}
 		if prev, dup := paths[clean]; dup {
 			return fmt.Errorf("%s: out %q is already written by outputs[%d]", where, o.Out, prev)
+		}
+		for _, path := range sortedKeys(paths) {
+			if strings.HasPrefix(clean, path+"/") || strings.HasPrefix(path, clean+"/") {
+				return fmt.Errorf("%s: out %q conflicts with outputs[%d] path %q: a file cannot also be a parent directory", where, o.Out, paths[path], path)
+			}
 		}
 		paths[clean] = i
 
 		if o.Format == "" {
 			return fmt.Errorf("%s: format is required (known: %s)", where, strings.Join(outputFormats, ", "))
 		}
-		if o.Format != OutputFormatDotenv {
+		if !slices.Contains(outputFormats, o.Format) {
 			return fmt.Errorf("%s: format %q is not supported (known: %s)", where, o.Format, strings.Join(outputFormats, ", "))
 		}
 		if _, err := o.FileMode(); err != nil {
 			return fmt.Errorf("%s: %w", where, err)
+		}
+		if o.Format == OutputFormatFile {
+			if o.Secret == "" {
+				return fmt.Errorf("%s: format: file needs secret:", where)
+			}
+			if !c.isSecretName(o.Secret) {
+				return fmt.Errorf("%s.secret: unknown secret %q", where, o.Secret)
+			}
+			if len(o.Include)+len(o.Secrets)+len(o.Values.Keys) != 0 {
+				return fmt.Errorf("%s: format: file cannot declare include:, secrets:, or values:", where)
+			}
+			continue
+		}
+		if o.Secret != "" {
+			return fmt.Errorf("%s: secret: requires format: file; use values.<key>.secret for a key/value output", where)
 		}
 		if len(o.Include)+len(o.Secrets)+len(o.Values.Keys) == 0 {
 			return fmt.Errorf("%s: declares no keys — give it include:, secrets:, or values:", where)
@@ -150,7 +174,7 @@ func (c *WetConfig) validateOutputs() error {
 		// between the three ways of declaring one is caught by name.
 		keys := make(map[string]string, len(o.Include)+len(o.Secrets)+len(o.Values.Keys))
 		claim := func(key, source string) error {
-			if !dotenvKeyRE.MatchString(key) {
+			if key == "" || (o.Format == OutputFormatDotenv && !dotenvKeyRE.MatchString(key)) {
 				return fmt.Errorf("%s: output key %q (from %s) must match %s", where, key, source, dotenvKeyRE.String())
 			}
 			if prev, dup := keys[key]; dup {
@@ -193,15 +217,31 @@ func (c *WetConfig) validateOutputs() error {
 
 		for _, key := range o.Values.Keys {
 			v := o.Values.By[key]
+			sources := 0
+			for _, present := range []bool{v.From != "", v.Literal != nil, v.Secret != "", v.File != ""} {
+				if present {
+					sources++
+				}
+			}
+			if sources > 1 {
+				return fmt.Errorf("%s.values.%s: from:, literal:, secret:, and file: are mutually exclusive", where, key)
+			}
+			if sources == 0 {
+				return fmt.Errorf("%s.values.%s: needs either from:, literal:, secret:, or file:", where, key)
+			}
 			switch {
-			case v.From != "" && v.Literal != nil:
-				return fmt.Errorf("%s.values.%s: from: and literal: are mutually exclusive", where, key)
-			case v.From == "" && v.Literal == nil:
-				return fmt.Errorf("%s.values.%s: needs either from: or literal:", where, key)
+			case v.Secret != "":
+				if !c.isSecretName(v.Secret) {
+					return fmt.Errorf("%s.values.%s: unknown secret %q", where, key, v.Secret)
+				}
+			case v.File != "":
+				file, ok := c.outputByName(v.File)
+				if !ok || file.Format != OutputFormatFile {
+					return fmt.Errorf("%s.values.%s: file %q must name a format: file output", where, key, v.File)
+				}
 			case v.From != "":
 				if c.isSecretName(v.From) {
-					return fmt.Errorf("%s.values.%s: %s is a secret; secrets are emitted under their own name "+
-						"through secrets:, never renamed", where, key, v.From)
+					return fmt.Errorf("%s.values.%s: %s is a secret; use secret: to select it explicitly", where, key, v.From)
 				}
 				if !c.knowsValuePath(v.From) {
 					return fmt.Errorf("%s.values.%s: unknown value %q (known: %s)", where, key, v.From,
@@ -343,7 +383,7 @@ func (c *WetConfig) UnusedSecrets() []string {
 	}
 	used := map[string]bool{}
 	for _, o := range c.Outputs {
-		for _, name := range o.Secrets {
+		for _, name := range o.selectedSecretNames() {
 			used[name] = true
 		}
 	}
@@ -818,6 +858,10 @@ func lookupOrdinary(data map[string]any, name string) (string, error) {
 // by pre-filtering the caller's map, so there is exactly one place that
 // decides an output may see a credential.
 func ResolveOutput(o OutputConfig, data map[string]any, secrets map[string]resolvedSecret) (*ResolvedOutput, error) {
+	return resolveOutput(o, data, secrets, nil)
+}
+
+func resolveOutput(o OutputConfig, data map[string]any, secrets map[string]resolvedSecret, filePaths map[string]string) (*ResolvedOutput, error) {
 	res := &ResolvedOutput{Config: o}
 	mode, err := o.FileMode()
 	if err != nil {
@@ -832,20 +876,44 @@ func ResolveOutput(o OutputConfig, data map[string]any, secrets map[string]resol
 		}
 		res.Pairs = append(res.Pairs, EnvPair{Key: name, Value: v})
 	}
-	for _, name := range o.Secrets {
+	addSecret := func(key, name string) error {
 		s, ok := secrets[name]
 		if !ok {
-			return nil, fmt.Errorf("outputs %s: secret %s was not resolved", o.Name, name)
+			return fmt.Errorf("outputs %s: secret %s was not resolved", o.Name, name)
 		}
-		res.Pairs = append(res.Pairs, EnvPair{Key: name, Value: s.value})
+		res.Pairs = append(res.Pairs, EnvPair{Key: key, Value: s.value})
 		if s.origin == SecretFromDefault {
-			res.FromDefault = append(res.FromDefault, name)
+			if !slices.Contains(res.FromDefault, name) {
+				res.FromDefault = append(res.FromDefault, name)
+			}
 		} else {
-			res.FromStore = append(res.FromStore, name)
+			if !slices.Contains(res.FromStore, name) {
+				res.FromStore = append(res.FromStore, name)
+			}
+		}
+		return nil
+	}
+	for _, name := range o.Secrets {
+		if err := addSecret(name, name); err != nil {
+			return nil, err
 		}
 	}
 	for _, key := range o.Values.Keys {
 		v := o.Values.By[key]
+		if v.Secret != "" {
+			if err := addSecret(key, v.Secret); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if v.File != "" {
+			path, ok := filePaths[v.File]
+			if !ok {
+				return nil, fmt.Errorf("outputs %s: file %s was not resolved", o.Name, v.File)
+			}
+			res.Pairs = append(res.Pairs, EnvPair{Key: key, Value: path})
+			continue
+		}
 		if v.Literal != nil {
 			res.Pairs = append(res.Pairs, EnvPair{Key: key, Value: *v.Literal})
 			continue
@@ -857,7 +925,15 @@ func ResolveOutput(o OutputConfig, data map[string]any, secrets map[string]resol
 		res.Pairs = append(res.Pairs, EnvPair{Key: key, Value: val})
 	}
 
-	content, err := EncodeDotenv(res.Pairs)
+	var content string
+	switch o.Format {
+	case OutputFormatProperties:
+		content, err = EncodeProperties(res.Pairs)
+	case OutputFormatDotenv:
+		content, err = EncodeDotenv(res.Pairs)
+	default:
+		err = fmt.Errorf("unsupported key/value format %q", o.Format)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("outputs %s (%s): %w", o.Name, o.Out, err)
 	}
@@ -954,6 +1030,14 @@ func PullOutputs(req PullRequest) error {
 			len(selected), strings.Join(outputConfigNames(selected), ", "))
 	}
 
+	selected, err = req.Cfg.withFileDependencies(selected)
+	if err != nil {
+		return err
+	}
+	if req.Content != nil && len(selected) != 1 {
+		return errors.New("--stdout cannot generate an output with file dependencies; pull it to disk so its file paths exist")
+	}
+
 	policy := req.Cfg.Secrets.PolicyOrDefault()
 	if req.Policy != "" {
 		if !slices.Contains(SecretPolicies, req.Policy) {
@@ -970,23 +1054,29 @@ func PullOutputs(req PullRequest) error {
 	// Collect across every requested output first, so a shared credential is
 	// one fetch no matter how many files consume it.
 	needed := map[string]bool{}
+	neededFiles := map[string]bool{}
 	for _, o := range selected {
-		for _, name := range o.Secrets {
+		if o.Format == OutputFormatFile {
+			neededFiles[o.Secret] = true
+			continue
+		}
+		for _, name := range o.selectedSecretNames() {
 			needed[name] = true
 		}
 	}
+	needStore := len(needed)+len(neededFiles) > 0
 	// Named in the run's own output, not only in `explain`. A generated
 	// .env.dev carries no record of which environment's vault filled it, so
 	// the pull that wrote it is the only place that can say — and only when
 	// this run actually reads a vault. Announcing an environment over a pull
 	// that resolved no secrets claims an influence it did not have.
-	if env != "" && len(needed) > 0 && policy != SecretPolicyDisabled {
+	if env != "" && needStore && policy != SecretPolicyDisabled {
 		fmt.Fprintf(out, "environment: %s (of %s)\n", env, strings.Join(req.Cfg.Secrets.VaultEnvs(), ", "))
 	}
 
 	store := req.Cfg.secretStoreForTree(req.TreePath)
 	reader := req.Reader
-	if reader == nil && len(needed) > 0 && policy != SecretPolicyDisabled {
+	if reader == nil && needStore && policy != SecretPolicyDisabled {
 		reader, err = newStoreReader(req.Cfg, req.TreePath, store)
 		if err != nil {
 			// A machine with no `op` installed is precisely the case
@@ -1009,10 +1099,30 @@ func PullOutputs(req PullRequest) error {
 		return err
 	}
 
+	files, err := resolveSecrets(req.Cfg, sortedKeys(neededFiles), policy, env, store, fileReaderAdapter{reader})
+	if err != nil {
+		return err
+	}
+	filePaths := map[string]string{}
+	for _, o := range selected {
+		if o.Format == OutputFormatFile {
+			path, err := filepath.Abs(filepath.Join(req.TreePath, o.Out))
+			if err != nil {
+				return err
+			}
+			filePaths[o.Name] = path
+		}
+	}
+
 	resolved := make([]*ResolvedOutput, 0, len(selected))
 	toWrite := make([]*ResolvedOutput, 0, len(selected))
 	for _, o := range selected {
-		r, err := ResolveOutput(o, req.Data, secrets)
+		var r *ResolvedOutput
+		if o.Format == OutputFormatFile {
+			r, err = resolveFileOutput(o, files)
+		} else {
+			r, err = resolveOutput(o, req.Data, secrets, filePaths)
+		}
 		if err != nil {
 			return err
 		}
@@ -1026,15 +1136,15 @@ func PullOutputs(req PullRequest) error {
 		// credentials is a decision, and a silent one reads as the default.
 		// Warned here rather than in Validate() so it fires once, when a file
 		// is about to be written, and not from every command that loads config.
-		if len(r.Config.Secrets) > 0 && r.Mode&0o077 != 0 {
+		if len(r.Config.selectedSecretNames()) > 0 && r.Mode&0o077 != 0 {
 			// Through `out` like every other line in this loop: a caller that
 			// supplies Out is capturing this run's narrative, and a lone write
 			// to os.Stderr interleaves outside its control.
 			fmt.Fprintf(out, "  warning: %s carries %d secret(s) at mode %04o, readable beyond its owner\n",
-				r.Config.Out, len(r.Config.Secrets), r.Mode)
+				r.Config.Out, len(r.Config.selectedSecretNames()), r.Mode)
 		}
 		if req.DryRun {
-			fmt.Fprintf(out, "  would write %s (%d keys)\n", r.Config.Out, len(r.Pairs))
+			fmt.Fprintf(out, "  would write %s (%s)\n", r.Config.Out, r.sizeLabel())
 			continue
 		}
 		toWrite = append(toWrite, r)
@@ -1047,14 +1157,14 @@ func PullOutputs(req PullRequest) error {
 		if _, err := io.WriteString(req.Content, r.Content); err != nil {
 			return fmt.Errorf("outputs %s: %w", r.Config.Name, err)
 		}
-		fmt.Fprintf(out, "  Wrote %s (%d keys) to the stream — no file\n", r.Config.Name, len(r.Pairs))
+		fmt.Fprintf(out, "  Wrote %s (%s) to the stream — no file\n", r.Config.Name, r.sizeLabel())
 		return nil
 	}
 	if err := writeOutputFiles(req.TreePath, toWrite); err != nil {
 		return err
 	}
 	for _, r := range toWrite {
-		fmt.Fprintf(out, "  Wrote %s (%d keys)\n", r.Config.Out, len(r.Pairs))
+		fmt.Fprintf(out, "  Wrote %s (%s)\n", r.Config.Out, r.sizeLabel())
 	}
 	return nil
 }
@@ -1096,7 +1206,7 @@ func writeOutputFiles(treePath string, outs []*ResolvedOutput) error {
 		// listable by anyone else. It only ever leaks the file's name, which
 		// .wet.yaml already publishes, so this is cheap rather than critical.
 		dirMode := os.FileMode(0o755)
-		if len(r.Config.Secrets) > 0 {
+		if len(r.Config.selectedSecretNames()) > 0 {
 			dirMode = 0o700
 		}
 		s, err := stageOutputFile(filepath.Join(treePath, r.Config.Out), r.Content, r.Mode, dirMode)
@@ -1118,7 +1228,11 @@ func writeOutputFiles(treePath string, outs []*ResolvedOutput) error {
 // checkout. It treats the main checkout's generated outputs as the local cache
 // of already-pulled credentials, and also accepts a root .env when a repo uses
 // that shape.
-type envFileSecretReader struct{ values map[string]string }
+type envFileSecretReader struct {
+	values map[string]string
+	root   string
+	files  map[string][]string
+}
 
 func newEnvFileSecretReader(cfg *WetConfig, treePath string) (*envFileSecretReader, error) {
 	if treePath == "" {
@@ -1134,10 +1248,23 @@ func newEnvFileSecretReader(cfg *WetConfig, treePath string) (*envFileSecretRead
 		return nil, fmt.Errorf("checkout for %s not found: %w", mainBranch, errStoreUnavailable)
 	}
 	values := map[string]string{}
+	files := map[string][]string{}
+	outputs := map[string]OutputConfig{}
+	for _, o := range cfg.Outputs {
+		outputs[filepath.Clean(o.Out)] = o
+		if o.Format == OutputFormatFile {
+			ref, err := cfg.Secrets.ResolveSecretRefForStore(o.Secret, "", secretStoreProviderEnvFile)
+			if err != nil {
+				return nil, err
+			}
+			files[ref.Field] = append(files[ref.Field], o.Out)
+		}
+	}
 	var readAny bool
 	for _, rel := range mainEnvFilePaths(cfg) {
 		envPath := filepath.Join(root, rel)
-		fileValues, _, err := ParseEnvFile(envPath)
+		o := outputs[rel]
+		fileValues, _, err := parseOutputValues(envPath, o.Format)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				continue
@@ -1145,27 +1272,49 @@ func newEnvFileSecretReader(cfg *WetConfig, treePath string) (*envFileSecretRead
 			return nil, fmt.Errorf("read %s: %w", envPath, errors.Join(err, errStoreUnavailable))
 		}
 		readAny = true
+		for _, binding := range o.secretBindings() {
+			if value, ok := fileValues[binding.key]; ok {
+				ref, err := cfg.Secrets.ResolveSecretRefForStore(binding.name, "", secretStoreProviderEnvFile)
+				if err != nil {
+					return nil, err
+				}
+				if _, exists := values[ref.Field]; !exists {
+					values[ref.Field] = value
+				}
+			}
+		}
 		for k, v := range fileValues {
 			if _, exists := values[k]; !exists {
 				values[k] = v
 			}
 		}
 	}
-	if !readAny {
+	if !readAny && len(files) == 0 {
 		return nil, fmt.Errorf("no env files found in checkout for %s: %w", mainBranch, errStoreUnavailable)
 	}
-	return &envFileSecretReader{values: values}, nil
+	return &envFileSecretReader{values: values, root: root, files: files}, nil
 }
 
 func mainEnvFilePaths(cfg *WetConfig) []string {
-	seen := map[string]bool{".env": true}
-	paths := []string{".env"}
+	seen := map[string]bool{}
+	var paths []string
+	rootOutputIsFile := false
 	for _, o := range cfg.Outputs {
-		if o.Out == "" || seen[o.Out] {
+		if filepath.Clean(o.Out) == ".env" && o.Format == OutputFormatFile {
+			rootOutputIsFile = true
+		}
+	}
+	if !rootOutputIsFile {
+		paths = append(paths, ".env")
+		seen[".env"] = true
+	}
+	for _, o := range cfg.Outputs {
+		path := filepath.Clean(o.Out)
+		if o.Format == OutputFormatFile || o.Out == "" || seen[path] {
 			continue
 		}
-		seen[o.Out] = true
-		paths = append(paths, o.Out)
+		seen[path] = true
+		paths = append(paths, path)
 	}
 	return paths
 }

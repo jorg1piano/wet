@@ -880,6 +880,9 @@ var commentedSchemaKeys = map[string]*regexp.Regexp{
 	// is copied into real repos, and a live entry would hand every copy an
 	// output pointing at a deploy environment that does not exist.
 	"outputs[].on_demand": regexp.MustCompile(`(?m)^  #   on_demand: true$`),
+	// A file output requires a provider definition. Keep it beside the
+	// commented provider examples so the live config can run without a vault.
+	"outputs[].secret": regexp.MustCompile(`(?m)^  #   secret: BUNDLE$`),
 	// The whole secrets: block is optional and names a real vault, so a live
 	// example would send anyone running the example config at a vault that
 	// isn't theirs. Each leaf is pinned to the shape it is documented as.

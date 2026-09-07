@@ -19,14 +19,15 @@ var (
 )
 
 var envPushCmd = &cobra.Command{
-	Use:   "push <output> --from <dotenv-file>",
-	Short: "Write an output's declared secrets from a dotenv file into the store",
-	Long: `Read a dotenv file and store the values of the secrets the named output
-selects.
+	Use:   "push <output> --from <file>",
+	Short: "Write an output's declared secrets from a dotenv or properties file into the store",
+	Long: `Read a dotenv or properties file and store the secrets the named output
+selects. The output's format: determines how the source is parsed. File outputs
+cannot be uploaded with env push.
 
 The named output is the authorization boundary. wet writes a key only when it
-is both declared under secrets.definitions: and listed in that output's
-secrets:. Every other key in the file — ordinary configuration, unknown names,
+is declared under secrets.definitions: and selected by that output's secrets:
+list or values.<key>.secret:. Every other key in the file — ordinary configuration, unknown names,
 secrets belonging to another output — is ignored and reported. There is no flag
 that lets an undeclared key reach the store; a destination mapping cannot be
 invented on the command line.
@@ -61,7 +62,7 @@ Names, destinations and statuses are printed. Values never are.`,
 }
 
 func init() {
-	envPushCmd.Flags().StringVar(&envPushFrom, "from", "", "dotenv file to read (required)")
+	envPushCmd.Flags().StringVar(&envPushFrom, "from", "", "dotenv or properties file to read, matching the output format (required)")
 	envPushCmd.Flags().BoolVar(&envPushDryRun, "dry-run", false, "report what would be written, write nothing")
 	envPushCmd.Flags().BoolVar(&envPushForce, "force", false, "overwrite a destination holding a different value")
 	envPushCmd.Flags().BoolVar(&envPushCreateItem, "create-item", false, "create the destination item if it does not exist")
@@ -89,7 +90,10 @@ func runEnvPush(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	output := selected[0]
-	if len(output.Secrets) == 0 {
+	if output.Format == OutputFormatFile {
+		return fmt.Errorf("output %q is a provider file; env push supports key/value outputs only", output.Name)
+	}
+	if len(output.selectedSecretNames()) == 0 {
 		return fmt.Errorf("output %q selects no secrets, so there is nothing to push", output.Name)
 	}
 	if cfg.Secrets == nil {
@@ -115,16 +119,16 @@ func runEnvPush(cmd *cobra.Command, args []string) error {
 		fmt.Printf("environment: %s (of %s)\n", env, strings.Join(cfg.Secrets.VaultEnvs(), ", "))
 	}
 
-	values, order, err := ParseEnvFile(envPushFrom)
+	values, order, err := parseOutputValues(envPushFrom, output.Format)
 	if err != nil {
 		return err
 	}
 
 	// The output's selection, not the whole definitions block: a secret
 	// another output owns is as unwritable here as an undeclared key.
-	selectable := make(map[string]bool, len(output.Secrets))
-	for _, name := range output.Secrets {
-		selectable[name] = true
+	selectable := make(map[string]bool)
+	for _, binding := range output.secretBindings() {
+		selectable[binding.key] = true
 	}
 	var unmapped []string
 	for _, key := range order {
@@ -158,13 +162,14 @@ func runEnvPush(cmd *cobra.Command, args []string) error {
 	items := map[string]itemState{}
 	conflicts := 0
 
-	for _, name := range output.Secrets {
+	for _, binding := range output.secretBindings() {
+		name := binding.name
 		def := cfg.Secrets.Definitions[name]
 		ref, err := cfg.Secrets.ResolveSecretRef(name, env)
 		if err != nil {
 			return err
 		}
-		value, present := values[name]
+		value, present := values[binding.key]
 		if !present {
 			report = append(report, pushStatus{name, ref, "absent from " + envPushFrom})
 			continue

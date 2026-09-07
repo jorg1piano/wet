@@ -91,8 +91,10 @@ type OutputConfig struct {
 	Name string `yaml:"name"`
 	// Out is the generated file, relative to the checkout being configured.
 	Out string `yaml:"out"`
-	// Format selects the encoder. Only "dotenv" is implemented.
+	// Format selects dotenv, properties, or an unmodified provider file.
 	Format string `yaml:"format"`
+	// Secret selects the definition downloaded by a format: file output.
+	Secret string `yaml:"secret,omitempty"`
 	// Mode is the file mode as an octal string ("0644"). Empty means 0600,
 	// because a generated env file may carry secrets and outlives the command.
 	Mode string `yaml:"mode,omitempty"`
@@ -106,9 +108,7 @@ type OutputConfig struct {
 	Values OutputValues `yaml:"values,omitempty"`
 	// OnDemand keeps this output out of the sweep that configures a checkout:
 	// `wet setup`, `wet worktree create` and a bare `wet env pull` skip it,
-	// and only naming it generates it. For the files that are not a
-	// worktree's own — a deploy environment's dotenv, whose credentials have
-	// no business on a developer's disk just because they made a worktree.
+	// unless explicitly named or selected as a values.file dependency.
 	OnDemand bool `yaml:"on_demand,omitempty"`
 }
 
@@ -119,13 +119,15 @@ type OutputValues struct {
 	By   map[string]OutputValue
 }
 
-// OutputValue is one `values:` entry. Exactly one of From and Literal is set.
+// OutputValue is one values: entry. Exactly one source is set.
 type OutputValue struct {
-	// From names an ordinary value, port, or reserved field. Secrets are
-	// deliberately not reachable: they are emitted only through `secrets:`
-	// and keep their logical name, so a rename can never smuggle one into an
-	// output that did not select it.
+	// From names an ordinary value, port, or reserved field.
 	From string `yaml:"from,omitempty"`
+	// Secret explicitly selects a definition under this output key.
+	Secret string `yaml:"secret,omitempty"`
+	// File names a format: file output. Its absolute path is the value, and
+	// pulling this output also downloads that file.
+	File string `yaml:"file,omitempty"`
 	// Literal is a fixed scalar. A pointer so an intentional empty literal is
 	// distinguishable from "no literal given".
 	Literal *string `yaml:"literal,omitempty"`
@@ -142,7 +144,7 @@ func (v *OutputValues) UnmarshalYAML(node *yaml.Node) error {
 		return nil
 	}
 	if node.Kind != yaml.MappingNode {
-		return fmt.Errorf("values: must be a mapping of output key to {from|literal}")
+		return fmt.Errorf("values: must be a mapping of output key to {from|literal|secret|file}")
 	}
 	v.Keys = make([]string, 0, len(node.Content)/2)
 	v.By = make(map[string]OutputValue, len(node.Content)/2)
@@ -190,9 +192,8 @@ type PRConfig struct {
 // called, once, for the whole repo.
 //
 // A definition is a name plus a place in the store, never a value. Which
-// outputs may see a definition is decided by the outputs — an output's
-// `secrets:` list is the authorization boundary, so defining a credential does
-// not hand it to every generated file.
+// outputs may see a definition is decided by their explicit secret selections.
+// Defining a credential does not hand it to every generated file.
 //
 // One definition per credential, shared by name: GOOGLE_CLIENT_ID is one
 // credential whether the backend or a deployment reads it, so the store stays
@@ -249,10 +250,9 @@ type VaultConfig struct {
 	Env string `yaml:"env"`
 }
 
-// SecretDefinition is one credential: what it is called here, where it lives
-// in the store, and what stands in for it when the store cannot be reached.
+// SecretDefinition names a value or file in the store and its optional default.
 type SecretDefinition struct {
-	// Field is the field on the item. Required unless Ref is given.
+	// Field is the field or attachment filename. Required unless Ref is given.
 	Field string `yaml:"field,omitempty"`
 	// Vault and Item override the block-level destination for this one secret.
 	Vault string `yaml:"vault,omitempty"`

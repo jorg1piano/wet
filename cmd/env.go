@@ -42,8 +42,8 @@ var envPullCmd = &cobra.Command{
 	Short: "Regenerate declared environment files for this worktree",
 	Long: `Regenerate the files declared under outputs: in .wet.yaml.
 
-With no argument every declared output is regenerated; with a name, only that
-one:
+With no argument every output without on_demand: true is regenerated. Naming
+an output also pulls any format: file outputs its values reference:
 
   wet env pull
   wet env pull backend
@@ -51,7 +51,10 @@ one:
 Values come from this worktree's allocation — its slot, its strided ports, its
 pool items — layered with .env.local overrides and the resolved env: block.
 Secrets come from the store named by secrets.store, and only the ones an
-output's secrets: list selects reach that output.
+output explicitly selects through secrets:, secret:, or values.<key>.secret
+reach that output. A format: file output downloads the selected secret as
+unmodified bytes. Use values.<key>.file to insert that output's absolute path.
+Key/value outputs support format: dotenv and format: properties.
 
 pull regenerates files and nothing else. It does not register a worktree,
 allocate or change a slot, ports or pool items, write .env.worktree, or run
@@ -80,7 +83,8 @@ them and never land on a developer's filesystem:
   wet env pull fly-staging --stdout | fly secrets import --app my-app
 
 It takes exactly one output, and every progress line goes to stderr so the
-stream carries the file and nothing else.`,
+stream carries the file and nothing else. An output with file dependencies
+requires a pull to disk, so --stdout rejects it.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runEnvPull,
 }
@@ -196,6 +200,10 @@ func runEnvExplain(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	selected, err = cfg.withFileDependencies(selected)
+	if err != nil {
+		return err
+	}
 	env, err := cfg.Secrets.SelectEnv(envSelectEnv)
 	if err != nil {
 		return err
@@ -210,7 +218,7 @@ func runEnvExplain(cmd *cobra.Command, args []string) error {
 	// environment did not have.
 	explainsASecret := false
 	for _, o := range selected {
-		explainsASecret = explainsASecret || len(o.Secrets) > 0
+		explainsASecret = explainsASecret || len(o.selectedSecretNames()) > 0
 	}
 	if env != "" && explainsASecret {
 		fmt.Printf("environment: %s (of %s)\n\n", env, strings.Join(cfg.Secrets.VaultEnvs(), ", "))
@@ -224,7 +232,7 @@ func runEnvExplain(cmd *cobra.Command, args []string) error {
 		// expect on disk: this file is not there after a setup.
 		demand := ""
 		if o.OnDemand {
-			demand = " — on demand, generated only when named"
+			demand = " — on demand, generated when named or referenced"
 		}
 		fmt.Printf("%s — %s (%s)%s\n", o.Name, o.Out, o.Format, demand)
 		// Literals are counted apart from ordinary values because they are a
@@ -233,13 +241,17 @@ func runEnvExplain(cmd *cobra.Command, args []string) error {
 		// cannot. A client output that is mostly literals would otherwise
 		// report a large "ordinary" count and imply an environment coupling
 		// it does not have.
-		literals := 0
+		literals, references := 0, 0
 		for _, key := range o.Values.Keys {
-			if o.Values.By[key].Literal != nil {
+			v := o.Values.By[key]
+			if v.Secret != "" || v.File != "" {
+				references++
+			}
+			if v.Literal != nil {
 				literals++
 			}
 		}
-		fmt.Printf("  ordinary: %d\n", len(o.Include)+len(o.Values.Keys)-literals)
+		fmt.Printf("  ordinary: %d\n", len(o.Include)+len(o.Values.Keys)-literals-references)
 		if literals > 0 {
 			fmt.Printf("  literals: %d\n", literals)
 		}
@@ -251,18 +263,30 @@ func runEnvExplain(cmd *cobra.Command, args []string) error {
 		}
 		for _, key := range o.Values.Keys {
 			v := o.Values.By[key]
+			if v.Secret != "" {
+				fmt.Printf("    %s = secret %s\n", key, v.Secret)
+				continue
+			}
+			if v.File != "" {
+				file, _ := cfg.outputByName(v.File)
+				fmt.Printf("    %s = path to %s (%s, pulled with this output)\n", key, v.File, file.Out)
+				continue
+			}
 			if v.Literal != nil {
 				fmt.Printf("    %s = literal\n", key)
 				continue
 			}
 			fmt.Printf("    %s = from %s (%s)\n", key, v.From, valueSourceLabel(cfg, v.From))
 		}
-		if len(o.Secrets) == 0 {
+		if len(o.selectedSecretNames()) == 0 {
 			fmt.Printf("  secrets: 0\n")
 			continue
 		}
-		fmt.Printf("  secrets: %d (policy %s, provider %s)\n", len(o.Secrets), cfg.Secrets.PolicyOrDefault(), store)
-		for _, name := range o.Secrets {
+		if o.Format == OutputFormatFile {
+			fmt.Printf("  file: %s (downloaded unchanged)\n", o.Secret)
+		}
+		fmt.Printf("  secrets: %d (policy %s, provider %s)\n", len(o.selectedSecretNames()), cfg.Secrets.PolicyOrDefault(), store)
+		for _, name := range o.selectedSecretNames() {
 			def := cfg.Secrets.Definitions[name]
 			fallback := "no default"
 			if def.HasDefault() {
@@ -290,6 +314,10 @@ func runEnvExplain(cmd *cobra.Command, args []string) error {
 			fixed := ""
 			if env != "" && (def.Ref != "" || def.Vault != "") {
 				fixed = ", same in every environment"
+			}
+			if ref.Store == secretStoreProviderEnvFile && o.Format == OutputFormatFile {
+				fmt.Printf("    %s -> main-branch file output (%s)\n", name, fallback)
+				continue
 			}
 			if ref.Store == secretStoreProviderEnvFile {
 				fmt.Printf("    %s -> main-branch .env:%s (%s%s)\n", name, ref.Field, fallback, fixed)

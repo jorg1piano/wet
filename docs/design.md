@@ -98,8 +98,10 @@ the file is correct, and it just isn't the file you wrote.
 ## Why secret scope belongs to the output
 
 A secret definition says where a credential lives. It does not say who may read
-it. That second question is answered by each output's `secrets:` list, and only
-there.
+it. Each output selects definitions through its `secrets:` list,
+`values.<key>.secret:`, or a file output's `secret:`. `values.<key>.file:` selects
+a file output as a dependency and uses its absolute path. All these selections
+participate in the same pull pipeline.
 
 The failure this prevents is concrete: a mobile app's `.env` is compiled into a
 shipped client, and every value in it must be assumed public. If defining
@@ -109,11 +111,10 @@ somebody remembering not to mention it. Scope-by-declaration means the mobile
 output cannot receive it even by accident, and the config says so in the place
 a reviewer is already looking.
 
-That is also why a secret can never be renamed. `include:` refuses a secret
-name and points at `secrets:`; `values.<key>.from:` refuses one outright.
-Allowing `oidcClientSecret: { from: GOOGLE_CLIENT_SECRET }` would put the
-authorization decision in a rename, where it is invisible — the whole point is
-that one list, per output, is the boundary.
+`include:` and `values.<key>.from:` refuse secret names. A consumer that needs
+a different key uses `oidcClientSecret: { secret: GOOGLE_CLIENT_SECRET }`.
+The explicit `secret:` source makes that selection visible in the config and
+in provenance reports.
 
 The same rule runs in reverse for `wet env push`. Presence in
 `secrets.definitions:` *plus* selection by the named output is the authorization
