@@ -41,7 +41,7 @@ never creates a branch, and if only `origin/<branch>` is there it fetches and
 sets up a local tracking branch first. After the checkout it opens the
 configured multiplexer window and prints the same `wet worktree setup` next-step
 hint. Both commands take `--no-multiplexer` when something else is managing
-sessions; `--no-tmux` is still accepted as a deprecated alias.
+sessions.
 
 For scripts and orchestrators, `create --json` keeps stdout machine-readable
 and reports the new branch, its absolute worktree path, and the ref it branched

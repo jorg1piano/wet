@@ -63,10 +63,10 @@ func TestRunWorktreeCreateJSON(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chdir(previousDir) })
 
-	previousJSON, previousNoTmux := worktreeCreateJSON, worktreeCreateNoTmux
-	worktreeCreateJSON, worktreeCreateNoTmux = true, true
+	previousJSON, previousNoMultiplexer := worktreeCreateJSON, worktreeCreateNoMultiplexer
+	worktreeCreateJSON, worktreeCreateNoMultiplexer = true, true
 	t.Cleanup(func() {
-		worktreeCreateJSON, worktreeCreateNoTmux = previousJSON, previousNoTmux
+		worktreeCreateJSON, worktreeCreateNoMultiplexer = previousJSON, previousNoMultiplexer
 	})
 
 	var stdout, stderr bytes.Buffer

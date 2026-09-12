@@ -27,8 +27,7 @@ port allocation, template rendering, or hook execution. Run
 configuration step.
 
 Pass ` + "`--no-multiplexer`" + ` to skip opening a configured terminal
-multiplexer window — useful when a higher-level orchestrator manages sessions
-itself. ` + "`--no-tmux`" + ` is kept as a backward-compatible alias.
+multiplexer window when another tool manages sessions.
 
 Pass ` + "`--json`" + ` to write the created branch, its worktree path, and
 the base ref it branched from as JSON. Progress is written to stderr in this
@@ -38,13 +37,12 @@ mode so stdout remains machine-readable.`,
 }
 
 var (
-	worktreeCreateNoTmux bool
-	worktreeCreateJSON   bool
+	worktreeCreateNoMultiplexer bool
+	worktreeCreateJSON          bool
 )
 
 func init() {
-	worktreeCreateCmd.Flags().BoolVar(&worktreeCreateNoTmux, "no-multiplexer", false, "don't open a new terminal multiplexer window after creating the worktree")
-	worktreeCreateCmd.Flags().BoolVar(&worktreeCreateNoTmux, "no-tmux", false, "deprecated alias for --no-multiplexer")
+	worktreeCreateCmd.Flags().BoolVar(&worktreeCreateNoMultiplexer, "no-multiplexer", false, "don't open a new terminal multiplexer window after creating the worktree")
 	worktreeCreateCmd.Flags().BoolVar(&worktreeCreateJSON, "json", false, "output the created worktree as JSON")
 	worktreeCmd.AddCommand(worktreeCreateCmd)
 }
@@ -141,12 +139,12 @@ func runWorktreeCreate(cmd *cobra.Command, args []string) error {
 	}
 
 	if !worktreeCreateJSON {
-		return createWorktree(branchName, worktreeCreateNoTmux)
+		return createWorktree(branchName, worktreeCreateNoMultiplexer)
 	}
 
 	result, err := createWorktreeWithWriters(
 		branchName,
-		worktreeCreateNoTmux,
+		worktreeCreateNoMultiplexer,
 		cmd.ErrOrStderr(),
 		cmd.ErrOrStderr(),
 	)
@@ -173,19 +171,19 @@ type worktreeCreateResult struct {
 //  2. Runs `git worktree add -b <branch> ../worktree-<branch>`.
 //  3. Copies `.env` from the main repo root if present (single-file copy,
 //     no config lookup, no templating).
-//  4. Opens a configured multiplexer window (unless noTmux).
+//  4. Opens a configured multiplexer window (unless noMultiplexer).
 //
 // No .wet.yaml load, no port allocation, no state file write, no hooks. Run
 // `wet worktree setup` from inside the new worktree to configure the rest.
-func createWorktree(branchName string, noTmux bool) error {
-	_, err := createWorktreeWithWriters(branchName, noTmux, os.Stdout, os.Stderr)
+func createWorktree(branchName string, noMultiplexer bool) error {
+	_, err := createWorktreeWithWriters(branchName, noMultiplexer, os.Stdout, os.Stderr)
 	return err
 }
 
 // createWorktreeWithWriters performs createWorktree while directing progress
 // and subprocess output to caller-selected streams. JSON mode uses stderr for
 // both so its stdout can contain exactly one JSON document.
-func createWorktreeWithWriters(branchName string, noTmux bool, out, errOut io.Writer) (worktreeCreateResult, error) {
+func createWorktreeWithWriters(branchName string, noMultiplexer bool, out, errOut io.Writer) (worktreeCreateResult, error) {
 	repoRoot, err := getMainRepoRoot()
 	if err != nil {
 		return worktreeCreateResult{}, err
@@ -212,7 +210,7 @@ func createWorktreeWithWriters(branchName string, noTmux bool, out, errOut io.Wr
 		return worktreeCreateResult{}, fmt.Errorf("failed to create worktree: %w", err)
 	}
 
-	if err := postWorktreeAddWithWriter(repoRoot, worktreePath, branchName, "Created", noTmux, out); err != nil {
+	if err := postWorktreeAddWithWriter(repoRoot, worktreePath, branchName, "Created", noMultiplexer, out); err != nil {
 		return worktreeCreateResult{}, err
 	}
 
@@ -266,17 +264,17 @@ func worktreePathFor(repoRoot, branchName string) string {
 
 // postWorktreeAdd runs the shared steps after `git worktree add` succeeds,
 // for both `create` and `mount`: open a configured multiplexer window (unless
-// noTmux), and print the next-step hint. `label` is the past-tense verb used
-// in the success line ("Created" or "Mounted"). `noTmux` suppresses that
-// window — used by orchestrators that manage sessions themselves.
-func postWorktreeAdd(repoRoot, worktreePath, branchName, label string, noTmux bool) error {
-	return postWorktreeAddWithWriter(repoRoot, worktreePath, branchName, label, noTmux, os.Stdout)
+// noMultiplexer), and print the next-step hint. `label` is the past-tense verb
+// used in the success line ("Created" or "Mounted"). `noMultiplexer` suppresses
+// that window when another tool manages sessions.
+func postWorktreeAdd(repoRoot, worktreePath, branchName, label string, noMultiplexer bool) error {
+	return postWorktreeAddWithWriter(repoRoot, worktreePath, branchName, label, noMultiplexer, os.Stdout)
 }
 
-func postWorktreeAddWithWriter(repoRoot, worktreePath, branchName, label string, noTmux bool, out io.Writer) error {
+func postWorktreeAddWithWriter(repoRoot, worktreePath, branchName, label string, noMultiplexer bool, out io.Writer) error {
 	fmt.Fprintf(out, "\n  %s worktree '%s' at %s\n", label, branchName, worktreePath)
 
-	if !noTmux {
+	if !noMultiplexer {
 		openMultiplexerWindow(repoRoot, worktreePath, branchName, out)
 	}
 

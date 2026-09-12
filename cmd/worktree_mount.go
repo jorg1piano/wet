@@ -26,17 +26,15 @@ worktree to perform the ` + "`.wet.yaml`" + `-driven configuration step (port
 allocation, file copy list, hooks).
 
 Pass ` + "`--no-multiplexer`" + ` to skip opening a configured terminal
-multiplexer window when an orchestrator is managing sessions itself.
-` + "`--no-tmux`" + ` is kept as a backward-compatible alias.`,
+multiplexer window when another tool manages sessions.`,
 	Args: cobra.ExactArgs(1),
 	RunE: runWorktreeMount,
 }
 
-var worktreeMountNoTmux bool
+var worktreeMountNoMultiplexer bool
 
 func init() {
-	worktreeMountCmd.Flags().BoolVar(&worktreeMountNoTmux, "no-multiplexer", false, "don't open a new terminal multiplexer window after mounting the worktree")
-	worktreeMountCmd.Flags().BoolVar(&worktreeMountNoTmux, "no-tmux", false, "deprecated alias for --no-multiplexer")
+	worktreeMountCmd.Flags().BoolVar(&worktreeMountNoMultiplexer, "no-multiplexer", false, "don't open a new terminal multiplexer window after mounting the worktree")
 	worktreeCmd.AddCommand(worktreeMountCmd)
 }
 
@@ -45,7 +43,7 @@ func runWorktreeMount(cmd *cobra.Command, args []string) error {
 	if branchName == "" {
 		return fmt.Errorf("branch name cannot be empty")
 	}
-	return mountWorktree(branchName, worktreeMountNoTmux)
+	return mountWorktree(branchName, worktreeMountNoMultiplexer)
 }
 
 // mountWorktree is the worktree-mount path for a branch that already exists
@@ -61,7 +59,7 @@ func runWorktreeMount(cmd *cobra.Command, args []string) error {
 //
 // No .wet.yaml load, no port allocation, no state file write, no hooks. Run
 // `wet worktree setup` from inside the new worktree to configure the rest.
-func mountWorktree(branchName string, noTmux bool) error {
+func mountWorktree(branchName string, noMultiplexer bool) error {
 	repoRoot, err := getMainRepoRoot()
 	if err != nil {
 		return err
@@ -80,7 +78,7 @@ func mountWorktree(branchName string, noTmux bool) error {
 		return fmt.Errorf("failed to create worktree: %w", err)
 	}
 
-	return postWorktreeAdd(repoRoot, worktreePath, branchName, "Mounted", noTmux)
+	return postWorktreeAdd(repoRoot, worktreePath, branchName, "Mounted", noMultiplexer)
 }
 
 // ensureLocalBranch guarantees that a local branch named `branchName` exists
