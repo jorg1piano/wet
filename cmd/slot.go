@@ -44,6 +44,7 @@ func init() {
 func slotLifecycleCmd(name, short string, selectHooks func(HooksConfig) []string) *cobra.Command {
 	return &cobra.Command{
 		Use:   name,
+		Args:  cobra.NoArgs,
 		Short: short,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, err := currentSlotContext(slotHeadless)
@@ -133,6 +134,7 @@ func slotWarmCmd() *cobra.Command {
 	var reset bool
 	cmd := &cobra.Command{
 		Use:   "warm",
+		Args:  cobra.NoArgs,
 		Short: "Start warm slot resources",
 		Long: `Start slot runtimes for claimed worktrees.
 

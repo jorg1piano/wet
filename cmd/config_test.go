@@ -91,8 +91,8 @@ func TestNextFreeSlotWithFreePorts_SkipsBoundPort(t *testing.T) {
 		t.Fatalf("precondition NextFreeSlot(nil) = %d, want 1", got)
 	}
 	// Fixed: port probing finds slot 1's port bound and advances to slot 2.
-	if got := cfg.NextFreeSlotWithFreePorts(nil); got != 2 {
-		t.Errorf("NextFreeSlotWithFreePorts(nil) = %d, want 2 (slot 1 port %d is bound)", got, bound)
+	if got, err := cfg.NextFreeSlotWithFreePorts(nil); err != nil || got != 2 {
+		t.Errorf("NextFreeSlotWithFreePorts(nil) = %d, %v, want 2 (slot 1 port %d is bound)", got, err, bound)
 	}
 }
 
@@ -112,8 +112,26 @@ func TestNextFreeReusableSlotSkipsForeignBoundPort(t *testing.T) {
 			"COMPOSE_PROJECT_NAME": "{{.ProjectName}}-slot-{{.Slot}}",
 		},
 	}
-	if got := cfg.NextFreeReusableSlot(nil); got != 2 {
-		t.Errorf("NextFreeReusableSlot(nil) = %d, want 2 (slot 1 port %d is held by a foreign listener)", got, bound)
+	if got, err := cfg.NextFreeReusableSlot(nil); err != nil || got != 2 {
+		t.Errorf("NextFreeReusableSlot(nil) = %d, %v, want 2 (slot 1 port %d is held by a foreign listener)", got, err, bound)
+	}
+}
+
+func TestSlotAllocationStopsAtClusterBoundary(t *testing.T) {
+	cfg := &WetConfig{ClusterSlots: 3, Ports: []PortConfig{{Name: "APP_PORT", Base: 4000, Stride: 10}}}
+	for _, allocate := range []func([]int) (int, error){cfg.NextFreeSlotWithFreePorts, cfg.NextFreeReusableSlot} {
+		if _, err := allocate([]int{1, 2}); err == nil || !strings.Contains(err.Error(), "cluster_slots") {
+			t.Fatalf("full band should fail before allocating the next clone's slot 0: %v", err)
+		}
+	}
+}
+
+func TestSlotAllocationStopsAtPortRange(t *testing.T) {
+	cfg := &WetConfig{Ports: []PortConfig{{Name: "APP_PORT", Base: 65535, Stride: 10}}}
+	for _, allocate := range []func([]int) (int, error){cfg.NextFreeSlotWithFreePorts, cfg.NextFreeReusableSlot} {
+		if _, err := allocate(nil); err == nil || !strings.Contains(err.Error(), "65535") {
+			t.Fatalf("unrepresentable port should fail instead of probing forever: %v", err)
+		}
 	}
 }
 

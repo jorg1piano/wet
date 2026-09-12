@@ -18,6 +18,7 @@ var dockerCleanupVerbose bool
 
 var dockerCleanupCmd = &cobra.Command{
 	Use:   "cleanup",
+	Args:  cobra.NoArgs,
 	Short: "Remove stale Docker Compose containers not owned by active panes or the slot pool",
 	Long: `Remove stale Docker Compose containers for this wet repo.
 

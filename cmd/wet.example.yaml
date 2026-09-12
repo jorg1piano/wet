@@ -25,9 +25,9 @@
 # has to satisfy Docker Compose's naming rules.
 project_name: myapp
 
-# The trunk: the branch new worktrees are cut from (origin/<branch> when that
-# ref exists, so a worktree starts from what's on the remote rather than from
-# a stale local tip), the default base for `wet pr create`, and the one branch
+# The trunk: the branch new worktrees are cut from. wet uses the local branch
+# when it contains every commit in origin/<branch>, and the cached origin ref
+# otherwise. create does not fetch. This is also the default PR base and a branch
 # wet refuses to open a PR from. Optional; defaults to "main".
 main_branch: main
 
@@ -69,6 +69,9 @@ copy:
 # is what lets several stacks run side by side. Slots are reused lowest-first
 # as worktrees are popped, and a slot is only taken if its ports are also
 # actually free on the host.
+# With ports declared, slots must stay below cluster_slots. The default 10
+# allows main plus nine worktrees. A full band or a port above 65535 fails
+# setup; no allocation spills into the next clone's band.
 #
 # Names must match [A-Z_][A-Z0-9_]* and must not collide with the reserved
 # template fields, which are: ProjectName, Branch, BranchSafe, Slot, Pools,
@@ -113,8 +116,10 @@ ports:
 # catching stale untracked stacks before Docker reports "port is allocated".
 # Set slot_pool when released slots intentionally keep warm resources bound to
 # their ports — for example a DB container/volume that survives worktree pop.
-# Then the state file, not host-port probing, decides which slot is free, and
-# your `hooks.slot_reset` must clean/verify the warm resource before use.
+# A busy port is reusable only when Docker reports this slot's own Compose
+# project as its owner. Other listeners still cause the slot to be skipped.
+# Run `wet slot reset` before reuse, or call it from post_create. Setup does
+# not automatically run slot_reset or slot_start.
 slot_pool: false
 
 # ---------------------------------------------------------------------------
@@ -161,8 +166,8 @@ pools:
 # come online, appends `emulator:<AVD_NAME>` to the machine-local
 # `.wet.local.yaml` (never to this committed file), and claims it.
 #
-# A pool with no entry here — or with any other value — is not grown: it fails
-# with the exhaustion error described above.
+# A pool with no entry here fails on exhaustion. An unknown strategy or an
+# entry naming an undeclared pool fails when the config loads.
 #
 # A pool with a strategy may start EMPTY: `devices: []` plus the strategy below
 # is the bootstrap case, and wet creates the first AVD on the first `wet setup`:
@@ -267,8 +272,8 @@ env:
 #             `literal:` emits a fixed scalar; `secret:` selects a definition;
 #             `file:` inserts a file output's absolute path and pulls that file.
 #             Exactly one source is required per key.
-#   on_demand optional. Keeps the output out of the sweep: `wet setup`, `wet
-#             worktree create` and a bare `wet env pull` skip it, and only
+#   on_demand optional. Keeps the output out of the sweep: `wet setup` and
+#             a bare `wet env pull` skip it, and only
 #             `wet env pull <name>` generates it. A values.file dependency also
 #             selects an on-demand file. For the files that are not
 #             this checkout's at all — a deploy environment's dotenv, whose
@@ -623,7 +628,7 @@ hooks:
 # Pull requests — `wet pr create`
 # ---------------------------------------------------------------------------
 #
-# base resolves: --base flag → pr.base → "main".
+# base resolves: --base flag, then pr.base, then main_branch, then "main".
 # Without body_template, the body lists slot, ports, and pool items.
 
 pr:

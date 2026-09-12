@@ -11,6 +11,7 @@ var worktreeCleanupDryRun bool
 
 var worktreeCleanupCmd = &cobra.Command{
 	Use:     "cleanup",
+	Args:    cobra.NoArgs,
 	Aliases: []string{"clean"},
 	Short:   "Clear all tracked worktree allocations",
 	Long: `Clear every entry from .wet-worktrees.json without removing git

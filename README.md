@@ -14,6 +14,7 @@ wet worktree mount <branch>     # same, for a branch that already exists (local 
 wet worktree setup              # worktree-only form of `wet setup`
 wet worktree list               # interactive list — pick one to open in tmux or VS Code (alias: ls)
 wet worktree pop                # remove the current worktree, keep the branch (runs pre_remove hooks)
+wet worktree cleanup --dry-run  # preview clearing every recorded allocation, keeping the checkouts
 wet docker cleanup --dry-run    # find Compose stacks not referenced by panes or slot_pool
 wet secrets setup [group…]      # scaffold a provider's keys into .wet.yaml
 wet env pull [output]           # regenerate the env files declared under outputs:
@@ -26,13 +27,15 @@ wet mobile ensure --count 4     # idempotently claim/boot enough devices for a 4
 wet mobile list                 # what devices this worktree claims, and are they up (alias: ls)
 wet mobile remove <item>        # release a device `add` claimed, and stop it
 wet mobile reverse-tcp          # adb reverse this worktree's ports onto its devices
+wet slot warm --all --headless   # run slot_start for every configured checkout
+wet port-cluster next           # claim a free port band for this clone
 wet pr create                   # push branch + open a GitHub PR (via gh)
 wet install wet-skill           # install the Claude Code helper skill
 ```
 
-`create` is intentionally minimal — it only forks the worktree and opens the
-configured multiplexer window. It does no `.wet.yaml` loading, copying, port
-allocation, env rendering, hooks, or state-file bookkeeping. Those happen in
+`create` forks the worktree and opens the configured multiplexer window. It
+reads configuration to choose the trunk and multiplexer, but does no copying,
+port allocation, env rendering, hooks, or state-file bookkeeping. Those happen in
 `setup`, which you run from inside the new worktree because hooks usually assume
 they're running in that checkout.
 
@@ -97,12 +100,23 @@ slot (1 on a fresh install), copies the configured files and dirs, and writes a
 on a tracked worktree updates the entry in place rather than appending a
 duplicate.
 
-To clean up, `cd` into the worktree and run `wet worktree pop`. That removes the
-worktree and tears down its containers; the branch is left alone.
+To clean up, `cd` into the worktree and run `wet worktree pop`. It runs the
+configured `pre_remove` hooks and removes the checkout. Container teardown
+requires a hook that stops the containers. The branch is kept.
+
+`wet worktree list` lists configured checkouts from the state file. Its `x`
+action runs the same removal hooks and keeps the branch. A checkout created
+with `create` or `mount` appears after `setup`. The main checkout can be opened
+from the list but cannot be removed.
+
+`wet worktree cleanup` clears every allocation from the state file. It keeps
+Git worktrees, branches, generated files, and running resources. Use
+`--dry-run` to preview the count, then run `wet setup` in each checkout that
+should claim resources again. `wet worktree clean` is an alias.
 
 If Docker has stale Compose stacks from old worktrees, run
-`wet docker cleanup --dry-run`. It keeps stacks for worktrees currently open in
-any Herdr/tmux pane, and when `slot_pool: true` it also keeps reusable slot
+`wet docker cleanup --dry-run`. It keeps stacks referenced by Herdr panes,
+falling back to tmux when Herdr is unavailable. With `slot_pool: true` it also keeps reusable slot
 projects. Use `--verbose` only when you want the full kept-project list. Without
 `--dry-run` it runs `docker compose -p <project> down --remove-orphans` and then
 `docker rm -f` for any containers still listed for the stale project.
@@ -229,8 +243,8 @@ see [Why hooks may not swallow a failure](docs/design.md#why-hooks-may-not-swall
 
 ### Pools
 
-`pools:` declares named lists of opaque strings that `wet` round-robins across
-live worktrees. Use pools for any scarce, one-per-worktree resource where the
+`pools:` declares named lists of opaque strings that `wet` claims in declaration
+order across live worktrees. Use pools for any scarce, one-per-worktree resource where the
 item identity matters but the mapping to worktrees doesn't — device IDs,
 preloaded database snapshots, test-fixture directories that must not be shared.
 
@@ -262,10 +276,10 @@ listing each claim by branch and item. Grow the pool in `.wet.yaml` (or
 itself.
 
 **`pool_grow:`** maps a pool name to a strategy wet runs instead of failing on
-exhaustion. `android-emulator` is the only strategy — it creates a new AVD,
-boots it, records it as `emulator:<AVD_NAME>` in `.wet.local.yaml`, and hands it
-back as the claim. Any other value is not a strategy wet knows, and the pool
-just reports as exhausted.
+exhaustion. `android-emulator` creates a new AVD, boots it, records it as
+`emulator:<AVD_NAME>` in `.wet.local.yaml`, and hands it back as the claim.
+It is the only supported strategy. An unknown strategy or an entry naming
+an undeclared pool fails config validation.
 
 ```yaml
 pool_grow:
@@ -536,13 +550,15 @@ a secret value.
 A deploy environment's dotenv belongs in the same inventory as everything else
 — it is the same question, which keys does that app run with and where does
 each come from, and answering it in a second file is how the two drift apart.
-But it is not a file this checkout wants, and `wet setup` and `wet worktree
-create` pull with no selection, so a plain entry would fetch a running system's
-credentials onto every developer's disk the moment they made a worktree.
+But it is not a file this checkout wants. `wet setup` pulls with no selection,
+so a plain entry would fetch a running system's credentials onto every
+developer's disk when they configure a checkout.
 
 `on_demand: true` withholds an output from that sweep; naming it is what
 generates it. `wet env explain` still lists it, marked `on demand`, because it
 is part of the inventory even when it is not part of the checkout.
+Setup succeeds when every output is on demand. A bare `wet env pull` then
+asks you to name an output.
 
 `--stdout` writes the generated file to standard output instead of to disk, so
 the credentials go from the store into whatever consumes them and never exist
@@ -838,12 +854,10 @@ no `outputs:` — there is nothing to generate) — a hook that boots the stack 
 files already written. Setup owns the lifecycle; it owns no second way to write
 an env file ([why that matters](docs/design.md#why-setup-and-pull-share-one-pipeline)).
 
-You can also call `wet env pull` from a `post_create` hook. Hooks run *before*
-`setup` persists `.wet-worktrees.json`, so there the pull reads its values from
-the hook environment (`$SLOT`, `$BRANCH`, `$APP_PORT`, …) rather than from the
-state file; run by hand afterwards it reads the state file entry for the
-current worktree. Either way the values are the ones that worktree was
-allocated.
+You can also call `wet env pull` from a `post_create` hook. It reads the hook
+environment (`$SLOT`, `$BRANCH`, `$APP_PORT`, etc.). Setup records the allocation
+before hooks start. A pull run by hand reads that state entry. Both paths use
+the values allocated to this checkout.
 
 ### Migrating from `render:`
 
@@ -1014,6 +1028,10 @@ there renders for that device. The run finishes by regenerating this checkout's
 outputs; restart the stack afterwards, since running services cached their
 environment at boot. Re-run it when you switch devices, or when the machine's
 IP changes.
+
+If the machine's `.env.local` sets the same host key, remove that entry first.
+`.env.local` overrides the YAML layers, so mobile setup reports the conflict
+before making changes.
 
 An Android app talks to `localhost`, and on a device that *is* the device. The
 fix is `adb reverse tcp:P tcp:P` — and which `P` is exactly what the worktree
@@ -1220,9 +1238,16 @@ gitignored, so nobody inherits this machine's answer. `cluster_slots:` is the
 opposite: it goes in the committed `.wet.yaml`, because every clone has to agree
 on the width.
 
-**It is a claim, not a migration.** Generated env files still hold the old
-numbers afterwards — re-run `wet env pull` in each checkout of the clone, with
-its stack down.
+Generated files and recorded allocations still hold the old numbers after a
+cluster claim. With the stacks down, re-run `wet setup` in each checkout to
+update its recorded ports and generated files. `wet env pull` uses the
+recorded ports, so it cannot move a checkout to another band.
+
+With ports declared, worktree slots stay below `cluster_slots`. The default
+of 10 allows main at slot 0 and worktrees at slots 1 through 9. Setup fails
+when that band is full or a port would exceed 65535. Increase `cluster_slots`
+consistently across clones if more slots are needed, then choose bands again
+with the stacks down. A checkout with no ports has no port-band limit.
 
 **A re-run keeps the band it has.** Once a clone has a `port_cluster:`, a bare
 `next` reports it and changes nothing. The probe cannot tell "a neighbour is on
@@ -1254,6 +1279,25 @@ worth knowing:
   what's free and retry on collision rather than deriving a value from the
   slot: slots are recycled when a worktree is popped, and whatever the old one
   created is not.
+
+## Slot lifecycle
+
+`wet slot reset`, `start`, `stop`, `rebuild`, and `doctor` run the corresponding
+`hooks.slot_reset`, `slot_start`, `slot_stop`, `slot_rebuild`, and `slot_doctor`
+commands in the configured checkout. They use its recorded allocation and
+hook environment. An undeclared hook is a reported no-op.
+
+`wet slot warm` runs `slot_start`. Add `--reset` to run `slot_reset` first,
+`--all` to visit every recorded checkout, and `--headless` to boot claimed
+emulators without windows. A failure is reported after the other checkouts
+have been attempted. These commands require `wet setup` first.
+
+With `slot_pool: true`, allocation can reuse busy ports when Docker reports
+that this slot's own Compose project holds them. It skips ports held by other
+projects or unknown listeners. Define `COMPOSE_PROJECT_NAME` using `Slot` for
+reusable containers. Run `wet slot reset` explicitly before starting reused
+resources, or call it from a `post_create` hook. Setup does not automatically
+run the slot lifecycle hooks.
 
 ## Pull requests
 
@@ -1298,20 +1342,21 @@ has none.
 
 ## No config, no setup
 
-`wet setup` requires a `.wet.yaml`; a missing one is a hard error naming both
-paths it looked in. There is deliberately no hardcoded fallback copy list —
-that would be project knowledge baked into a CLI that claims to have none, and
-it produces a worktree with no ports allocated, which fails later as a port
-collision nobody traces back to setup.
+When `.wet.yaml` is missing from both the checkout and the main repo, `wet setup`
+writes a starter config at the main repo root and exits with an error. It asks
+you to edit the project name and ports before retrying. With a terminal it also
+offers the secret-group picker. It allocates nothing on this first run.
+The CLI has no fallback copy list. The config must declare which files the
+project needs and which ports setup should allocate.
 
-(`wet worktree create` doesn't consult `.wet.yaml` at all — it only forks the
-worktree and copies `.env`. Everything else happens in `wet setup`.)
+`wet worktree create` works without a config. It copies no files and performs
+no setup. With a valid config, it uses `main_branch` and `multiplexer`.
 
 ## Examples
 
-The smallest useful config is a `project_name:` and a `copy:` block — enough to
-fork a worktree with the same VS Code settings and env file. With no ports and
-no `env:`, nothing is generated and no hooks run.
+The smallest useful config has `project_name:` and `copy:`. After creation,
+setup copies the declared settings and files and writes `.env.worktree`.
+Additional generated files require `outputs:`, and hooks run only when declared.
 
 A full-stack one adds ports and a generated env file that points editor
 tooling at this worktree's slot:

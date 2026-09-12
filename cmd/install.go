@@ -36,14 +36,15 @@ var wetExampleConfig string
 var installForce bool
 
 var installCmd = &cobra.Command{
-	Use:   "install {skill}",
+	Use:   "install [wet-skill]",
 	Short: "Install optional extras (e.g., the Claude Code helper skill)",
 	Long: `Install optional extras into the current repo.
 
 Known targets:
-  skill        Drop a Claude Code skill into .claude/skills/wet/SKILL.md
+  wet-skill    Drop a Claude Code skill into .claude/skills/wet/SKILL.md
                that teaches Claude how to write .wet.yaml configs AND how to
-               boot the stack + spawn an agent team (worktree-aware).`,
+               boot the stack + spawn an agent team (worktree-aware).
+               The alias skill is also accepted.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if len(args) == 0 {
@@ -70,7 +71,7 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		}
 		return ensureGitignoreEntries()
 	default:
-		return fmt.Errorf("unknown install target %q; known targets: skill", target)
+		return fmt.Errorf("unknown install target %q; known target: wet-skill (alias: skill)", target)
 	}
 }
 

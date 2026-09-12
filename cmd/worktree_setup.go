@@ -14,11 +14,12 @@ import (
 
 var worktreeSetupCmd = &cobra.Command{
 	Use:   "setup",
+	Args:  cobra.NoArgs,
 	Short: "Configure the current worktree (copy files, allocate ports, run hooks)",
-	Long: `Run from inside an existing worktree. Loads .wet.yaml from the main
-repo root, allocates a slot + pool items + ports for this worktree, copies
-files declared in .wet.yaml's copy: list, writes .env.worktree, runs
-post_create hooks, and persists the entry to .wet-worktrees.json.
+	Long: `Run from inside an existing worktree. Loads this checkout's .wet.yaml,
+falling back to the main repo's config. Allocates a slot, pool items, and ports;
+copies declared files; writes .env.worktree and outputs; then runs post_create
+hooks. The allocation is recorded in .wet-worktrees.json before hooks run.
 
 If the current worktree already has an entry in the state file, it keeps its
 slot, its pool picks and the extra devices ` + "`wet mobile add`" + ` claimed,
@@ -76,12 +77,10 @@ func runWorktreeSetup(cmd *cobra.Command, args []string) error {
 //  3. Allocates pool items.
 //  4. Copies files from cfg.Copy (worktrees only).
 //  5. Writes `.env.worktree` into the worktree.
-//  6. Runs post_create hooks.
-//  7. Persists the state file.
+//  6. Generates automatic outputs and runs post_create hooks.
 //
-// Errors before persistence leave the worktree on disk but the state file
-// unchanged (or reverted, for updates). Hook failures after partial work
-// print a recovery block via printSetupHookFailure.
+// Allocation is persisted under the lock before rendering and hooks. Later
+// failures keep that claim so setup can be retried with the same resources.
 func runWorktreeSetupCore(repoRoot, worktreePath, branchName string, headless bool) error {
 	return runSetupCore(repoRoot, worktreePath, branchName, headless, false)
 }
@@ -219,13 +218,20 @@ func runSetupCore(repoRoot, worktreePath, branchName string, headless, isMain bo
 			// New worktree: normally require both an unclaimed state slot and
 			// free host ports. A slot pool intentionally leaves warm resources
 			// (usually the DB container) bound after release, so in that mode
-			// the state file is the authority and the project's slot_reset hook
-			// is responsible for proving the reused resources are sane.
+			// ports owned by this slot's Compose project can be reused. The
+			// project must explicitly run slot_reset before using them.
+			var err error
 			if cfg.SlotPool {
-				slot = cfg.NextFreeReusableSlot(used)
+				slot, err = cfg.NextFreeReusableSlot(used)
 			} else {
-				slot = cfg.NextFreeSlotWithFreePorts(used)
+				slot, err = cfg.NextFreeSlotWithFreePorts(used)
 			}
+			if err != nil {
+				return err
+			}
+		}
+		if err := cfg.validateSlotPorts(slot); err != nil {
+			return err
 		}
 
 		// A re-run keeps what this worktree already holds: its primary picks
@@ -376,7 +382,7 @@ func runSetupCore(repoRoot, worktreePath, branchName string, headless, isMain bo
 	// lifecycle; it owns no second way to write an env file. The previous
 	// design had setup render targets itself, which is how setup and populate
 	// came to disagree about whether a target's secrets were fetched at all.
-	if len(cfg.Outputs) > 0 {
+	if cfg.hasAutomaticOutputs() {
 		if _, err := ResolveEnvValues(cfg, data, local); err != nil {
 			return fmt.Errorf("resolve env: %w", err)
 		}
@@ -442,6 +448,7 @@ func runSetupCore(repoRoot, worktreePath, branchName string, headless, isMain bo
 
 var setupCmd = &cobra.Command{
 	Use:   "setup",
+	Args:  cobra.NoArgs,
 	Short: "Configure this checkout (main repo or worktree): ports, pools, env files, hooks",
 	Long: `Bootstrap the checkout you are standing in.
 

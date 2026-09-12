@@ -146,7 +146,7 @@ wet writes two files at the **main repo root** that must never be committed:
 - `.wet-worktrees.json` — the allocation state (slots, ports, pool claims,
   absolute worktree paths). Per-machine, not per-repo.
 - `.wet-worktrees.lock` — the empty flock file guarding allocation. Pure
-  scratch; it appears the first time anyone runs `wet worktree create` and
+  scratch; it appears the first time anyone runs `wet setup` and
   otherwise just clutters `git status`.
 
 `wet install wet-skill` adds both by name. List them the same way if you are
@@ -340,7 +340,7 @@ Field by field:
   ordinary value, a port, a reserved field, or a `Pools.<name>` /
   `Handles.<name>` pick.
 - `on_demand` — optional `true`. Keeps the output out of the sweep: `wet
-  setup`, `wet worktree create` and a bare `wet env pull` skip it, and only
+  setup` and a bare `wet env pull` skip it, and only
   naming it or referencing it with `values.file` generates it. `wet env explain` lists it,
   marked, because it is part of the inventory. See "Deploy environments"
   below — this is the flag that makes it safe to declare one.
@@ -387,7 +387,7 @@ nobody can say what the running system is configured with.
 
 Declare it as an output, with two rules:
 
-- **`on_demand: true`.** `wet setup` and `wet worktree create` pull with no
+- **`on_demand: true`.** `wet setup` pulls with no
   selection, so a plain entry would fetch a running system's credentials onto
   every developer's disk the moment they made a worktree. The flag withholds it
   from that sweep; naming it is what generates it.
@@ -860,10 +860,10 @@ should loop over, or the devices `wet mobile add` booted survive the pop.
 
 ## Debugging
 
-- **Hook failure on create**: recovery block printed with worktree path, failing hook, and exact command. Worktree left on disk, not recorded in state. Fix cause → `git worktree remove --force` → `git branch -D` → retry.
+- **Hook failure during setup**: the recovery block names the worktree, hook, and command. The checkout and allocation remain. Fix the cause and re-run `wet setup`; it keeps the slot and claims.
 - **Hook failure on pop**: worktree NOT removed. Fix and retry.
 - **Port collision between two worktrees of one clone**: bump the `base:` or use a per-port `stride:` override.
-- **Port collision between two clones of the repo**: they are both on slot 0 of the same band. Run `wet port-cluster next` in one of them (with the other's stack up so the probe can see it), then `wet env pull` to regenerate.
+- **Port collision between two clones of the repo**: run `wet port-cluster next` in one clone while the other stack is up. With the moving clone's stacks down, run `wet setup` in each checkout to update recorded ports and generated files. `wet env pull` keeps the recorded ports.
 - **"uses the removed `render:` key"** (or `secrets.sections:`): the config is on
   the old schema. Migrate it — see "Migrating a config off `render:`". There is
   no compatibility flag, on purpose: a config that still parsed would generate

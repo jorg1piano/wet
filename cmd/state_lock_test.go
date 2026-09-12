@@ -1,11 +1,45 @@
 package cmd
 
 import (
+	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
 )
+
+func TestSaveConfigKeepsAnOpenReadersSnapshot(t *testing.T) {
+	repo := initCleanupRepo(t)
+	t.Chdir(repo)
+	before := &WorktreeConfig{Worktrees: []WorktreeState{{Branch: "before"}}}
+	if err := saveConfig(before); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := os.Open(configFilePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	if err := saveConfig(&WorktreeConfig{Worktrees: []WorktreeState{{Branch: "after"}}}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot WorktreeConfig
+	if err := json.Unmarshal(data, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Worktrees) != 1 || snapshot.Worktrees[0].Branch != "before" {
+		t.Fatalf("a concurrent save modified an open reader's snapshot: %+v", snapshot)
+	}
+	latest, err := loadConfig()
+	if err != nil || len(latest.Worktrees) != 1 || latest.Worktrees[0].Branch != "after" {
+		t.Fatalf("new reader did not see the complete replacement: %+v, %v", latest, err)
+	}
+}
 
 // Parallel worktree creation is the whole point of wet, so the read-modify-
 // write that hands out slots has to survive two runs starting at once.

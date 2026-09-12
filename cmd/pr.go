@@ -26,6 +26,7 @@ var prCmd = &cobra.Command{
 
 var prCreateCmd = &cobra.Command{
 	Use:   "create",
+	Args:  cobra.NoArgs,
 	Short: "Push the current branch and create a GitHub pull request",
 	Long: `Push the current branch to origin and open a GitHub pull request via gh.
 
@@ -35,8 +36,8 @@ includes the worktree's allocated ports, pool items, and slot index.
 
 Requires: git, gh (GitHub CLI, authenticated).
 
-If .wet.yaml has a pr.base field, it's used as the base branch; otherwise
-defaults to 'main'. The --base flag overrides both.`,
+The base branch comes from --base, then .wet.yaml's pr.base, then main_branch,
+then 'main'.`,
 	RunE: runPrCreate,
 }
 
@@ -122,6 +123,7 @@ func runPrCreate(cmd *cobra.Command, args []string) error {
 
 var prOpenCmd = &cobra.Command{
 	Use:   "open",
+	Args:  cobra.NoArgs,
 	Short: "Open the PR for the current branch in the browser",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		openCmd := exec.Command("gh", "pr", "view", "--web")

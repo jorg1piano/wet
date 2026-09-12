@@ -19,9 +19,9 @@ branch must already exist locally or on ` + "`origin`" + `. If only the remote
 branch exists, mount fetches it and creates a local tracking branch from
 ` + "`origin/<branch>`" + ` before checking it out in the worktree.
 
-After the worktree exists on disk, mount runs the same post-create steps as
-create: copies ` + "`.env`" + ` from the main repo root (if present) and opens a
-tmux window when inside tmux. Run ` + "`wet worktree setup`" + ` from inside the new
+After the worktree exists on disk, mount opens the configured multiplexer
+window and prints the next setup command. It copies no files.
+Run ` + "`wet worktree setup`" + ` from inside the new
 worktree to perform the ` + "`.wet.yaml`" + `-driven configuration step (port
 allocation, file copy list, hooks).
 

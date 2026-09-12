@@ -75,7 +75,26 @@ func saveConfig(config *WorktreeConfig) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(configFilePath(), data, 0644)
+	path := configFilePath()
+	// Readers such as env pull and mobile list do not hold the allocation
+	// lock. Rename a complete file so they never read a truncated JSON value.
+	f, err := os.CreateTemp(filepath.Dir(path), ".wet-state-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Chmod(0o644); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), path)
 }
 
 // getRepoRoot returns the top-level directory of the current git repository.

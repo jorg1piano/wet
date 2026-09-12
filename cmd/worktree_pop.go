@@ -34,6 +34,7 @@ Fix the cause and retry `+"`wet worktree pop`"+` from inside the worktree, or ed
 
 var worktreePopCmd = &cobra.Command{
 	Use:   "pop",
+	Args:  cobra.NoArgs,
 	Short: "Remove current worktree and exit tmux pane",
 	Long:  "Removes the git worktree for the current directory and kills the tmux pane. The branch is kept.",
 	RunE:  runWorktreePop,
@@ -44,29 +45,31 @@ func init() {
 }
 
 func runWorktreePop(cmd *cobra.Command, args []string) error {
-	cwd, err := os.Getwd()
+	worktreeRoot, err := getRepoRoot()
 	if err != nil {
-		return fmt.Errorf("failed to get working directory: %w", err)
+		return err
 	}
+	if err := removeWorktree(worktreeRoot); err != nil {
+		return err
+	}
+	if os.Getenv("TMUX") != "" {
+		_ = exec.Command("tmux", "kill-pane").Run()
+	}
+	return nil
+}
 
-	// Resolve the MAIN repo root (not the worktree root). This is where
-	// .wet.yaml lives and where we cd after removal.
+// removeWorktree is shared by pop and the list's remove action. Both run
+// teardown hooks and keep the branch. Only pop closes the caller's pane.
+func removeWorktree(worktreeRoot string) error {
 	repoRoot, err := getMainRepoRoot()
 	if err != nil {
 		return fmt.Errorf("not in a git repository: %w", err)
 	}
 
-	absCwd, _ := filepath.Abs(cwd)
-	absMainRoot, _ := filepath.Abs(repoRoot)
-	if absCwd == absMainRoot {
+	if samePath(worktreeRoot, repoRoot) {
 		return fmt.Errorf("refusing to pop the main repo; run `wet worktree pop` from inside a worktree")
 	}
 
-	// Worktree root is the toplevel of the current working tree.
-	worktreeRoot, err := getRepoRoot()
-	if err != nil {
-		return fmt.Errorf("not in a git worktree: %w", err)
-	}
 	worktreePath, _ := filepath.Abs(worktreeRoot)
 
 	// Find a matching state entry (tracked worktree). Untracked worktrees
@@ -78,12 +81,10 @@ func runWorktreePop(cmd *cobra.Command, args []string) error {
 	}
 
 	var found *WorktreeState
-	foundIndex := -1
 	for i, wt := range config.Worktrees {
 		absPath, _ := filepath.Abs(wt.Path)
 		if absPath == worktreePath {
 			found = &config.Worktrees[i]
-			foundIndex = i
 			break
 		}
 	}
@@ -173,29 +174,34 @@ func runWorktreePop(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to change directory: %w", err)
 	}
 
-	// Remove the worktree
-	gitCmd := exec.Command("git", "worktree", "remove", "--force", worktreePath)
-	gitCmd.Stdout = os.Stdout
-	gitCmd.Stderr = os.Stderr
-	if err := gitCmd.Run(); err != nil {
-		return fmt.Errorf("failed to remove worktree: %w", err)
-	}
-
-	// Remove from config (only if this was a tracked worktree)
-	if foundIndex >= 0 {
-		config.Worktrees = append(config.Worktrees[:foundIndex], config.Worktrees[foundIndex+1:]...)
-		if err := saveConfig(config); err != nil {
-			fmt.Printf("  Warning: could not update config: %v\n", err)
+	// Hooks run outside the lock. Read the state again under the lock so a
+	// setup that finished during teardown keeps its allocation.
+	if err := withStateLock(func() error {
+		latest, err := loadConfig()
+		if err != nil {
+			return fmt.Errorf("load worktree state: %w", err)
 		}
+		gitCmd := exec.Command("git", "worktree", "remove", "--force", worktreePath)
+		gitCmd.Stdout = os.Stdout
+		gitCmd.Stderr = os.Stderr
+		if err := gitCmd.Run(); err != nil {
+			return fmt.Errorf("failed to remove worktree: %w", err)
+		}
+		for i, wt := range latest.Worktrees {
+			if samePath(wt.Path, worktreePath) {
+				latest.Worktrees = append(latest.Worktrees[:i], latest.Worktrees[i+1:]...)
+				if err := saveConfig(latest); err != nil {
+					return fmt.Errorf("worktree removed, but updating allocation state failed: %w", err)
+				}
+				break
+			}
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 
 	fmt.Printf("  Removed worktree '%s' (branch kept)\n", branchName)
-
-	// Kill tmux pane if inside tmux
-	if os.Getenv("TMUX") != "" {
-		tmuxCmd := exec.Command("tmux", "kill-pane")
-		tmuxCmd.Run() // Best effort, ignore errors
-	}
 
 	return nil
 }

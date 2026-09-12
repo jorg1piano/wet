@@ -21,8 +21,8 @@ var worktreeCreateCmd = &cobra.Command{
 	Long: `Create a new git worktree at ../worktree-<branch> and open a new tmux
 window when inside tmux.
 
-This command is intentionally minimal: it performs no .wet.yaml loading,
-port allocation, template rendering, or hook execution. Run
+This command reads configuration only to choose the trunk and multiplexer.
+It performs no file copying, allocation, env generation, or hook execution. Run
 ` + "`wet worktree setup`" + ` from inside the new worktree to perform the full
 configuration step.
 
@@ -169,11 +169,9 @@ type worktreeCreateResult struct {
 // createWorktree is the minimal worktree-create path. It:
 //  1. Resolves the main repo root (works from inside a worktree too).
 //  2. Runs `git worktree add -b <branch> ../worktree-<branch>`.
-//  3. Copies `.env` from the main repo root if present (single-file copy,
-//     no config lookup, no templating).
-//  4. Opens a configured multiplexer window (unless noMultiplexer).
+//  3. Opens a configured multiplexer window (unless noMultiplexer).
 //
-// No .wet.yaml load, no port allocation, no state file write, no hooks. Run
+// Only trunk/multiplexer configuration is read. No allocation or hooks. Run
 // `wet worktree setup` from inside the new worktree to configure the rest.
 func createWorktree(branchName string, noMultiplexer bool) error {
 	_, err := createWorktreeWithWriters(branchName, noMultiplexer, os.Stdout, os.Stderr)
@@ -283,7 +281,6 @@ func postWorktreeAddWithWriter(repoRoot, worktreePath, branchName, label string,
 	fmt.Fprintf(out, "           then run in that pane: wet setup --headless && wet slot reset --headless && wet slot start --headless\n")
 	fmt.Fprintf(out, "    Shell: cd %s && wet setup --headless\n", worktreePath)
 	fmt.Fprintf(out, "           then, if configured: wet slot reset --headless && wet slot start --headless\n")
-	return nil
 	return nil
 }
 

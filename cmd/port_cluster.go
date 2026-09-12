@@ -48,7 +48,8 @@ every worktree of this clone reads — a cluster belongs to the clone, not to
 one worktree. It is gitignored, so nobody inherits this machine's answer.
 
 Generated env files still hold the old numbers afterwards; re-run
-` + "`wet env pull`" + ` (or ` + "`wet setup`" + `) in each checkout, with its stack down.`,
+` + "`wet setup`" + ` in each checkout, with its stack down. Setup updates the
+recorded ports and regenerates the files. ` + "`wet env pull`" + ` keeps recorded ports.`,
 	Args: cobra.NoArgs,
 	RunE: runPortClusterNext,
 }
@@ -172,7 +173,7 @@ func runPortClusterNext(cmd *cobra.Command, args []string) error {
 	// The claim only moves the numbers wet resolves. Anything already
 	// written from the old ones — .env.worktree, every declared output, a
 	// running compose stack — still names the band this clone just left.
-	fmt.Println("\nRe-run `wet env pull` in each checkout of this clone (stack down) to regenerate on the new ports.")
+	fmt.Println("\nRe-run `wet setup` in each checkout of this clone (stack down) to update its recorded ports and generated files.")
 	return nil
 }
 

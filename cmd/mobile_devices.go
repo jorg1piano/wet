@@ -706,7 +706,7 @@ func regenerateAfterClaimChange(cfg *WetConfig, treePath, repoRoot string) {
 		if err := writeEnvWorktree(cfg, treePath, data, alloc.Ports, local); err != nil {
 			return err
 		}
-		if len(cfg.Outputs) == 0 {
+		if !cfg.hasAutomaticOutputs() {
 			return nil
 		}
 		return PullOutputs(PullRequest{Cfg: cfg, TreePath: treePath, Data: data})
@@ -719,7 +719,15 @@ func regenerateAfterClaimChange(cfg *WetConfig, treePath, repoRoot string) {
 }
 
 func outputCountSuffix(cfg *WetConfig) string {
-	switch n := len(cfg.Outputs); n {
+	outputs, err := cfg.SelectOutputs(nil)
+	if err != nil {
+		return ""
+	}
+	outputs, err = cfg.withFileDependencies(outputs)
+	if err != nil {
+		return ""
+	}
+	switch n := len(outputs); n {
 	case 0:
 		return ""
 	case 1:

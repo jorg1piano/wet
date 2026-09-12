@@ -1480,18 +1480,9 @@ func (c *WetConfig) ClusterFitsPortRange(cluster int) bool {
 // any candidate slot whose resolved host ports are already bound. `used`
 // carries the slots claimed by tracked worktrees; this layer catches the
 // untracked stacks the state file cannot see. It walks upward from the
-// state-file candidate, treating each port-occupied slot as taken, until it
-// reaches one whose every port is free. Because ports climb with the slot,
-// this always terminates above the highest running stack.
-func (c *WetConfig) NextFreeSlotWithFreePorts(used []int) int {
-	taken := append([]int(nil), used...)
-	for {
-		slot := NextFreeSlot(taken)
-		if c.portsFree(slot) {
-			return slot
-		}
-		taken = append(taken, slot)
-	}
+// state-file candidate until a free slot is found inside this clone's band.
+func (c *WetConfig) NextFreeSlotWithFreePorts(used []int) (int, error) {
+	return c.nextAvailableSlot(used, c.portsFree)
 }
 
 // NextFreeReusableSlot is the slot-pool variant of NextFreeSlotWithFreePorts.
@@ -1500,15 +1491,43 @@ func (c *WetConfig) NextFreeSlotWithFreePorts(used []int) int {
 // those ports is not reusable warm state; it is exactly the collision wet is
 // supposed to avoid. Allow ports that are free or held by this slot's own
 // COMPOSE_PROJECT_NAME, and skip slots held by anything else.
-func (c *WetConfig) NextFreeReusableSlot(used []int) int {
-	taken := append([]int(nil), used...)
-	for {
-		slot := NextFreeSlot(taken)
-		if c.slotPortsReusable(slot) {
-			return slot
-		}
-		taken = append(taken, slot)
+func (c *WetConfig) NextFreeReusableSlot(used []int) (int, error) {
+	return c.nextAvailableSlot(used, c.slotPortsReusable)
+}
+
+func (c *WetConfig) nextAvailableSlot(used []int, available func(int) bool) (int, error) {
+	if len(c.Ports) == 0 {
+		return NextFreeSlot(used), nil
 	}
+	taken := make(map[int]bool, len(used))
+	for _, slot := range used {
+		taken[slot] = true
+	}
+	for slot := 1; slot < c.ClusterSlotCount(); slot++ {
+		if err := c.validateSlotPorts(slot); err != nil {
+			return 0, err
+		}
+		if !taken[slot] && available(slot) {
+			return slot, nil
+		}
+	}
+	return 0, fmt.Errorf("no free worktree slot in port_cluster %d (cluster_slots: %d, slot 0 reserved for main); "+
+		"free a worktree or its ports, or increase cluster_slots consistently across clones", c.PortCluster, c.ClusterSlotCount())
+}
+
+func (c *WetConfig) validateSlotPorts(slot int) error {
+	if len(c.Ports) == 0 {
+		return nil
+	}
+	if slot < 0 || slot >= c.ClusterSlotCount() {
+		return fmt.Errorf("slot %d is outside cluster_slots: %d; increase cluster_slots consistently across clones before re-running setup", slot, c.ClusterSlotCount())
+	}
+	for _, port := range c.ResolvePorts(slot) {
+		if port.Value < 1 || port.Value > 65535 {
+			return fmt.Errorf("slot %d puts %s at %d, outside 1..65535; lower the port base, stride, or port_cluster", slot, port.Name, port.Value)
+		}
+	}
+	return nil
 }
 
 func (c *WetConfig) slotPortsReusable(slot int) bool {

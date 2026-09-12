@@ -631,6 +631,16 @@ func runMobileSetup(cmd *cobra.Command, args []string) error {
 			"and every URL derived from them. Declare one in .wet.yaml (and derive your\n" +
 			"URLs from it, e.g. API_URL: \"http://{{.DEV_HOST}}:{{.APP_PORT}}\"), then re-run")
 	}
+	local, err := LoadEnvLocalForTree(treePath, repoRoot)
+	if err != nil {
+		return err
+	}
+	for _, key := range hostKeys {
+		if _, exists := local[key]; exists {
+			return fmt.Errorf("%s sets %s and overrides device-specific %s values; remove %s from %s before re-running mobile setup",
+				envLocalFileName, key, wetLocalConfigFileName, key, envLocalFileName)
+		}
+	}
 
 	devices, checked, err := discoverDevices()
 	if err != nil {
@@ -745,8 +755,10 @@ func runMobileSetup(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := PullOutputs(PullRequest{Cfg: cfg, TreePath: treePath, Data: data}); err != nil {
-		return err
+	if cfg.hasAutomaticOutputs() {
+		if err := PullOutputs(PullRequest{Cfg: cfg, TreePath: treePath, Data: data}); err != nil {
+			return err
+		}
 	}
 	if err := reverseDevicePorts(device, alloc.Ports); err != nil {
 		return err

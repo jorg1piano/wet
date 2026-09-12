@@ -311,6 +311,17 @@ func (c *WetConfig) SelectEveryOutput(only []string) ([]OutputConfig, error) {
 	return c.selectOutputs(only, true)
 }
 
+// Lifecycle commands may have nothing to generate. An explicit env pull
+// still reports an empty selection so the caller knows to name an output.
+func (c *WetConfig) hasAutomaticOutputs() bool {
+	for _, output := range c.Outputs {
+		if !output.OnDemand {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *WetConfig) selectOutputs(only []string, includeOnDemand bool) ([]OutputConfig, error) {
 	if len(c.Outputs) == 0 {
 		return nil, errors.New(".wet.yaml declares no outputs: — nothing to generate")

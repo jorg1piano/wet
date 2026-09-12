@@ -15,8 +15,9 @@ import (
 
 var worktreeListCmd = &cobra.Command{
 	Use:     "list",
+	Args:    cobra.NoArgs,
 	Short:   "List and manage worktrees",
-	Long:    "Interactive list of worktrees. Select one to open in tmux or VS Code.",
+	Long:    "Interactive list of configured checkouts. Open one in tmux or VS Code, or remove a worktree with its pre_remove hooks. Removal keeps the branch.",
 	Aliases: []string{"ls"},
 	RunE:    runWorktreeList,
 }
@@ -214,40 +215,8 @@ func openInCode(path string) error {
 	return nil
 }
 
-func removeWorktreeByPath(branch, path string) error {
-	config, err := loadConfig()
-	if err != nil {
-		return err
-	}
-
-	// Remove git worktree
-	gitCmd := exec.Command("git", "worktree", "remove", "--force", path)
-	gitCmd.Stdout = os.Stdout
-	gitCmd.Stderr = os.Stderr
-	if err := gitCmd.Run(); err != nil {
-		return fmt.Errorf("failed to remove worktree: %w", err)
-	}
-
-	// Delete branch
-	gitCmd = exec.Command("git", "branch", "-D", branch)
-	gitCmd.Stdout = os.Stdout
-	gitCmd.Stderr = os.Stderr
-	gitCmd.Run() // best effort
-
-	// Remove from config
-	for i, wt := range config.Worktrees {
-		if wt.Path == path {
-			config.Worktrees = append(config.Worktrees[:i], config.Worktrees[i+1:]...)
-			break
-		}
-	}
-
-	if err := saveConfig(config); err != nil {
-		return fmt.Errorf("failed to save config: %w", err)
-	}
-
-	fmt.Printf("  Removed worktree '%s'\n", branch)
-	return nil
+func removeWorktreeByPath(_ string, path string) error {
+	return removeWorktree(path)
 }
 
 func timeAgo(t time.Time) string {
