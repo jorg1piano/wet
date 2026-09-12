@@ -2,7 +2,6 @@ package cmd
 
 import (
 	_ "embed"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -69,10 +68,7 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		}); err != nil {
 			return err
 		}
-		if err := ensureGitignoreEntries(); err != nil {
-			return err
-		}
-		return ensureClaudeSettings()
+		return ensureGitignoreEntries()
 	default:
 		return fmt.Errorf("unknown install target %q; known targets: skill", target)
 	}
@@ -107,53 +103,6 @@ func ensureGitignoreEntries() error {
 	if len(added) > 0 {
 		fmt.Printf("  Added to .gitignore: %s\n", strings.Join(added, ", "))
 	}
-	return nil
-}
-
-// ensureClaudeSettings ensures .claude/settings.json has the agent teams env var.
-func ensureClaudeSettings() error {
-	repoRoot, err := getRepoRoot()
-	if err != nil {
-		return err
-	}
-	settingsPath := filepath.Join(repoRoot, ".claude", "settings.json")
-
-	// Load existing or start fresh
-	settings := make(map[string]any)
-	if data, err := os.ReadFile(settingsPath); err == nil {
-		if err := json.Unmarshal(data, &settings); err != nil {
-			return fmt.Errorf("parse %s: %w", settingsPath, err)
-		}
-	}
-
-	// Check if already set
-	env, _ := settings["env"].(map[string]any)
-	if env != nil {
-		if v, ok := env["CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"]; ok && v == "1" {
-			return nil
-		}
-	}
-
-	// Set it
-	if env == nil {
-		env = make(map[string]any)
-		settings["env"] = env
-	}
-	env["CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"] = "1"
-
-	data, err := json.MarshalIndent(settings, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal settings: %w", err)
-	}
-
-	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
-		return fmt.Errorf("mkdir %s: %w", filepath.Dir(settingsPath), err)
-	}
-	if err := os.WriteFile(settingsPath, append(data, '\n'), 0o644); err != nil {
-		return fmt.Errorf("write %s: %w", settingsPath, err)
-	}
-
-	fmt.Println("  Enabled agent teams in .claude/settings.json")
 	return nil
 }
 

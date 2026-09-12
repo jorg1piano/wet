@@ -135,9 +135,6 @@ it:
   write by hand — `.wet.local.yaml` carries your 1Password sign-in address —
   so wet ignores them for you. An existing file is appended to, never
   rewritten.
-- `.claude/settings.json` — sets `env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`,
-  merging into the existing settings and leaving every other key alone. Already
-  set is a no-op.
 
 The skill's source lives at `cmd/install-wet-template.md` in the `wet` repo and
 is embedded into the binary via `//go:embed`.
