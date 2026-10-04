@@ -27,6 +27,7 @@ wet mobile ensure --count 4     # idempotently claim/boot enough devices for a 4
 wet mobile list                 # what devices this worktree claims, and are they up (alias: ls)
 wet mobile remove <item>        # release a device `add` claimed, and stop it
 wet mobile reverse-tcp          # adb reverse this worktree's ports onto its devices
+wet slot list                   # every claimed slot with its branch, ports and pools (alias: ls)
 wet slot warm --all --headless   # run slot_start for every configured checkout
 wet port-cluster next           # claim a free port band for this clone
 wet pr create                   # push branch + open a GitHub PR (via gh)
@@ -1286,6 +1287,12 @@ worth knowing:
 `hooks.slot_reset`, `slot_start`, `slot_stop`, `slot_rebuild`, and `slot_doctor`
 commands in the configured checkout. They use its recorded allocation and
 hook environment. An undeclared hook is a reported no-op.
+
+`wet slot list` prints every checkout in `.wet-worktrees.json` sorted by slot,
+with its branch, ports, pool items and path. It marks the current checkout with
+`*` and flags paths that are gone from disk. With ports declared, a last line
+names the slots below `cluster_slots` that no checkout claims. That line reads
+the state file only, so a stack wet does not track can still hold those ports.
 
 `wet slot warm` runs `slot_start`. Add `--reset` to run `slot_reset` first,
 `--all` to visit every recorded checkout, and `--headless` to boot claimed

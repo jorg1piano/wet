@@ -38,6 +38,7 @@ func init() {
 	slotCmd.AddCommand(slotLifecycleCmd("rebuild", "Nuke and recreate dirty resources for the current slot", func(h HooksConfig) []string { return h.SlotRebuild }))
 	slotCmd.AddCommand(slotLifecycleCmd("doctor", "Check the current slot's health", func(h HooksConfig) []string { return h.SlotDoctor }))
 	slotCmd.AddCommand(slotWarmCmd())
+	slotCmd.AddCommand(slotListCmd())
 	rootCmd.AddCommand(slotCmd)
 }
 
