@@ -1339,9 +1339,15 @@ ones bound right now. A container that is running, restarting or paused holds
 its ports, and so does a stopped one with restart policy `always`. That keeps
 wet off a port whose owner is crash-looping: between two restarts the port is
 free to a probe, and a slot handed out in that moment dies at
-`docker compose up`. Run `wet slot reset` explicitly before starting reused
-resources, or call it from a `post_create` hook. Setup does not automatically
-run the slot lifecycle hooks.
+`docker compose up`.
+
+A slot reused this way still holds the previous checkout's data, so `wet setup`
+runs `hooks.slot_reset` the first time a checkout claims a slot, after
+`post_create`. The entry carries `pending_reset: true` until the reset
+succeeds, so a setup that fails partway resets on its re-run, and
+`wet slot list` shows it. A re-run of setup in a checkout that already reset
+keeps its data. `--no-reset` skips the reset and leaves it pending for
+`wet slot reset`.
 
 ## Pull requests
 

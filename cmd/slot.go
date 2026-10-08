@@ -58,7 +58,13 @@ func slotLifecycleCmd(name, short string, selectHooks func(HooksConfig) []string
 				fmt.Printf("  No hooks.%s declared in %s\n", "slot_"+name, wetConfigFileName)
 				return nil
 			}
-			return runSlotHooks(ctx, "slot_"+name, hooks)
+			if err := runSlotHooks(ctx, "slot_"+name, hooks); err != nil {
+				return err
+			}
+			if name == "reset" {
+				return clearPendingReset(ctx.worktreePath)
+			}
+			return nil
 		},
 	}
 }
@@ -153,6 +159,9 @@ before hooks.slot_start.`,
 					if err := runSlotHooks(ctx, "slot_reset", ctx.cfg.Hooks.SlotReset); err != nil {
 						return err
 					}
+					if err := clearPendingReset(ctx.worktreePath); err != nil {
+						return err
+					}
 				}
 				return runSlotHooks(ctx, "slot_start", ctx.cfg.Hooks.SlotStart)
 			}
@@ -196,6 +205,10 @@ func warmAllSlots(headless, reset bool) error {
 		fmt.Printf("\n==> warming slot %d: %s\n", ctx.slot, ctx.branch)
 		if reset && len(ctx.cfg.Hooks.SlotReset) > 0 {
 			if err := runSlotHooks(ctx, "slot_reset", ctx.cfg.Hooks.SlotReset); err != nil {
+				failed = append(failed, ctx.branch)
+				continue
+			}
+			if err := clearPendingReset(ctx.worktreePath); err != nil {
 				failed = append(failed, ctx.branch)
 				continue
 			}
@@ -246,4 +259,20 @@ func runSlotHooks(ctx *slotContext, hookBase string, hooks []string) error {
 		}
 	}
 	return nil
+}
+
+// clearPendingReset records that path's slot has been reset.
+func clearPendingReset(path string) error {
+	return withStateLock(func() error {
+		state, err := loadConfig()
+		if err != nil {
+			return fmt.Errorf("load wet state: %w", err)
+		}
+		own := worktreeStateForPath(state, path)
+		if own == nil || !own.PendingReset {
+			return nil
+		}
+		own.PendingReset = false
+		return saveConfig(state)
+	})
 }

@@ -127,3 +127,74 @@ func TestReleaseClaimFreesARemovedCheckout(t *testing.T) {
 		t.Fatalf("state after release = %+v", state.Worktrees)
 	}
 }
+
+// A reused slot holds the previous checkout's data until slot_reset runs, so
+// setup runs it on a new claim, once, and not again on a re-run.
+func TestSetupResetsANewlyClaimedSlotOnce(t *testing.T) {
+	isolateMachine(t)
+	repo := initCleanupRepo(t)
+	config := `project_name: app
+hooks:
+  slot_reset: ['echo x >> reset-count']
+`
+	if err := os.WriteFile(filepath.Join(repo, wetConfigFileName), []byte(config), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wt := addWorktree(t, repo, "feature")
+	if err := os.WriteFile(filepath.Join(wt, wetConfigFileName), []byte(config), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(wt)
+	resets := func() int {
+		data, _ := os.ReadFile(filepath.Join(wt, "reset-count"))
+		return strings.Count(string(data), "x")
+	}
+
+	if err := runSetupCore(repo, wt, "feature", false, false); err != nil {
+		t.Fatal(err)
+	}
+	if resets() != 1 {
+		t.Fatalf("slot_reset ran %d times on a new claim, want 1", resets())
+	}
+	state, _ := loadConfig()
+	if own := worktreeStateForPath(state, wt); own == nil || own.PendingReset {
+		t.Fatalf("entry after setup = %+v, want claimed with no reset pending", own)
+	}
+	if err := runSetupCore(repo, wt, "feature", false, false); err != nil {
+		t.Fatal(err)
+	}
+	if resets() != 1 {
+		t.Fatal("a re-run of setup must keep this checkout's data")
+	}
+}
+
+func TestSetupNoResetLeavesTheResetPending(t *testing.T) {
+	isolateMachine(t)
+	repo := initCleanupRepo(t)
+	config := "project_name: app\nhooks:\n  slot_reset: ['touch reset-ran']\n"
+	if err := os.WriteFile(filepath.Join(repo, wetConfigFileName), []byte(config), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wt := addWorktree(t, repo, "feature")
+	t.Chdir(wt)
+	setupNoReset = true
+	t.Cleanup(func() { setupNoReset = false })
+
+	if err := runSetupCore(repo, wt, "feature", false, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(wt, "reset-ran")); !os.IsNotExist(err) {
+		t.Fatal("--no-reset must not run slot_reset")
+	}
+	state, _ := loadConfig()
+	if own := worktreeStateForPath(state, wt); own == nil || !own.PendingReset {
+		t.Fatalf("entry = %+v, want the reset still pending", own)
+	}
+	if err := clearPendingReset(wt); err != nil {
+		t.Fatal(err)
+	}
+	state, _ = loadConfig()
+	if worktreeStateForPath(state, wt).PendingReset {
+		t.Fatal("clearPendingReset must clear the mark")
+	}
+}

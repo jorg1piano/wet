@@ -28,7 +28,13 @@ duplicate entries). This makes setup idempotent.`,
 	RunE: runWorktreeSetup,
 }
 
+// setupNoReset skips the slot_reset setup runs on a newly claimed slot.
+var setupNoReset bool
+
+const noResetUsage = "Leave a newly claimed slot as the last checkout left it; run `wet slot reset` later"
+
 func init() {
+	worktreeSetupCmd.Flags().BoolVar(&setupNoReset, "no-reset", false, noResetUsage)
 	worktreeSetupCmd.Flags().Bool("headless", false, "Run emulators without a visible window (feeds into pool grow strategies)")
 	worktreeCmd.AddCommand(worktreeSetupCmd)
 }
@@ -172,6 +178,7 @@ func runSetupCore(repoRoot, worktreePath, branchName string, headless, isMain bo
 	var extras map[string][]string
 	var copiedFiles []string
 	var copySkipped string
+	var pendingReset bool
 	if err := withStateLock(func() error {
 		state, err := loadConfig()
 		if err != nil {
@@ -230,7 +237,7 @@ func runSetupCore(repoRoot, worktreePath, branchName string, headless, isMain bo
 			// free host ports. A slot pool intentionally leaves warm resources
 			// (usually the DB container) bound after release, so in that mode
 			// ports owned by this slot's Compose project can be reused. The
-			// project must explicitly run slot_reset before using them.
+			// entry is marked PendingReset and setup runs slot_reset after its hooks.
 			var err error
 			if cfg.SlotPool {
 				slot, err = cfg.NextFreeReusableSlot(used)
@@ -294,7 +301,11 @@ func runSetupCore(repoRoot, worktreePath, branchName string, headless, isMain bo
 		}
 		if existingIdx >= 0 {
 			entry.CreatedAt = state.Worktrees[existingIdx].CreatedAt
+			entry.PendingReset = state.Worktrees[existingIdx].PendingReset
+		} else if !isMain && len(cfg.Hooks.SlotReset) > 0 {
+			entry.PendingReset = true
 		}
+		pendingReset = entry.PendingReset
 		entry.Ports = make(map[string]int, len(cfg.Ports))
 		for _, p := range cfg.ResolvePorts(slot) {
 			entry.Ports[p.Name] = p.Value
@@ -423,6 +434,19 @@ func runSetupCore(repoRoot, worktreePath, branchName string, headless, isMain bo
 			return fmt.Errorf("post_create hook failed: %s", hookName)
 		}
 	}
+	resetRan := false
+	if pendingReset && !setupNoReset {
+		fmt.Printf("\n  Slot %d is new to this checkout; running hooks.slot_reset (skip with --no-reset)\n", slot)
+		ctx := &slotContext{cfg: cfg, worktreePath: worktreePath, branch: branchName, slot: slot,
+			ports: ports, data: data, hookEnv: hookEnv}
+		if err := runSlotHooks(ctx, "slot_reset", cfg.Hooks.SlotReset); err != nil {
+			return err
+		}
+		if err := clearPendingReset(worktreePath); err != nil {
+			return err
+		}
+		resetRan = true
+	}
 	// Final summary.
 	label := "Worktree configured"
 	if isMain {
@@ -448,6 +472,12 @@ func runSetupCore(repoRoot, worktreePath, branchName string, headless, isMain bo
 	}
 	if n := len(cfg.Hooks.PostCreate); n > 0 {
 		fmt.Printf("  Hooks:  %d post_create ran\n", n)
+	}
+	switch {
+	case resetRan:
+		fmt.Println("  Reset:  slot_reset ran; next: wet slot start")
+	case pendingReset:
+		fmt.Println("  Reset:  pending; run `wet slot reset` before `wet slot start`")
 	}
 
 	return nil
@@ -478,6 +508,7 @@ never run against the main checkout.`,
 }
 
 func init() {
+	setupCmd.Flags().BoolVar(&setupNoReset, "no-reset", false, noResetUsage)
 	setupCmd.Flags().Bool("headless", false, "Run emulators without a visible window (feeds into pool grow strategies)")
 	rootCmd.AddCommand(setupCmd)
 }

@@ -27,6 +27,11 @@ type WorktreeState struct {
 	// is a claim the allocator must honour and the device commands act on,
 	// never a change to what those render.
 	PoolExtras map[string][]string `json:"pool_extras,omitempty"`
+	// PendingReset marks a slot this checkout claimed but has not yet run
+	// hooks.slot_reset on. A reused slot still holds the previous checkout's
+	// data until then. Setup runs the reset and clears the mark; a setup that
+	// fails first leaves it, so the re-run resets too.
+	PendingReset bool `json:"pending_reset,omitempty"`
 }
 
 // poolClaims lists every item this worktree holds from pool, primary first.

@@ -77,7 +77,11 @@ func writeSlotList(out io.Writer, state *WorktreeConfig, cfg *WetConfig, repoRoo
 		if _, err := os.Stat(wt.Path); err != nil {
 			path += " (missing)"
 		}
-		fmt.Fprintf(tw, "%s %s\t%s\t%s\t%s\t%s\n", marker, slot, wt.Branch, formatSlotPorts(wt.Ports), formatSlotPools(wt), path)
+		branch := wt.Branch
+		if wt.PendingReset {
+			branch += " (reset pending)"
+		}
+		fmt.Fprintf(tw, "%s %s\t%s\t%s\t%s\t%s\n", marker, slot, branch, formatSlotPorts(wt.Ports), formatSlotPools(wt), path)
 	}
 	_ = tw.Flush()
 
