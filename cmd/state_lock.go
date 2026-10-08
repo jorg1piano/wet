@@ -8,18 +8,18 @@ import (
 	"time"
 )
 
-// stateLockFileName sits beside .wet-worktrees.json in the main repo. It is
-// its own file rather than a lock on the state file itself so that holding
-// the lock never depends on the state file existing yet.
-const stateLockFileName = ".wet-worktrees.lock"
+// stateLockFileName sits in the machine state directory, beside machine.json.
+// One lock for every project is what keeps two projects from claiming the
+// same ports or the same emulator: each allocation reads the other projects'
+// files while holding it.
+const stateLockFileName = "wet.lock"
 
 // stateLockTimeout bounds the wait. Allocation is a few file reads and a
 // handful of port probes — a second at most — so a wait this long means a
 // crashed holder, not contention, and saying so beats hanging forever.
 const stateLockTimeout = 30 * time.Second
 
-// withStateLock runs fn holding an exclusive lock on the shared allocation
-// state.
+// withStateLock runs fn holding the machine-wide allocation lock.
 //
 // Slots, ports and pool items are claimed by read-modify-write on one JSON
 // file. Two `wet setup` runs started at the same moment — the whole point of
@@ -32,7 +32,10 @@ const stateLockTimeout = 30 * time.Second
 // The lock is advisory and process-scoped (flock), so it costs nothing when
 // there is no contention and is released even if wet is killed.
 func withStateLock(fn func() error) error {
-	path := filepath.Join(filepath.Dir(configFilePath()), stateLockFileName)
+	if err := os.MkdirAll(machineStateDir(), 0o755); err != nil {
+		return fmt.Errorf("create %s: %w", machineStateDir(), err)
+	}
+	path := filepath.Join(machineStateDir(), stateLockFileName)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
 		return fmt.Errorf("open %s: %w", path, err)

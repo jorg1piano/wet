@@ -30,6 +30,7 @@ wet mobile reverse-tcp          # adb reverse this worktree's ports onto its dev
 wet slot list                   # every claimed slot with its branch, ports and pools (alias: ls)
 wet slot warm --all --headless   # run slot_start for every configured checkout
 wet port-cluster next           # claim a free port band for this clone
+wet machine list                # every wet project on this machine, its ports and slots
 wet pr create                   # push branch + open a GitHub PR (via gh)
 wet install wet-skill           # install the Claude Code helper skill
 ```
@@ -1259,15 +1260,35 @@ to a lower band that has since freed up.
 
 **What the probe can and can't see.** It finds anything currently serving —
 including a loopback-only Postgres and a server bound to IPv4 only, both of
-which a naive wildcard-bind check reads as free. What it cannot see is a
-neighbouring clone whose stack is simply **down**: an idle band looks free, so
-two clones run on a quiet machine can pick the same cluster. Claim a cluster
-while the neighbours you care about are up, or set `port_cluster:` by hand.
+which a naive wildcard-bind check reads as free. A neighbouring stack that is
+**down** looks free to a probe, so `next` also skips every band another wet
+project on this machine owns (see below), up or not.
+
+### Other projects on this machine — `wet machine`
+
+Every wet project on the machine allocates under one lock, in
+`~/.local/state/wet/` (or `$WET_STATE_DIR`). Beside it, `machine.json` lists
+each project's main checkout and the shared emulator pool. Everything a
+project claims stays in its own `.wet-worktrees.json` and `.wet.local.yaml`.
+
+`wet setup` lists the project the first time it runs, after checking that its
+band overlaps no project already listed:
+
+- A project with no claims and no recorded `port_cluster:` is moved to the
+  lowest free cluster, and the number is written to its `.wet.local.yaml`.
+- A project that already holds slots, or has a recorded cluster, is never
+  moved behind its back. Setup stops and names the other project; run
+  `wet port-cluster next` there, then `wet setup` again.
+
+```
+wet machine list          every listed project, its band and slots, and the shared emulators
+wet machine add PATH...   list projects without running setup in them
+```
 
 ## Running several worktrees at once
 
-Slot, port and pool allocation happens under a lock (`.wet-worktrees.lock`,
-beside the state file), and the claim is written before any hook runs. The lock
+Slot, port and pool allocation happens under one lock per machine
+(`~/.local/state/wet/wet.lock`), and the claim is written before any hook runs. The lock
 never spans the hooks — concurrent stack boots are the point
 ([background](docs/design.md#why-allocation-holds-a-lock)). Two consequences
 worth knowing:

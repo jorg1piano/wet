@@ -55,7 +55,11 @@ func configFilePath() string {
 }
 
 func loadConfig() (*WorktreeConfig, error) {
-	data, err := os.ReadFile(configFilePath())
+	return loadConfigFrom(configFilePath())
+}
+
+func loadConfigFrom(path string) (*WorktreeConfig, error) {
+	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return &WorktreeConfig{Worktrees: []WorktreeState{}}, nil
@@ -71,13 +75,21 @@ func loadConfig() (*WorktreeConfig, error) {
 }
 
 func saveConfig(config *WorktreeConfig) error {
+	return saveConfigTo(configFilePath(), config)
+}
+
+func saveConfigTo(path string, config *WorktreeConfig) error {
 	data, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
 		return err
 	}
-	path := configFilePath()
-	// Readers such as env pull and mobile list do not hold the allocation
-	// lock. Rename a complete file so they never read a truncated JSON value.
+	return writeFileAtomic(path, data)
+}
+
+// writeFileAtomic replaces path with data through a rename. Readers such as
+// env pull and mobile list do not hold the allocation lock, so they must never
+// see a truncated JSON value.
+func writeFileAtomic(path string, data []byte) error {
 	f, err := os.CreateTemp(filepath.Dir(path), ".wet-state-*")
 	if err != nil {
 		return err

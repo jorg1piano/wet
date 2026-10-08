@@ -106,6 +106,7 @@ func TestWithStateLockSerializesAllocation(t *testing.T) {
 }
 
 func TestWithStateLockReleasesOnError(t *testing.T) {
+	isolateMachine(t)
 	dir := t.TempDir()
 	prev, _ := os.Getwd()
 	if err := os.Chdir(dir); err != nil {
@@ -121,7 +122,7 @@ func TestWithStateLockReleasesOnError(t *testing.T) {
 	if err := withStateLock(func() error { return nil }); err != nil {
 		t.Fatalf("second acquire: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, stateLockFileName)); err != nil {
+	if _, err := os.Stat(filepath.Join(machineStateDir(), stateLockFileName)); err != nil {
 		t.Fatalf("lock file: %v", err)
 	}
 }

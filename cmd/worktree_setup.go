@@ -177,6 +177,16 @@ func runSetupCore(repoRoot, worktreePath, branchName string, headless, isMain bo
 		if err != nil {
 			return fmt.Errorf("failed to load worktree state: %w", err)
 		}
+		machine, err := loadMachineState()
+		if err != nil {
+			return fmt.Errorf("load machine state: %w", err)
+		}
+		if err := claimMachineBand(machine, cfg, repoRoot, localRoot, state); err != nil {
+			return err
+		}
+		if err := saveMachineState(machine); err != nil {
+			return fmt.Errorf("save machine state: %w", err)
+		}
 
 		// Find existing entry for this worktree (by absolute path). If we
 		// find one, update it in place; otherwise append at the end.

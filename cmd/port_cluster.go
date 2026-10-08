@@ -124,7 +124,14 @@ func runPortClusterNext(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	cluster, err := findFreePortCluster(cfg)
+	// Other wet projects' bands are off limits even while their stacks are
+	// down; probing alone would hand this clone a band that one of them
+	// owns and boots into later.
+	machine, err := loadMachineState()
+	if err != nil {
+		return err
+	}
+	cluster, err := findFreePortClusterOnMachine(cfg, machine, repoRoot)
 	if err != nil {
 		return err
 	}
@@ -188,6 +195,13 @@ func runPortClusterNext(cmd *cobra.Command, args []string) error {
 // unable to move: the search returned the claimed cluster before ever
 // probing it.
 func findFreePortCluster(cfg *WetConfig) (int, error) {
+	return findFreePortClusterExcluding(cfg, func(int) bool { return true })
+}
+
+// findFreePortClusterExcluding is findFreePortCluster with an extra test a
+// cluster has to pass before it is probed: allowed says whether another wet
+// project already owns any of its ports.
+func findFreePortClusterExcluding(cfg *WetConfig, allowed func(cluster int) bool) (int, error) {
 	for cluster := 0; cluster <= maxPortClusterProbe; cluster++ {
 		// A band whose own ports overlap can never be free, so probing it
 		// would silently walk to the next cluster and eventually report
@@ -201,7 +215,7 @@ func findFreePortCluster(cfg *WetConfig) (int, error) {
 			return 0, fmt.Errorf("every port cluster up to %d is occupied, and %d would push a port past 65535 — "+
 				"shut down a stack, or lower a base: in .wet.yaml", cluster-1, cluster)
 		}
-		if cfg.ClusterFree(cluster) {
+		if allowed(cluster) && cfg.ClusterFree(cluster) {
 			return cluster, nil
 		}
 	}
