@@ -32,17 +32,24 @@ const stateLockTimeout = 30 * time.Second
 // The lock is advisory and process-scoped (flock), so it costs nothing when
 // there is no contention and is released even if wet is killed.
 func withStateLock(fn func() error) error {
+	return withMachineLock(stateLockFileName, stateLockTimeout,
+		"another wet run is allocating slots", fn)
+}
+
+// withMachineLock runs fn holding an exclusive flock on name in the machine
+// state directory, waiting up to timeout. busy says what a wait is for.
+func withMachineLock(name string, timeout time.Duration, busy string, fn func() error) error {
 	if err := os.MkdirAll(machineStateDir(), 0o755); err != nil {
 		return fmt.Errorf("create %s: %w", machineStateDir(), err)
 	}
-	path := filepath.Join(machineStateDir(), stateLockFileName)
+	path := filepath.Join(machineStateDir(), name)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
 		return fmt.Errorf("open %s: %w", path, err)
 	}
 	defer f.Close()
 
-	deadline := time.Now().Add(stateLockTimeout)
+	deadline := time.Now().Add(timeout)
 	waited := false
 	for {
 		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
@@ -53,12 +60,11 @@ func withStateLock(fn func() error) error {
 			return fmt.Errorf("lock %s: %w", path, err)
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("timed out after %s waiting for %s — another wet run is "+
-				"holding it, or one died mid-allocation (remove the file if nothing else is running)",
-				stateLockTimeout, path)
+			return fmt.Errorf("timed out after %s waiting for %s: %s, or one died holding it "+
+				"(remove the file if nothing else is running)", timeout, path, busy)
 		}
 		if !waited {
-			fmt.Println("  Waiting: another wet run is allocating slots…")
+			fmt.Printf("  Waiting: %s…\n", busy)
 			waited = true
 		}
 		time.Sleep(100 * time.Millisecond)

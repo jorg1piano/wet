@@ -28,6 +28,38 @@ func ensureEmulatorRunning(avdName string, headless bool) (string, error) {
 	if serial, ok := runningEmulatorSerial(avdName); ok {
 		return serial, waitForBootCompleted(serial, avdName, bootCompletedTimeout)
 	}
+	var serial string
+	if err := withMachineLock(emulatorBootLockFileName, emulatorStartTimeout+30*time.Second,
+		"another wet run is starting an emulator", func() error {
+			var err error
+			serial, err = startEmulator(avdName, headless)
+			return err
+		}); err != nil {
+		return "", err
+	}
+	if err := waitForBootCompleted(serial, avdName, bootCompletedTimeout); err != nil {
+		return "", err
+	}
+	fmt.Printf("  %s is online (%s).\n", serial, avdName)
+	return serial, nil
+}
+
+// emulatorBootLockFileName serializes emulator starts across every wet run on
+// the machine. A console port is free until the emulator claims it, so two
+// starts that pick a port at once pick the same one: the second emulator dies
+// on it, and its caller sees the first come up on that serial and takes it
+// for its own.
+const emulatorBootLockFileName = "emulator-boot.lock"
+
+const emulatorStartTimeout = 120 * time.Second
+
+// startEmulator boots avdName on a free console port and returns its serial
+// once adb lists it running that AVD. Callers hold the boot lock.
+func startEmulator(avdName string, headless bool) (string, error) {
+	// Another run may have started this AVD while we waited for the lock.
+	if serial, ok := runningEmulatorSerial(avdName); ok {
+		return serial, nil
+	}
 	if err := ensureAVDExists(avdName); err != nil {
 		return "", err
 	}
@@ -53,13 +85,9 @@ func ensureEmulatorRunning(avdName string, headless bool) (string, error) {
 		return "", fmt.Errorf("emulator start failed for %s: %w", avdName, err)
 	}
 	fmt.Printf("  Booting %s (cold boot, port %d)...\n", avdName, port)
-	if err := waitForStartedEmulator(cmd, serial, 120*time.Second, &emulatorOutput); err != nil {
+	if err := waitForStartedEmulator(cmd, serial, avdName, emulatorStartTimeout, &emulatorOutput); err != nil {
 		return "", err
 	}
-	if err := waitForBootCompleted(serial, avdName, bootCompletedTimeout); err != nil {
-		return "", err
-	}
-	fmt.Printf("  %s is online (%s).\n", serial, avdName)
 	return serial, nil
 }
 

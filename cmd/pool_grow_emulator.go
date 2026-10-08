@@ -184,7 +184,7 @@ func pickAVDTemplate() (sysImage, device string, err error) {
 // kill the boot it is waiting for. A machine with no adb at all is a different
 // fact, so that one is checked once, up front. Whatever the last poll said is
 // carried into the timeout, so a genuinely broken adb still explains itself.
-func waitForStartedEmulator(cmd *exec.Cmd, serial string, timeout time.Duration, output fmt.Stringer) error {
+func waitForStartedEmulator(cmd *exec.Cmd, serial, avdName string, timeout time.Duration, output fmt.Stringer) error {
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 	deadline := time.Now().Add(timeout)
@@ -205,7 +205,7 @@ func waitForStartedEmulator(cmd *exec.Cmd, serial string, timeout time.Duration,
 		serials, err := attachedSerials()
 		lastErr = err
 		for _, s := range serials {
-			if s == serial {
+			if s == serial && emulatorRunsAVD(serial, avdName) {
 				return nil
 			}
 		}
@@ -295,4 +295,19 @@ func setMappingValue(mapping *yaml.Node, key string, value *yaml.Node) {
 	}
 	mapping.Content = append(mapping.Content,
 		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}, value)
+}
+
+// emulatorRunsAVD reports whether the emulator on serial is running avdName.
+// A serial alone proves nothing: the port may belong to another emulator.
+var emulatorRunsAVD = func(serial, avdName string) bool {
+	out, err := exec.Command("adb", "-s", serial, "emu", "avd", "name").Output()
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.TrimSpace(line) == avdName {
+			return true
+		}
+	}
+	return false
 }
