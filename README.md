@@ -29,6 +29,7 @@ wet mobile remove <item>        # release a device `add` claimed, and stop it
 wet mobile reverse-tcp          # adb reverse this worktree's ports onto its devices
 wet slot list                   # every claimed slot with its branch, ports and pools (alias: ls)
 wet slot warm --all --headless   # run slot_start for every configured checkout
+wet slot release <path>         # free the claim of a checkout removed without pop
 wet port-cluster next           # claim a free port band for this clone
 wet machine list                # every wet project on this machine, its ports and slots
 wet pr create                   # push branch + open a GitHub PR (via gh)
@@ -1296,6 +1297,12 @@ worth knowing:
 - A failed setup leaves its claim behind. That is deliberate: the tree still
   exists, re-running setup finds its own entry and keeps the same slot, and
   `wet worktree pop` releases it.
+- A checkout removed without `pop` (`git worktree remove`, `rm -rf`, a
+  multiplexer's own remove) no longer holds its claim forever. Every
+  `wet setup` releases the claims of checkouts that are gone, in this project
+  and in every other listed one, and prints each. No hooks run for them: the
+  checkout is gone, and the slot's warm resources stay for its next user.
+  `wet slot release PATH` does the same for one checkout right away.
 - Anything a hook allocates from a shared namespace — a docker subnet is the
   usual one — is outside the lock and races the same way. Have the hook ask
   what's free and retry on collision rather than deriving a value from the

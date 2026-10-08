@@ -181,6 +181,7 @@ func runSetupCore(repoRoot, worktreePath, branchName string, headless, isMain bo
 		if err != nil {
 			return fmt.Errorf("load machine state: %w", err)
 		}
+		printReleased(sweepDeadClaims(machine, repoRoot, state))
 		if err := claimMachineBand(machine, cfg, repoRoot, localRoot, state); err != nil {
 			return err
 		}

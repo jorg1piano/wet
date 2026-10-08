@@ -39,6 +39,7 @@ func init() {
 	slotCmd.AddCommand(slotLifecycleCmd("doctor", "Check the current slot's health", func(h HooksConfig) []string { return h.SlotDoctor }))
 	slotCmd.AddCommand(slotWarmCmd())
 	slotCmd.AddCommand(slotListCmd())
+	slotCmd.AddCommand(slotReleaseCmd())
 	rootCmd.AddCommand(slotCmd)
 }
 
