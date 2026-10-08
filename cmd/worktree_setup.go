@@ -277,7 +277,7 @@ func runSetupCore(repoRoot, worktreePath, branchName string, headless, isMain bo
 					WorktreeState{Branch: branchName, PoolExtras: extras})
 			}
 		}
-		allocated, err := AllocatePoolsKeeping(cfg, claimants, keep, localRoot, headless)
+		allocated, err := AllocatePoolsKeeping(cfg, claimants, keep, localRoot, poolTarget{Project: repoRoot, Slot: slot})
 		if err != nil {
 			return err
 		}

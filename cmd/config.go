@@ -68,7 +68,11 @@ type WetConfig struct {
 	Secrets      *SecretsConfig      `yaml:"secrets,omitempty"`
 	Pools        map[string][]string `yaml:"pools,omitempty"`
 	PoolGrow     map[string]string   `yaml:"pool_grow,omitempty"`
-	PR           PRConfig            `yaml:"pr,omitempty"`
+	// PoolScope says where a pool's items come from. `machine` draws from the
+	// emulator pool every wet project on this machine shares (machine.json);
+	// the default, `project`, from this project's own pools: list.
+	PoolScope map[string]string `yaml:"pool_scope,omitempty"`
+	PR        PRConfig          `yaml:"pr,omitempty"`
 
 	// LocalKeys lists the top-level keys .wet.local.yaml overrode, so setup
 	// can say where a surprising value came from. Not part of the file format.
@@ -502,6 +506,9 @@ func LoadWetConfigWithLocal(configDir string, localDirs ...string) (*WetConfig, 
 		}
 		return nil, fmt.Errorf("invalid %s: %w", path, err)
 	}
+	if err := applyMachinePools(&cfg); err != nil {
+		return nil, err
+	}
 	return &cfg, nil
 }
 
@@ -889,6 +896,22 @@ func (c *WetConfig) Validate() error {
 		}
 		if strategy := c.PoolGrow[name]; strategy != PoolGrowAndroidEmulator {
 			return fmt.Errorf("pool_grow[%q]: unknown strategy %q — the only supported value is %q", name, strategy, PoolGrowAndroidEmulator)
+		}
+	}
+
+	for name, scope := range c.PoolScope {
+		if _, ok := c.Pools[name]; !ok {
+			return fmt.Errorf("pool_scope[%q]: no pool named %q is declared under pools:", name, name)
+		}
+		switch scope {
+		case PoolScopeProject:
+		case PoolScopeMachine:
+			if c.PoolGrow[name] != PoolGrowAndroidEmulator {
+				return fmt.Errorf("pool_scope[%q]: machine scope needs pool_grow[%q]: %s, which is how the shared pool gets its emulators",
+					name, name, PoolGrowAndroidEmulator)
+			}
+		default:
+			return fmt.Errorf("pool_scope[%q]: unknown scope %q; use %q or %q", name, scope, PoolScopeProject, PoolScopeMachine)
 		}
 	}
 
@@ -1842,9 +1865,15 @@ func firstOrNone(list []string) []string {
 //
 // Repos without a `pools:` block get an empty map and no error, which is
 // the back-compat path: existing configs keep working unchanged.
-func AllocatePools(cfg *WetConfig, existing []WorktreeState, repoRoot string, headless ...bool) (map[string]string, error) {
-	hl := len(headless) > 0 && headless[0]
-	return AllocatePoolsKeeping(cfg, existing, nil, repoRoot, hl)
+func AllocatePools(cfg *WetConfig, existing []WorktreeState, repoRoot string) (map[string]string, error) {
+	return AllocatePoolsKeeping(cfg, existing, nil, repoRoot, poolTarget{})
+}
+
+// poolTarget is who an allocation is for: the project's main checkout and the
+// slot. A machine-scoped pool uses it to hand a slot back the emulator it had.
+type poolTarget struct {
+	Project string
+	Slot    int
 }
 
 // AllocatePoolsKeeping is AllocatePools for a worktree that already holds
@@ -1855,7 +1884,7 @@ func AllocatePools(cfg *WetConfig, existing []WorktreeState, repoRoot string, he
 // extras. A kept item is not checked against existing, because the caller
 // has already excluded this worktree's own entry from that list and the
 // item was this worktree's to begin with.
-func AllocatePoolsKeeping(cfg *WetConfig, existing []WorktreeState, keep map[string]string, repoRoot string, headless bool) (map[string]string, error) {
+func AllocatePoolsKeeping(cfg *WetConfig, existing []WorktreeState, keep map[string]string, repoRoot string, target poolTarget) (map[string]string, error) {
 	out := make(map[string]string, len(cfg.Pools))
 	if len(cfg.Pools) == 0 {
 		return out, nil
@@ -1870,7 +1899,7 @@ func AllocatePoolsKeeping(cfg *WetConfig, existing []WorktreeState, keep map[str
 			out[name] = kept
 			continue
 		}
-		picked, err := allocatePoolItem(cfg, name, existing, repoRoot, headless)
+		picked, err := allocatePoolItem(cfg, name, existing, repoRoot, target)
 		if err != nil {
 			return nil, err
 		}
@@ -1883,8 +1912,12 @@ func AllocatePoolsKeeping(cfg *WetConfig, existing []WorktreeState, keep map[str
 // declared item nobody in existing holds, or a grown one when the pool is
 // dry and has a strategy. It is the unit both a fresh setup (once per pool)
 // and `wet mobile add` (once, for the pool it names) are built from, so the
-// two cannot disagree about what "free" means.
-func allocatePoolItem(cfg *WetConfig, name string, existing []WorktreeState, repoRoot string, headless bool) (string, error) {
+// two cannot disagree about what "free" means. A machine-scoped pool is
+// handed to allocateMachineItem.
+func allocatePoolItem(cfg *WetConfig, name string, existing []WorktreeState, repoRoot string, target poolTarget) (string, error) {
+	if cfg.poolIsMachine(name) {
+		return allocateMachineItem(cfg, name, existing, target)
+	}
 	items := cfg.Pools[name]
 	claimed := make(map[string]bool, len(existing))
 	for _, ws := range existing {
@@ -1899,7 +1932,7 @@ func allocatePoolItem(cfg *WetConfig, name string, existing []WorktreeState, rep
 	}
 	// Check for a grow strategy before erroring.
 	if cfg.PoolGrow[name] == PoolGrowAndroidEmulator {
-		newItem, err := growAndroidEmulatorPool(cfg, name, repoRoot, headless)
+		newItem, err := growAndroidEmulatorPool(cfg, name, repoRoot)
 		if err != nil {
 			return "", fmt.Errorf("pool %q exhausted and auto-grow failed: %w", name, err)
 		}

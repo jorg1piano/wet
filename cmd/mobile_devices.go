@@ -300,7 +300,7 @@ func runMobileAdd(cmd *cobra.Command, args []string) error {
 		} else {
 			// Every entry counts, this worktree's included: its primary and
 			// its extras are claimed, and the next free item is what we want.
-			picked, err := allocatePoolItem(cfg, pool, state.Worktrees, localRoot, mobileAddHeadless)
+			picked, err := allocatePoolItem(cfg, pool, state.Worktrees, localRoot, poolTarget{Project: repoRoot, Slot: own.Index})
 			if err != nil {
 				return err
 			}
@@ -393,7 +393,7 @@ func runMobileEnsure(cmd *cobra.Command, args []string) error {
 			own.PoolExtras = map[string][]string{}
 		}
 		for current < mobileEnsureCount {
-			item, err := allocatePoolItem(cfg, pool, state.Worktrees, localRoot, mobileEnsureHeadless)
+			item, err := allocatePoolItem(cfg, pool, state.Worktrees, localRoot, poolTarget{Project: repoRoot, Slot: own.Index})
 			if err != nil {
 				return err
 			}

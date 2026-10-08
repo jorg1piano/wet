@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -300,4 +301,116 @@ func registerMachineProject(root string) (bool, error) {
 		return saveMachineState(m)
 	})
 	return added, err
+}
+
+// Pool scopes, see WetConfig.PoolScope.
+const (
+	PoolScopeProject = "project"
+	PoolScopeMachine = "machine"
+)
+
+// machineAVDPrefix names the shared pool's emulators. They belong to no
+// project, so the name carries none.
+const machineAVDPrefix = "avd"
+
+func (c *WetConfig) poolIsMachine(name string) bool {
+	return c != nil && c.PoolScope[name] == PoolScopeMachine
+}
+
+// applyMachinePools replaces each machine-scoped pool's items with the shared
+// pool's, so everything that reads cfg.Pools sees the emulators the machine
+// actually has. A project's own pools: list is ignored for such a pool.
+func applyMachinePools(cfg *WetConfig) error {
+	var m *MachineState
+	for name := range cfg.Pools {
+		if !cfg.poolIsMachine(name) {
+			continue
+		}
+		if m == nil {
+			var err error
+			if m, err = loadMachineState(); err != nil {
+				return err
+			}
+		}
+		items := make([]string, len(m.Devices))
+		for i, d := range m.Devices {
+			items[i] = d.Item
+		}
+		cfg.Pools[name] = items
+	}
+	return nil
+}
+
+// machineClaims is every pool item held by any project other than self, read
+// from their own state files.
+func machineClaims(m *MachineState, self string) map[string]bool {
+	claimed := map[string]bool{}
+	for _, root := range m.otherProjects(self) {
+		state, err := loadProjectState(root)
+		if err != nil {
+			continue
+		}
+		for _, wt := range state.Worktrees {
+			for _, item := range wt.poolClaimsAll() {
+				claimed[item] = true
+			}
+		}
+	}
+	return claimed
+}
+
+// allocateMachineItem claims an emulator from the machine-wide pool. Runs
+// under the machine lock.
+//
+// The order is: the emulator this project's slot used last, then any free
+// one, then a new one. Free means no project holds it, this one included
+// (existing carries this project's other claims). The pick is remembered
+// against the slot so its next checkout gets the same emulator back.
+func allocateMachineItem(cfg *WetConfig, name string, existing []WorktreeState, target poolTarget) (string, error) {
+	m, err := loadMachineState()
+	if err != nil {
+		return "", err
+	}
+	claimed := machineClaims(m, target.Project)
+	for _, ws := range existing {
+		for _, item := range ws.poolClaimsAll() {
+			claimed[item] = true
+		}
+	}
+	project := resolvePath(target.Project)
+	pick := -1
+	for i, d := range m.Devices {
+		if !claimed[d.Item] && d.LastProject == project && d.LastSlot == target.Slot {
+			pick = i
+			break
+		}
+	}
+	if pick < 0 {
+		for i, d := range m.Devices {
+			if !claimed[d.Item] {
+				pick = i
+				break
+			}
+		}
+	}
+	if pick < 0 {
+		items := make([]string, len(m.Devices))
+		for i, d := range m.Devices {
+			items[i] = d.Item
+		}
+		avd := nextAVDName(machineAVDPrefix, items)
+		fmt.Printf("  Growing the shared pool with %s\n", avd)
+		m.Devices = append(m.Devices, MachineDevice{Item: emulatorItemPrefix + avd})
+		pick = len(m.Devices) - 1
+	}
+	m.Devices[pick].LastProject = project
+	m.Devices[pick].LastSlot = target.Slot
+	if err := saveMachineState(m); err != nil {
+		return "", err
+	}
+	item := m.Devices[pick].Item
+	if !slices.Contains(cfg.Pools[name], item) {
+		cfg.Pools[name] = append(cfg.Pools[name], item)
+	}
+	return item, nil
 }

@@ -279,8 +279,10 @@ listing each claim by branch and item. Grow the pool in `.wet.yaml` (or
 itself.
 
 **`pool_grow:`** maps a pool name to a strategy wet runs instead of failing on
-exhaustion. `android-emulator` creates a new AVD, boots it, records it as
+exhaustion. `android-emulator` reserves a new AVD name, records it as
 `emulator:<AVD_NAME>` in `.wet.local.yaml`, and hands it back as the claim.
+The AVD is created and booted after the allocation lock is released, so a
+cold boot never makes another project's setup wait.
 It is the only supported strategy. An unknown strategy or an entry naming
 an undeclared pool fails config validation.
 
@@ -312,6 +314,27 @@ Studio installs to; `avdmanager`, `sdkmanager` and `emulator` are found on
 An empty pool *without* a strategy is rejected at load: nothing can ever fill
 it, so it can only fail later at allocation, and failing at load names the file
 to fix.
+
+**`pool_scope:`** shares one emulator pool across every wet project on the
+machine instead of growing one per project:
+
+```yaml
+pools:
+  devices: []
+pool_grow:
+  devices: android-emulator
+pool_scope:
+  devices: machine
+```
+
+A machine-scoped pool ignores the project's own item list. Its emulators,
+named `wet-avd-N`, live in `~/.local/state/wet/machine.json`; each project's
+claims stay in its own `.wet-worktrees.json`. A slot gets back the emulator it
+used last when that one is free, then any free one, and a new one only when
+none is. `slot_reset` should uninstall the project's app, since the next
+holder may be another project. `wet machine list` shows who holds which.
+Switching a pool to `machine` leaves the old per-project AVDs on disk; delete
+them with `avdmanager delete avd -n <name>` once nothing lists them.
 
 **Template and hook access.** Pool picks are exposed as `{{.Pools.<name>}}`,
 and as `POOL_<NAME>` in upper snake case (`devices` → `POOL_DEVICES`,

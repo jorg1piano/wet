@@ -163,9 +163,10 @@ pools:
 
 # Optional: per-pool strategy for growing a pool when every item is claimed,
 # instead of failing. The only strategy wet implements is `android-emulator`:
-# it creates a new AVD named after the project, cold boots it, waits for it to
-# come online, appends `emulator:<AVD_NAME>` to the machine-local
-# `.wet.local.yaml` (never to this committed file), and claims it.
+# it reserves a new AVD named after the project, appends `emulator:<AVD_NAME>`
+# to the machine-local `.wet.local.yaml` (never to this committed file), and
+# claims it. Setup creates and boots the AVD after the allocation lock is
+# released.
 #
 # A pool with no entry here fails on exhaustion. An unknown strategy or an
 # entry naming an undeclared pool fails when the config loads.
@@ -180,6 +181,16 @@ pools:
 # file to fix.
 # pool_grow:
 #   devices: android-emulator
+
+# Optional: where a pool's items come from. `project` (the default) is the
+# pools: list above. `machine` draws from one emulator pool every wet project
+# on this machine shares, kept in ~/.local/state/wet/machine.json, and needs
+# `pool_grow: android-emulator` so wet can add emulators to it (named
+# wet-avd-N). A slot gets back the emulator it used last when that one is
+# free. Each project's claims stay in its own .wet-worktrees.json, and
+# `wet machine list` shows who holds which emulator.
+# pool_scope:
+#   devices: machine
 
 # ---------------------------------------------------------------------------
 # env: — the derivation layer

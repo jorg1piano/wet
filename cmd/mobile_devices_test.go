@@ -73,7 +73,7 @@ func TestAllocatePoolsKeepingHoldsThePrimary(t *testing.T) {
 		Pools:      map[string]string{"devices": "emulator:pixel-b"},
 		PoolExtras: map[string][]string{"devices": {"emulator:pixel-c"}},
 	}
-	got, err := AllocatePoolsKeeping(cfg, []WorktreeState{own}, own.Pools, "", false)
+	got, err := AllocatePoolsKeeping(cfg, []WorktreeState{own}, own.Pools, "", poolTarget{})
 	if err != nil {
 		t.Fatalf("AllocatePoolsKeeping: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestAllocatePoolsKeepingHoldsThePrimary(t *testing.T) {
 // belonged to has been rewritten, and holding a device nobody lists means
 // rendering an AVD this machine may not have.
 func TestAllocatePoolsKeepingDropsAnUndeclaredItem(t *testing.T) {
-	got, err := AllocatePoolsKeeping(devicesCfg(), nil, map[string]string{"devices": "emulator:gone"}, "", false)
+	got, err := AllocatePoolsKeeping(devicesCfg(), nil, map[string]string{"devices": "emulator:gone"}, "", poolTarget{})
 	if err != nil {
 		t.Fatalf("AllocatePoolsKeeping: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestAllocatePoolItemSkipsTheCallersOwnClaims(t *testing.T) {
 		Pools:      map[string]string{"devices": "emulator:pixel-a"},
 		PoolExtras: map[string][]string{"devices": {"emulator:pixel-b"}},
 	}
-	got, err := allocatePoolItem(devicesCfg(), "devices", []WorktreeState{own}, "", false)
+	got, err := allocatePoolItem(devicesCfg(), "devices", []WorktreeState{own}, "", poolTarget{})
 	if err != nil {
 		t.Fatalf("allocatePoolItem: %v", err)
 	}

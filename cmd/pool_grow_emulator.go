@@ -14,8 +14,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// growAndroidEmulatorPool creates a new Android emulator, boots it, waits for
-// it to come online, and appends it to the pool as "emulator:<AVD_NAME>".
+// growAndroidEmulatorPool reserves a new Android emulator and appends it to
+// the pool as "emulator:<AVD_NAME>".
 // Returns the new pool item on success.
 //
 // Pool items name an AVD, never a runtime serial. An `emulator-NNNN` serial is
@@ -25,18 +25,18 @@ import (
 // the durable identity, so `emulator:<AVD_NAME>` is the one convention: hooks
 // test for the `emulator:` prefix to decide whether to boot something, and
 // resolve the serial at claim time.
-func growAndroidEmulatorPool(cfg *WetConfig, poolName, repoRoot string, headless bool) (string, error) {
+//
+// Growing only reserves the name. The AVD is created and booted when the
+// claim's handle is resolved, after the allocation lock is released: that
+// lock is shared by every project on the machine, and a cold boot inside it
+// made every other setup wait minutes or time out.
+func growAndroidEmulatorPool(cfg *WetConfig, poolName, repoRoot string) (string, error) {
 	items := cfg.Pools[poolName]
 
 	// Name the AVD for the project so several repos can grow pools on one
-	// machine without colliding, then boot it through the same path a
-	// claimed emulator item takes — one implementation, so a grown emulator
-	// and a configured one behave identically.
+	// machine without colliding.
 	avdName := nextAVDName(cfg.ProjectName, items)
-	fmt.Printf("  Growing pool %q with %s...\n", poolName, avdName)
-	if _, err := ensureEmulatorRunning(avdName, headless); err != nil {
-		return "", err
-	}
+	fmt.Printf("  Growing pool %q with %s\n", poolName, avdName)
 
 	// 6. Record the new AVD in the machine-local config.
 	item := emulatorItemPrefix + avdName

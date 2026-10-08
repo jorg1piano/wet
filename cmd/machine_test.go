@@ -229,3 +229,103 @@ func TestNextFreeReusableSlotReusesPortsItsOwnProjectHolds(t *testing.T) {
 		t.Fatalf("NextFreeReusableSlot = %d, %v, want 1 (its own DB holds 47013)", got, err)
 	}
 }
+
+func machinePoolConfig() *WetConfig {
+	return &WetConfig{
+		ProjectName: "app",
+		Pools:       map[string][]string{"devices": {}},
+		PoolGrow:    map[string]string{"devices": PoolGrowAndroidEmulator},
+		PoolScope:   map[string]string{"devices": PoolScopeMachine},
+	}
+}
+
+func TestMachinePoolGrowsSkipsOtherProjectsAndRemembersTheSlot(t *testing.T) {
+	isolateMachine(t)
+	own, other := t.TempDir(), t.TempDir()
+	m := &MachineState{Projects: []MachineProject{{Root: own}, {Root: other}}}
+	if err := saveMachineState(m); err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := allocateMachineItem(machinePoolConfig(), "devices", nil, poolTarget{Project: other, Slot: 1})
+	if err != nil || first != "emulator:wet-avd-1" {
+		t.Fatalf("first claim = %q, %v, want a grown emulator:wet-avd-1", first, err)
+	}
+	if err := saveConfigTo(projectStatePath(other), &WorktreeConfig{Worktrees: []WorktreeState{
+		{Branch: "x", Path: other, Index: 1, Pools: map[string]string{"devices": first}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := allocateMachineItem(machinePoolConfig(), "devices", nil, poolTarget{Project: own, Slot: 2})
+	if err != nil || second != "emulator:wet-avd-2" {
+		t.Fatalf("second claim = %q, %v, want wet-avd-2: wet-avd-1 is held by another project", second, err)
+	}
+	back, _ := loadMachineState()
+	if d := back.Devices[1]; d.LastProject != resolvePath(own) || d.LastSlot != 2 {
+		t.Fatalf("wet-avd-2 remembered %+v, want own slot 2", d)
+	}
+}
+
+// The cycle-3 waste: a slot came back and got a fresh AVD while its old one
+// sat warm. With both free, the slot's own emulator wins over the first one.
+func TestMachinePoolHandsASlotBackItsOwnEmulator(t *testing.T) {
+	isolateMachine(t)
+	own := t.TempDir()
+	m := &MachineState{
+		Projects: []MachineProject{{Root: own}},
+		Devices: []MachineDevice{
+			{Item: "emulator:wet-avd-1", LastProject: "/elsewhere", LastSlot: 1},
+			{Item: "emulator:wet-avd-2", LastProject: resolvePath(own), LastSlot: 5},
+		},
+	}
+	if err := saveMachineState(m); err != nil {
+		t.Fatal(err)
+	}
+	got, err := allocateMachineItem(machinePoolConfig(), "devices", nil, poolTarget{Project: own, Slot: 5})
+	if err != nil || got != "emulator:wet-avd-2" {
+		t.Fatalf("slot 5 got %q, %v, want its own wet-avd-2", got, err)
+	}
+	got, err = allocateMachineItem(machinePoolConfig(), "devices",
+		[]WorktreeState{{Pools: map[string]string{"devices": "emulator:wet-avd-2"}}}, poolTarget{Project: own, Slot: 5})
+	if err != nil || got != "emulator:wet-avd-1" {
+		t.Fatalf("with wet-avd-2 held, slot 5 got %q, %v, want the free wet-avd-1", got, err)
+	}
+}
+
+func TestApplyMachinePoolsUsesTheSharedItems(t *testing.T) {
+	isolateMachine(t)
+	if err := saveMachineState(&MachineState{Devices: []MachineDevice{{Item: "emulator:wet-avd-1"}}}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := machinePoolConfig()
+	cfg.Pools["devices"] = []string{"emulator:wet-app-1"}
+	cfg.Pools["phones"] = []string{"usb-1"}
+	if err := applyMachinePools(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Pools["devices"]; len(got) != 1 || got[0] != "emulator:wet-avd-1" {
+		t.Fatalf("machine pool items = %v", got)
+	}
+	if got := cfg.Pools["phones"]; len(got) != 1 || got[0] != "usb-1" {
+		t.Fatalf("a project pool must keep its own items: %v", got)
+	}
+}
+
+func TestValidatePoolScope(t *testing.T) {
+	cases := map[string]func(*WetConfig){
+		"no pool named":       func(c *WetConfig) { c.PoolScope = map[string]string{"other": PoolScopeMachine} },
+		"unknown scope":       func(c *WetConfig) { c.PoolScope["devices"] = "global" },
+		"machine scope needs": func(c *WetConfig) { c.PoolGrow = nil; c.Pools["devices"] = []string{"usb-1"} },
+	}
+	for want, mutate := range cases {
+		cfg := machinePoolConfig()
+		mutate(cfg)
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("Validate() = %v, want an error containing %q", err, want)
+		}
+	}
+	if err := machinePoolConfig().Validate(); err != nil {
+		t.Errorf("valid machine pool rejected: %v", err)
+	}
+}

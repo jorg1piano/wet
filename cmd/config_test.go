@@ -888,7 +888,8 @@ var commentedSchemaKeys = map[string]*regexp.Regexp{
 	"port_cluster": regexp.MustCompile(`(?m)^#   port_cluster: \d+$`),
 	// Optional per-pool auto-grow strategy; shown commented so the example
 	// config doesn't create emulators on anyone's machine.
-	"pool_grow": regexp.MustCompile(`(?m)^# pool_grow:$`),
+	"pool_grow":  regexp.MustCompile(`(?m)^# pool_grow:$`),
+	"pool_scope": regexp.MustCompile(`(?m)^# pool_scope:$`),
 	// A PR body override; the default body is what most repos want.
 	"pr.body_template": regexp.MustCompile(`(?m)^\s+# body_template: \|$`),
 	// A non-default file mode is the exception, so it is illustrated rather
