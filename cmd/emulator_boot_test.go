@@ -84,3 +84,14 @@ func TestWaitForStartedEmulatorRequiresItsOwnAVDOnTheSerial(t *testing.T) {
 		t.Fatalf("the AVD actually on the serial was not recognised: %v", err)
 	}
 }
+
+func TestUnreachableEmulatorErrorNamesTheOrphan(t *testing.T) {
+	stubEmulatorProcesses(t, emulatorProcess{PID: 92258, AVD: "wet-avd-3", Port: 5558})
+	err := unreachableEmulatorError("wet-avd-3")
+	if err == nil || !strings.Contains(err.Error(), "kill 92258") || !strings.Contains(err.Error(), "5558") {
+		t.Fatalf("err = %v, want the pid, the port and the kill", err)
+	}
+	if err := unreachableEmulatorError("wet-avd-4"); err != nil {
+		t.Fatalf("an AVD with no process must start normally: %v", err)
+	}
+}

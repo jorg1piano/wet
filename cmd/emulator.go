@@ -60,6 +60,9 @@ func startEmulator(avdName string, headless bool) (string, error) {
 	if serial, ok := runningEmulatorSerial(avdName); ok {
 		return serial, nil
 	}
+	if err := unreachableEmulatorError(avdName); err != nil {
+		return "", err
+	}
 	if err := ensureAVDExists(avdName); err != nil {
 		return "", err
 	}
@@ -330,4 +333,17 @@ var killEmulator = func(serial string) error {
 		return fmt.Errorf("adb -s %s emu kill: %w: %s", serial, err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// unreachableEmulatorError reports an emulator process already running
+// avdName that adb does not list, typically one started on a console port
+// another emulator held. A second start of the same AVD only fails on its
+// lock file, which names neither the process nor the fix.
+func unreachableEmulatorError(avdName string) error {
+	proc, found, err := emulatorProcessFor(avdName)
+	if err != nil || !found {
+		return nil
+	}
+	return fmt.Errorf("%s is already running (pid %d, console port %d) but adb cannot reach it; "+
+		"stop it with `kill %d` and re-run", avdName, proc.PID, proc.Port, proc.PID)
 }
