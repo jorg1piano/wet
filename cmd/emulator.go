@@ -26,7 +26,7 @@ import (
 // which is precisely the situation parallel worktrees create.
 func ensureEmulatorRunning(avdName string, headless bool) (string, error) {
 	if serial, ok := runningEmulatorSerial(avdName); ok {
-		return serial, nil
+		return serial, waitForBootCompleted(serial, avdName, bootCompletedTimeout)
 	}
 	if err := ensureAVDExists(avdName); err != nil {
 		return "", err
@@ -56,8 +56,36 @@ func ensureEmulatorRunning(avdName string, headless bool) (string, error) {
 	if err := waitForStartedEmulator(cmd, serial, 120*time.Second, &emulatorOutput); err != nil {
 		return "", err
 	}
+	if err := waitForBootCompleted(serial, avdName, bootCompletedTimeout); err != nil {
+		return "", err
+	}
 	fmt.Printf("  %s is online (%s).\n", serial, avdName)
 	return serial, nil
+}
+
+const bootCompletedTimeout = 180 * time.Second
+
+// waitForBootCompleted blocks until Android reports sys.boot_completed=1.
+//
+// adb lists an emulator as `device` long before Android has booted, and adbd
+// restarts on the way up, dropping every `adb reverse` rule set before it.
+// A slot_reset run in that window set its forwards and uninstalled the app
+// against a device that then forgot both.
+var waitForBootCompleted = func(serial, avdName string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	announced := false
+	for time.Now().Before(deadline) {
+		out, err := exec.Command("adb", "-s", serial, "shell", "getprop", "sys.boot_completed").Output()
+		if err == nil && strings.TrimSpace(string(out)) == "1" {
+			return nil
+		}
+		if !announced {
+			fmt.Printf("  Waiting for %s to finish booting...\n", avdName)
+			announced = true
+		}
+		time.Sleep(2 * time.Second)
+	}
+	return fmt.Errorf("%s (%s) did not finish booting within %s", avdName, serial, timeout)
 }
 
 // runningEmulatorSerial finds a booted emulator by the AVD it is running.
