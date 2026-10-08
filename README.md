@@ -1330,7 +1330,16 @@ have been attempted. These commands require `wet setup` first.
 With `slot_pool: true`, allocation can reuse busy ports when Docker reports
 that this slot's own Compose project holds them. It skips ports held by other
 projects or unknown listeners. Define `COMPOSE_PROJECT_NAME` using `Slot` for
-reusable containers. Run `wet slot reset` explicitly before starting reused
+reusable containers. Slots whose Compose project already has containers are
+tried before cold ones, so a released slot's warm DB is picked up rather than
+a new one built beside it.
+
+Docker is asked for each container's *declared* port bindings, not only the
+ones bound right now. A container that is running, restarting or paused holds
+its ports, and so does a stopped one with restart policy `always`. That keeps
+wet off a port whose owner is crash-looping: between two restarts the port is
+free to a probe, and a slot handed out in that moment dies at
+`docker compose up`. Run `wet slot reset` explicitly before starting reused
 resources, or call it from a `post_create` hook. Setup does not automatically
 run the slot lifecycle hooks.
 

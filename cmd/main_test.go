@@ -13,6 +13,9 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	os.Setenv(machineStateDirEnv, dir)
+	// Slot allocation asks Docker who holds which port. Tests that care stub
+	// it with their own containers; the rest see a machine with none.
+	listDockerContainerPorts = func() []dockerContainerPorts { return nil }
 	code := m.Run()
 	os.RemoveAll(dir)
 	os.Exit(code)

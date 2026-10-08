@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -1477,31 +1478,57 @@ func (c *WetConfig) ClusterFitsPortRange(cluster int) bool {
 }
 
 // NextFreeSlotWithFreePorts behaves like NextFreeSlot but additionally skips
-// any candidate slot whose resolved host ports are already bound. `used`
-// carries the slots claimed by tracked worktrees; this layer catches the
-// untracked stacks the state file cannot see. It walks upward from the
-// state-file candidate until a free slot is found inside this clone's band.
+// any candidate slot whose resolved host ports are bound, or declared by a
+// container that holds them (see dockerContainerHolds). `used` carries the
+// slots claimed by tracked worktrees; this layer catches the stacks the state
+// file cannot see. It walks upward until a free slot is found inside this
+// clone's band.
 func (c *WetConfig) NextFreeSlotWithFreePorts(used []int) (int, error) {
-	return c.nextAvailableSlot(used, c.portsFree)
+	holders := portHolders(listDockerContainerPorts())
+	return c.nextAvailableSlot(used, nil, func(slot int) bool {
+		return c.portsFree(slot) && c.noForeignHolder(slot, holders, "")
+	})
 }
 
 // NextFreeReusableSlot is the slot-pool variant of NextFreeSlotWithFreePorts.
-// A released slot may deliberately keep warm containers bound, so plain port
-// probing would skip the slot forever. But a different compose project holding
-// those ports is not reusable warm state; it is exactly the collision wet is
-// supposed to avoid. Allow ports that are free or held by this slot's own
-// COMPOSE_PROJECT_NAME, and skip slots held by anything else.
+// A released slot deliberately keeps warm containers bound, so a port held by
+// this slot's own COMPOSE_PROJECT_NAME counts as free. A port another project
+// holds or declares does not, even while that project's container is between
+// restarts.
+//
+// Slots whose Compose project already has containers are tried first: their
+// DB and volumes are warm, and a cold slot below them would boot a new DB
+// while the warm one sits idle.
 func (c *WetConfig) NextFreeReusableSlot(used []int) (int, error) {
-	return c.nextAvailableSlot(used, c.slotPortsReusable)
+	containers := listDockerContainerPorts()
+	holders := portHolders(containers)
+	warm := map[string]bool{}
+	for _, ct := range containers {
+		if ct.Project != "" {
+			warm[ct.Project] = true
+		}
+	}
+	return c.nextAvailableSlot(used,
+		func(slot int) bool { return warm[c.composeProjectNameForSlot(slot)] },
+		func(slot int) bool { return c.slotPortsReusable(slot, holders) })
 }
 
-func (c *WetConfig) nextAvailableSlot(used []int, available func(int) bool) (int, error) {
+// nextAvailableSlot returns the lowest unclaimed, available slot, trying the
+// slots preferred says yes to first. A nil preferred means no preference.
+func (c *WetConfig) nextAvailableSlot(used []int, preferred, available func(int) bool) (int, error) {
 	if len(c.Ports) == 0 {
 		return NextFreeSlot(used), nil
 	}
 	taken := make(map[int]bool, len(used))
 	for _, slot := range used {
 		taken[slot] = true
+	}
+	if preferred != nil {
+		for slot := 1; slot < c.ClusterSlotCount(); slot++ {
+			if c.validateSlotPorts(slot) == nil && !taken[slot] && preferred(slot) && available(slot) {
+				return slot, nil
+			}
+		}
 	}
 	for slot := 1; slot < c.ClusterSlotCount(); slot++ {
 		if err := c.validateSlotPorts(slot); err != nil {
@@ -1530,27 +1557,33 @@ func (c *WetConfig) validateSlotPorts(slot int) error {
 	return nil
 }
 
-func (c *WetConfig) slotPortsReusable(slot int) bool {
-	if c.portsFree(slot) {
-		return true
+// noForeignHolder reports whether no container other than one of project own
+// holds any of slot's ports. An empty own means every holder is foreign.
+func (c *WetConfig) noForeignHolder(slot int, holders map[int][]string, own string) bool {
+	for _, p := range c.ResolvePorts(slot) {
+		for _, project := range holders[p.Value] {
+			if own == "" || project != own {
+				return false
+			}
+		}
 	}
+	return true
+}
+
+// slotPortsReusable reports whether every port of slot is either bindable or
+// held by this slot's own Compose project, and no other container holds or
+// declares it.
+func (c *WetConfig) slotPortsReusable(slot int, holders map[int][]string) bool {
 	expected := c.composeProjectNameForSlot(slot)
-	if expected == "" {
+	if !c.noForeignHolder(slot, holders, expected) {
 		return false
 	}
-	held := dockerComposeProjectsHoldingPorts()
 	for _, p := range c.ResolvePorts(slot) {
 		if portSetFree([]int{p.Value}) {
 			continue
 		}
-		projects := held[p.Value]
-		if len(projects) == 0 {
+		if expected == "" || !slices.Contains(holders[p.Value], expected) {
 			return false
-		}
-		for _, project := range projects {
-			if project != expected {
-				return false
-			}
 		}
 	}
 	return true
@@ -1568,24 +1601,88 @@ func (c *WetConfig) composeProjectNameForSlot(slot int) string {
 	return v
 }
 
-var dockerPublishedPortRE = regexp.MustCompile(`:(\d+)->`)
+// dockerContainerPorts is one container's Compose project and the host ports
+// its config declares, whether or not they are bound right now.
+type dockerContainerPorts struct {
+	Project string
+	Ports   []int
+	// Holds is whether the container counts as holding those ports.
+	Holds bool
+}
 
-func dockerComposeProjectsHoldingPorts() map[int][]string {
-	out := map[int][]string{}
-	body, err := exec.Command("docker", "ps", "--format", `{{.Label "com.docker.compose.project"}} {{.Ports}}`).Output()
-	if err != nil {
-		return out
+// dockerContainerHolds decides whether a container holds its declared ports.
+// A running, restarting or paused container does; so does a stopped one with
+// restart policy `always`, which Docker brings back on its own. Reading the
+// declared bindings rather than the live ones is what catches a crash-looping
+// container: between restarts its ports are free to a probe, and a slot handed
+// out in that moment dies at `docker compose up`.
+func dockerContainerHolds(status, restartPolicy string) bool {
+	switch status {
+	case "running", "restarting", "paused":
+		return true
 	}
-	for _, line := range strings.Split(string(body), "\n") {
-		project, portsText, _ := strings.Cut(line, " ")
-		if project == "" || portsText == "" {
+	return restartPolicy == "always"
+}
+
+// listDockerContainerPorts asks Docker for every container's declared host
+// ports. A machine without a running Docker has none. It is a seam so the
+// unit suite never needs a daemon.
+var listDockerContainerPorts = func() []dockerContainerPorts {
+	ids, err := exec.Command("docker", "ps", "-aq").Output()
+	if err != nil || len(strings.TrimSpace(string(ids))) == 0 {
+		return nil
+	}
+	args := append([]string{"inspect", "--format",
+		`{{index .Config.Labels "com.docker.compose.project"}}|{{.State.Status}}|{{.HostConfig.RestartPolicy.Name}}|{{json .HostConfig.PortBindings}}`},
+		strings.Fields(string(ids))...)
+	body, err := exec.Command("docker", args...).Output()
+	if err != nil {
+		return nil
+	}
+	return parseDockerContainerPorts(string(body))
+}
+
+func parseDockerContainerPorts(body string) []dockerContainerPorts {
+	var out []dockerContainerPorts
+	for _, line := range strings.Split(body, "\n") {
+		fields := strings.SplitN(line, "|", 4)
+		if len(fields) != 4 {
 			continue
 		}
-		for _, m := range dockerPublishedPortRE.FindAllStringSubmatch(portsText, -1) {
-			port, err := strconv.Atoi(m[1])
-			if err == nil {
-				out[port] = append(out[port], project)
+		var bindings map[string][]struct {
+			HostPort string `json:"HostPort"`
+		}
+		if err := json.Unmarshal([]byte(fields[3]), &bindings); err != nil {
+			continue
+		}
+		ct := dockerContainerPorts{Project: fields[0], Holds: dockerContainerHolds(fields[1], fields[2])}
+		for _, list := range bindings {
+			for _, b := range list {
+				if port, err := strconv.Atoi(b.HostPort); err == nil && port > 0 {
+					ct.Ports = append(ct.Ports, port)
+				}
 			}
+		}
+		out = append(out, ct)
+	}
+	return out
+}
+
+// portHolders maps each port to the Compose projects whose containers hold
+// it. A container outside Compose is listed under "-", so it is foreign to
+// every slot.
+func portHolders(containers []dockerContainerPorts) map[int][]string {
+	out := map[int][]string{}
+	for _, ct := range containers {
+		if !ct.Holds {
+			continue
+		}
+		project := ct.Project
+		if project == "" {
+			project = "-"
+		}
+		for _, port := range ct.Ports {
+			out[port] = append(out[port], project)
 		}
 	}
 	return out

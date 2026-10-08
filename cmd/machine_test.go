@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -141,5 +142,90 @@ func TestProjectPortsIncludesRecordedPortsOutsideTheBand(t *testing.T) {
 	}
 	if !ports[47230] {
 		t.Fatal("a recorded port outside the band must still count")
+	}
+}
+
+func stubDockerContainers(t *testing.T, containers ...dockerContainerPorts) {
+	t.Helper()
+	prev := listDockerContainerPorts
+	t.Cleanup(func() { listDockerContainerPorts = prev })
+	listDockerContainerPorts = func() []dockerContainerPorts { return containers }
+}
+
+func slotPoolTestConfig() *WetConfig {
+	return &WetConfig{
+		ProjectName:  "app",
+		PortStride:   10,
+		ClusterSlots: DefaultClusterSlots,
+		SlotPool:     true,
+		Ports:        []PortConfig{{Name: "APP_PORT", Base: 47000, Stride: 10}},
+		Env:          map[string]string{"COMPOSE_PROJECT_NAME": "{{.ProjectName}}-slot-{{.Slot}}"},
+	}
+}
+
+func TestParseDockerContainerPortsReadsDeclaredBindings(t *testing.T) {
+	body := `swelfi-slot-4|restarting|unless-stopped|{"4000/tcp":[{"HostIp":"","HostPort":"4040"}],"9001/tcp":[{"HostIp":"","HostPort":"9072"}]}
+app-slot-7|exited|unless-stopped|{"4000/tcp":[{"HostIp":"","HostPort":"4070"}]}
+|exited|always|{"80/tcp":[{"HostIp":"","HostPort":"8080"}]}
+other|running|no|{"5432/tcp":[{"HostIp":"","HostPort":""}]}`
+	got := parseDockerContainerPorts(body)
+	if len(got) != 4 {
+		t.Fatalf("parsed %d containers, want 4: %+v", len(got), got)
+	}
+	want := []bool{true, false, true, true}
+	for i, ct := range got {
+		if ct.Holds != want[i] {
+			t.Errorf("container %d (%s) Holds = %v, want %v", i, ct.Project, ct.Holds, want[i])
+		}
+	}
+	if len(got[0].Ports) != 2 || len(got[3].Ports) != 0 {
+		t.Errorf("ports: %v and %v, want two bound and none for an unpublished binding", got[0].Ports, got[3].Ports)
+	}
+	holders := portHolders(got)
+	if holders[8080][0] != "-" || len(holders[4070]) != 0 {
+		t.Errorf("holders = %v: a non-compose container is foreign, an exited one holds nothing", holders)
+	}
+}
+
+// The cycle-2 failure: another project's Phoenix crash-loops on slot 1's
+// port. A probe in the gap between restarts finds the port free; the declared
+// binding must still keep wet off the slot.
+func TestNextFreeReusableSlotSkipsAPortARestartingContainerDeclares(t *testing.T) {
+	stubDockerContainers(t, dockerContainerPorts{Project: "swelfi-slot-1", Ports: []int{47010}, Holds: true})
+	cfg := slotPoolTestConfig()
+	if got, err := cfg.NextFreeReusableSlot(nil); err != nil || got != 2 {
+		t.Fatalf("NextFreeReusableSlot = %d, %v, want 2", got, err)
+	}
+	if got, err := cfg.NextFreeSlotWithFreePorts(nil); err != nil || got != 2 {
+		t.Fatalf("NextFreeSlotWithFreePorts = %d, %v, want 2", got, err)
+	}
+}
+
+// The cycle-2 waste: slot 3's DB was warm, and the allocator built a new one
+// on slot 1 because 1 sorts first.
+func TestNextFreeReusableSlotPrefersAWarmSlot(t *testing.T) {
+	stubDockerContainers(t, dockerContainerPorts{Project: "app-slot-3", Ports: []int{47033}, Holds: false})
+	cfg := slotPoolTestConfig()
+	if got, err := cfg.NextFreeReusableSlot(nil); err != nil || got != 3 {
+		t.Fatalf("NextFreeReusableSlot = %d, %v, want the warm slot 3", got, err)
+	}
+	if got, err := cfg.NextFreeReusableSlot([]int{3}); err != nil || got != 1 {
+		t.Fatalf("with slot 3 claimed: %d, %v, want 1", got, err)
+	}
+}
+
+// A slot whose own DB container is up has its port bound; that is the warm
+// resource the pool exists to reuse, not a collision.
+func TestNextFreeReusableSlotReusesPortsItsOwnProjectHolds(t *testing.T) {
+	ln, err := net.Listen("tcp", ":47013")
+	if err != nil {
+		t.Skipf("cannot bind 47013: %v", err)
+	}
+	defer ln.Close()
+	stubDockerContainers(t, dockerContainerPorts{Project: "app-slot-1", Ports: []int{47013}, Holds: true})
+	cfg := slotPoolTestConfig()
+	cfg.Ports = append(cfg.Ports, PortConfig{Name: "DB_PORT", Base: 47003, Stride: 10})
+	if got, err := cfg.NextFreeReusableSlot(nil); err != nil || got != 1 {
+		t.Fatalf("NextFreeReusableSlot = %d, %v, want 1 (its own DB holds 47013)", got, err)
 	}
 }

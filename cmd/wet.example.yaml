@@ -118,6 +118,7 @@ ports:
 # their ports — for example a DB container/volume that survives worktree pop.
 # A busy port is reusable only when Docker reports this slot's own Compose
 # project as its owner. Other listeners still cause the slot to be skipped.
+# Slots with warm containers are tried before cold ones.
 # Run `wet slot reset` before reuse, or call it from post_create. Setup does
 # not automatically run slot_reset or slot_start.
 slot_pool: false
