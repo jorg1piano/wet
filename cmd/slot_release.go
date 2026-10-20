@@ -101,21 +101,35 @@ func printReleased(released []string) {
 
 func slotReleaseCmd() *cobra.Command {
 	var force bool
+	var all bool
 	cmd := &cobra.Command{
-		Use:   "release PATH",
-		Args:  cobra.ExactArgs(1),
-		Short: "Release the claim of a checkout that was removed without `wet worktree pop`",
+		Use:   "release [PATH]",
+		Args:  cobra.MaximumNArgs(1),
+		Short: "Free slot claims without removing the checkouts",
 		Long: `Drop PATH's entry from .wet-worktrees.json, freeing its slot, ports and
 devices for the next ` + "`wet setup`" + `. No hooks run and nothing is stopped:
 warm resources such as the slot's DB stay for the next checkout on that slot.
 
 ` + "`wet setup`" + ` already releases claims whose checkout is gone. Use this when you
 want one released now. A checkout that still exists is refused, since
-` + "`wet worktree pop`" + ` runs its pre_remove hooks; --force releases it anyway.`,
+` + "`wet worktree pop`" + ` runs its pre_remove hooks; --force releases it anyway.
+
+With --all, wet releases every claim in this project except the main
+checkout's slot 0, whether or not the checkout still exists. Worktrees and
+branches stay as they are; run ` + "`wet setup`" + ` in one to claim a slot again.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			repoRoot, err := getMainRepoRoot()
 			if err != nil {
 				return err
+			}
+			if all {
+				if len(args) > 0 {
+					return fmt.Errorf("pass PATH or --all, not both")
+				}
+				return releaseAllClaims(repoRoot)
+			}
+			if len(args) == 0 {
+				return fmt.Errorf("pass the PATH of a checkout to release, or --all")
 			}
 			target, err := filepath.Abs(args[0])
 			if err != nil {
@@ -125,7 +139,45 @@ want one released now. A checkout that still exists is refused, since
 		},
 	}
 	cmd.Flags().BoolVar(&force, "force", false, "release the claim even though the checkout still exists")
+	cmd.Flags().BoolVar(&all, "all", false, "release every claim except the main checkout's")
 	return cmd
+}
+
+// releaseAllClaims drops every entry but the main checkout's from this
+// project's state. Like releaseClaim with --force it runs no hooks and leaves
+// the checkouts, their branches and the slots' warm resources alone.
+func releaseAllClaims(repoRoot string) error {
+	var released []WorktreeState
+	err := withStateLock(func() error {
+		state, err := loadConfig()
+		if err != nil {
+			return fmt.Errorf("load wet state: %w", err)
+		}
+		kept := []WorktreeState{}
+		for _, wt := range state.Worktrees {
+			if resolvePath(wt.Path) == resolvePath(repoRoot) {
+				kept = append(kept, wt)
+			} else {
+				released = append(released, wt)
+			}
+		}
+		if len(released) == 0 {
+			return nil
+		}
+		state.Worktrees = kept
+		return saveConfig(state)
+	})
+	if err != nil {
+		return err
+	}
+	if len(released) == 0 {
+		fmt.Println("  No claims to release besides the main checkout's.")
+		return nil
+	}
+	for _, wt := range released {
+		printReleasedClaim(wt)
+	}
+	return nil
 }
 
 func releaseClaim(repoRoot, target string, force bool) error {
@@ -158,11 +210,15 @@ func releaseClaim(repoRoot, target string, force bool) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("  Released slot %d (%s)\n", released.Index, released.Branch)
-	for _, items := range released.poolClaimsAll() {
+	printReleasedClaim(released)
+	return nil
+}
+
+func printReleasedClaim(wt WorktreeState) {
+	fmt.Printf("  Released slot %d (%s)\n", wt.Index, wt.Branch)
+	for _, items := range wt.poolClaimsAll() {
 		fmt.Printf("  Released device %s\n", items)
 	}
-	return nil
 }
 
 // poolClaimsAll lists every pool item this entry holds, primaries and extras.

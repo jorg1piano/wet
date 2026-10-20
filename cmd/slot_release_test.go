@@ -108,6 +108,36 @@ func TestReleaseClaimRefusesALiveCheckoutUnlessForced(t *testing.T) {
 	}
 }
 
+// --all frees every slot but main's and leaves the checkouts on disk.
+func TestReleaseAllClaimsKeepsMainAndTheCheckouts(t *testing.T) {
+	isolateMachine(t)
+	repo := initCleanupRepo(t)
+	live := addWorktree(t, repo, "live")
+	inDir(t, repo)
+	gone := filepath.Join(filepath.Dir(repo), "worktree-gone")
+	if err := saveConfig(&WorktreeConfig{Worktrees: []WorktreeState{
+		{Branch: "live", Path: live, Index: 1, Pools: map[string]string{"devices": "emulator:a"}},
+		{Branch: "main", Path: repo},
+		{Branch: "gone", Path: gone, Index: 2},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := releaseAllClaims(repo); err != nil {
+		t.Fatal(err)
+	}
+	state, _ := loadConfig()
+	if len(state.Worktrees) != 1 || state.Worktrees[0].Branch != "main" {
+		t.Fatalf("state after release --all = %+v, want only main", state.Worktrees)
+	}
+	if _, err := os.Stat(live); err != nil {
+		t.Fatalf("release --all touched the live checkout: %v", err)
+	}
+	if err := releaseAllClaims(repo); err != nil {
+		t.Fatalf("a second release --all with nothing to free: %v", err)
+	}
+}
+
 func TestReleaseClaimFreesARemovedCheckout(t *testing.T) {
 	isolateMachine(t)
 	repo := initCleanupRepo(t)
