@@ -22,7 +22,7 @@ func TestWriteSlotListSortsMarksAndReportsUnclaimed(t *testing.T) {
 	cfg := &WetConfig{Ports: []PortConfig{{Name: "APP", Base: 8080}}, ClusterSlots: 5}
 
 	var out bytes.Buffer
-	writeSlotList(&out, state, cfg, main, wt2)
+	writeSlotList(&out, state, cfg, nil, main, wt2)
 	lines := strings.Split(out.String(), "\n")
 
 	if !strings.HasPrefix(lines[1], "  0 ") || !strings.Contains(lines[1], "main") {
@@ -47,7 +47,7 @@ func TestWriteSlotListSortsMarksAndReportsUnclaimed(t *testing.T) {
 func TestWriteSlotListWithoutPortsSkipsFreeLine(t *testing.T) {
 	state := &WorktreeConfig{Worktrees: []WorktreeState{{Branch: "main", Path: t.TempDir()}}}
 	var out bytes.Buffer
-	writeSlotList(&out, state, nil, "", "")
+	writeSlotList(&out, state, nil, nil, "", "")
 	if strings.Contains(out.String(), "Unclaimed") {
 		t.Fatalf("no config means no band to report:\n%s", out.String())
 	}
@@ -55,8 +55,47 @@ func TestWriteSlotListWithoutPortsSkipsFreeLine(t *testing.T) {
 
 func TestWriteSlotListEmpty(t *testing.T) {
 	var out bytes.Buffer
-	writeSlotList(&out, &WorktreeConfig{}, nil, "", "")
+	writeSlotList(&out, &WorktreeConfig{}, nil, nil, "", "")
 	if !strings.Contains(out.String(), "No wet worktrees are claimed") {
 		t.Fatalf("got %q", out.String())
+	}
+}
+
+func TestWriteSlotListMarksWarmSlots(t *testing.T) {
+	main := t.TempDir()
+	wt1 := t.TempDir()
+	state := &WorktreeConfig{Worktrees: []WorktreeState{
+		{Branch: "main", Path: main, Index: 0, Ports: map[string]int{"APP": 8080}},
+		{Branch: "feat/a", Path: wt1, Index: 1, Ports: map[string]int{"APP": 8090}},
+	}}
+	cfg := &WetConfig{
+		ProjectName:  "app",
+		Ports:        []PortConfig{{Name: "APP", Base: 8080}},
+		ClusterSlots: 6,
+		Env:          map[string]string{"COMPOSE_PROJECT_NAME": "{{.ProjectName}}-slot-{{.Slot}}"},
+	}
+	containers := []dockerContainerPorts{
+		{Project: "app-slot-0", Holds: true},
+		{Project: "app-slot-2", Holds: true},
+		{Project: "app-slot-2", Holds: false},
+		{Project: "app-slot-3", Holds: false},
+		{Project: "other-slot-4", Holds: true},
+	}
+
+	var out bytes.Buffer
+	writeSlotList(&out, state, cfg, containers, main, "")
+	lines := strings.Split(out.String(), "\n")
+
+	if !strings.Contains(lines[0], "WARM") {
+		t.Fatalf("header should name the WARM column:\n%s", out.String())
+	}
+	if fields := strings.Fields(lines[1]); fields[2] != "yes" {
+		t.Fatalf("main's running project should read warm:\n%s", out.String())
+	}
+	if fields := strings.Fields(lines[2]); fields[2] != "no" {
+		t.Fatalf("slot 1 has no containers:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "Unclaimed: 2 (warm), 3 (stopped), 4, 5") {
+		t.Fatalf("want released slots marked by their containers:\n%s", out.String())
 	}
 }

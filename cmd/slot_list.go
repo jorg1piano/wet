@@ -21,9 +21,14 @@ func slotListCmd() *cobra.Command {
 		Long: `List every checkout recorded in .wet-worktrees.json with its slot, branch,
 ports, pool items and path. The checkout you are standing in is marked with *.
 
+WARM reads Docker for the slot's COMPOSE_PROJECT_NAME: yes when a container
+runs, stopped when containers exist but none runs, no when there are none, and
+- when .wet.yaml sets no COMPOSE_PROJECT_NAME.
+
 When .wet.yaml declares ports, a closing line lists the slots in this clone's
-band that no checkout claims. Unclaimed means unclaimed in the state file; the
-host ports may still be bound by something wet does not track.`,
+band that no checkout claims, with (warm) or (stopped) after a released slot
+whose containers remain. Unclaimed means unclaimed in the state file; the host
+ports may still be bound by something wet does not track.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			repoRoot, err := getMainRepoRoot()
 			if err != nil {
@@ -43,13 +48,17 @@ host ports may still be bound by something wet does not track.`,
 			if err != nil && err != ErrConfigMissing {
 				return err
 			}
-			writeSlotList(cmd.OutOrStdout(), state, cfg, repoRoot, current)
+			var containers []dockerContainerPorts
+			if cfg.composeProjectNameForSlot(0) != "" {
+				containers = listDockerContainerPorts()
+			}
+			writeSlotList(cmd.OutOrStdout(), state, cfg, containers, repoRoot, current)
 			return nil
 		},
 	}
 }
 
-func writeSlotList(out io.Writer, state *WorktreeConfig, cfg *WetConfig, repoRoot, current string) {
+func writeSlotList(out io.Writer, state *WorktreeConfig, cfg *WetConfig, containers []dockerContainerPorts, repoRoot, current string) {
 	if len(state.Worktrees) == 0 {
 		fmt.Fprintln(out, "  No wet worktrees are claimed.")
 		return
@@ -57,8 +66,10 @@ func writeSlotList(out io.Writer, state *WorktreeConfig, cfg *WetConfig, repoRoo
 	entries := append([]WorktreeState{}, state.Worktrees...)
 	sort.SliceStable(entries, func(i, j int) bool { return entries[i].Index < entries[j].Index })
 
+	warmth := slotWarmth(cfg, containers)
+
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "  SLOT\tBRANCH\tPORTS\tPOOLS\tPATH")
+	fmt.Fprintln(tw, "  SLOT\tBRANCH\tWARM\tPORTS\tPOOLS\tPATH")
 	claimed := map[int]bool{}
 	for _, wt := range entries {
 		marker := " "
@@ -68,10 +79,12 @@ func writeSlotList(out io.Writer, state *WorktreeConfig, cfg *WetConfig, repoRoo
 		// Index 0 belongs to the main checkout. A worktree at 0 with no
 		// ports never ran setup, and printing 0 would read as main's slot.
 		slot := strconv.Itoa(wt.Index)
+		warm := "-"
 		if wt.Index == 0 && len(wt.Ports) == 0 && !samePath(wt.Path, repoRoot) {
 			slot = "-"
 		} else {
 			claimed[wt.Index] = true
+			warm = warmth(wt.Index)
 		}
 		path := wt.Path
 		if _, err := os.Stat(wt.Path); err != nil {
@@ -81,7 +94,7 @@ func writeSlotList(out io.Writer, state *WorktreeConfig, cfg *WetConfig, repoRoo
 		if wt.PendingReset {
 			branch += " (reset pending)"
 		}
-		fmt.Fprintf(tw, "%s %s\t%s\t%s\t%s\t%s\n", marker, slot, branch, formatSlotPorts(wt.Ports), formatSlotPools(wt), path)
+		fmt.Fprintf(tw, "%s %s\t%s\t%s\t%s\t%s\t%s\n", marker, slot, branch, warm, formatSlotPorts(wt.Ports), formatSlotPools(wt), path)
 	}
 	_ = tw.Flush()
 
@@ -90,15 +103,53 @@ func writeSlotList(out io.Writer, state *WorktreeConfig, cfg *WetConfig, repoRoo
 	}
 	var free []string
 	for slot := 1; slot < cfg.ClusterSlotCount(); slot++ {
-		if !claimed[slot] {
-			free = append(free, strconv.Itoa(slot))
+		if claimed[slot] {
+			continue
 		}
+		label := strconv.Itoa(slot)
+		switch warmth(slot) {
+		case "yes":
+			label += " (warm)"
+		case "stopped":
+			label += " (stopped)"
+		}
+		free = append(free, label)
 	}
 	if len(free) == 0 {
 		fmt.Fprintf(out, "\n  Unclaimed: none (cluster_slots: %d)\n", cfg.ClusterSlotCount())
 		return
 	}
 	fmt.Fprintf(out, "\n  Unclaimed: %s\n", strings.Join(free, ", "))
+}
+
+// slotWarmth reports whether a slot's Compose project has containers: yes when
+// one holds its ports, stopped when they all sit exited, no when there are
+// none. Without a COMPOSE_PROJECT_NAME wet cannot tell which containers are
+// the slot's, so every slot reads -.
+func slotWarmth(cfg *WetConfig, containers []dockerContainerPorts) func(slot int) string {
+	running := map[string]bool{}
+	present := map[string]bool{}
+	for _, ct := range containers {
+		if ct.Project == "" {
+			continue
+		}
+		present[ct.Project] = true
+		if ct.Holds {
+			running[ct.Project] = true
+		}
+	}
+	return func(slot int) string {
+		project := cfg.composeProjectNameForSlot(slot)
+		switch {
+		case project == "":
+			return "-"
+		case running[project]:
+			return "yes"
+		case present[project]:
+			return "stopped"
+		}
+		return "no"
+	}
 }
 
 // formatSlotPorts orders ports by number, which is the order a reader scans
