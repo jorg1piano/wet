@@ -45,6 +45,8 @@ type dockerComposeContainer struct {
 	Name       string
 	Project    string
 	WorkingDir string
+	// State is Docker's: running, restarting, exited, ...
+	State string
 }
 
 type dockerCleanupProject struct {
@@ -192,17 +194,17 @@ func uniqueNonEmptyLines(body string) []string {
 }
 
 func listDockerComposeContainers() ([]dockerComposeContainer, error) {
-	body, err := exec.Command("docker", "ps", "-a", "--filter", "label=com.docker.compose.project", "--format", `{{.ID}}\t{{.Names}}\t{{.Label "com.docker.compose.project"}}\t{{.Label "com.docker.compose.project.working_dir"}}`).Output()
+	body, err := exec.Command("docker", "ps", "-a", "--filter", "label=com.docker.compose.project", "--format", `{{.ID}}\t{{.Names}}\t{{.Label "com.docker.compose.project"}}\t{{.Label "com.docker.compose.project.working_dir"}}\t{{.State}}`).Output()
 	if err != nil {
 		return nil, fmt.Errorf("list docker containers: %w", err)
 	}
 	var out []dockerComposeContainer
 	for _, line := range strings.Split(string(body), "\n") {
 		fields := strings.Split(line, "\t")
-		if len(fields) != 4 || fields[0] == "" || fields[2] == "" {
+		if len(fields) != 5 || fields[0] == "" || fields[2] == "" {
 			continue
 		}
-		out = append(out, dockerComposeContainer{ID: fields[0], Name: fields[1], Project: fields[2], WorkingDir: fields[3]})
+		out = append(out, dockerComposeContainer{ID: fields[0], Name: fields[1], Project: fields[2], WorkingDir: fields[3], State: fields[4]})
 	}
 	return out, nil
 }

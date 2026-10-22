@@ -32,6 +32,7 @@ wet slot warm --all --headless   # run slot_start for every configured checkout
 wet slot release <path>         # free the claim of a checkout removed without pop
 wet slot release --all          # free every slot but main's, keep worktrees and branches
 wet slot global list            # wet slot list for every project on this machine
+wet slot global down            # free every slot but main's in every project, stop their containers and emulators
 wet port-cluster next           # claim a free port band for this clone
 wet machine list                # every wet project on this machine, its ports and slots
 wet pr create                   # push branch + open a GitHub PR (via gh)
@@ -1379,6 +1380,16 @@ keeps its data. `--no-reset` skips the reset and leaves it pending for
 
 `wet slot global list` prints `wet slot list` for every project in
 `wet machine list`, one section each, from any directory.
+
+`wet slot global down` frees a machine for the night. In every listed project
+it releases every claim except the main checkout's, as `wet slot release --all`
+does. It then runs `docker stop` on the containers of every slot's
+`COMPOSE_PROJECT_NAME` except slot 0's, and stops the emulators those claims
+held, the ones in the project's pools and the ones in the machine pool. The
+main checkouts keep their slot 0, their stack and their emulator. Containers
+and volumes stay, so the next `wet setup` on a slot finds its database where it
+left it. Worktrees, branches and files are not touched, and no hooks run.
+`--dry-run` prints the plan.
 
 ## Pull requests
 
