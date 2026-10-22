@@ -1392,6 +1392,23 @@ the state file only, so a stack wet does not track can still hold those ports.
 emulators without windows. A failure is reported after the other checkouts
 have been attempted. These commands require `wet setup` first.
 
+`wet slot warm --spare N` gets slots ready before anyone claims them. It makes
+sure N slots that no checkout claims have a running container in their Compose
+project, so the next N `wet setup` runs each land on a slot whose DB is up. It
+picks N unclaimed slots and runs `hooks.slot_warm` in each: warm ones first,
+then stopped ones, then cold ones, lowest slot first. Warm ones get the hook
+too, so the hook must be idempotent, and a re-run repairs a spare whose last
+warm stopped halfway. Combine it with `--all` to start the claimed checkouts
+first.
+
+An unclaimed slot has no checkout, so `slot_warm` runs from the main checkout.
+wet exports the slot's env, as for any slot hook, and sets `$WET_ENV_FILE` to
+a rendered copy of the slot's `.env.worktree` under `.git/wet/`. A recipe that
+reads `.env.worktree` should read `${WET_ENV_FILE:-.env.worktree}`. Start only
+slot-stable services here, such as the DB or a built app image. A container
+that bind-mounts the checkout would mount main's. `--spare` needs
+`slot_pool: true` and a `COMPOSE_PROJECT_NAME` built from `{{.Slot}}`.
+
 With `slot_pool: true`, allocation can reuse busy ports when Docker reports
 that this slot's own Compose project holds them. It skips ports held by other
 projects or unknown listeners. Define `COMPOSE_PROJECT_NAME` using `Slot` for

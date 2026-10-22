@@ -141,16 +141,40 @@ func slotContextForWorktree(repoRoot, worktreePath string, wt WorktreeState, hea
 func slotWarmCmd() *cobra.Command {
 	var all bool
 	var reset bool
+	var spare int
 	cmd := &cobra.Command{
 		Use:   "warm",
 		Args:  cobra.NoArgs,
 		Short: "Start warm slot resources",
-		Long: `Start slot runtimes for claimed worktrees.
+		Long: `Start slot runtimes for claimed worktrees, or warm unclaimed slots.
 
 With --all, wet walks .wet-worktrees.json, boots any claimed emulator handles,
 and runs hooks.slot_start in each worktree. Add --reset to run hooks.slot_reset
-before hooks.slot_start.`,
+before hooks.slot_start.
+
+With --spare N, wet makes sure N slots that no checkout claims hold warm
+resources, so the next N setups each get a slot whose DB is already up. It
+picks N unclaimed slots, those whose Compose project has a running container
+first, then stopped ones, then cold ones, lowest slot first, and runs
+hooks.slot_warm in each. The hook is idempotent, so a re-run repairs a spare
+whose last warm stopped halfway. The hook runs from the main checkout with the slot's env, and
+$WET_ENV_FILE names a rendered copy of the slot's .env.worktree. Start only
+slot-stable services there: a container that bind-mounts the checkout would
+mount main. Needs slot_pool: true.`,
+		Example: `  wet slot warm --spare 4         # four unclaimed slots ready to claim
+  wet slot warm --all --spare 2   # start the claimed ones, then two spares`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if spare < 0 {
+				return fmt.Errorf("--spare must be 0 or more")
+			}
+			if spare > 0 {
+				if all {
+					if err := warmAllSlots(slotHeadless, reset); err != nil {
+						return err
+					}
+				}
+				return warmSpareSlots(spare)
+			}
 			if !all {
 				ctx, err := currentSlotContext(slotHeadless)
 				if err != nil {
@@ -171,6 +195,7 @@ before hooks.slot_start.`,
 	}
 	cmd.Flags().BoolVar(&all, "all", false, "warm every claimed worktree in this repo")
 	cmd.Flags().BoolVar(&reset, "reset", false, "run slot_reset before slot_start")
+	cmd.Flags().IntVar(&spare, "spare", 0, "keep this many unclaimed slots warm via hooks.slot_warm")
 	return cmd
 }
 

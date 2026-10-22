@@ -339,6 +339,9 @@ type HooksConfig struct {
 	SlotStop    []string `yaml:"slot_stop,omitempty"`
 	SlotRebuild []string `yaml:"slot_rebuild,omitempty"`
 	SlotDoctor  []string `yaml:"slot_doctor,omitempty"`
+	// SlotWarm boots an unclaimed slot's slot-stable resources. It runs from
+	// the main checkout, not a worktree; see warmSpareSlots.
+	SlotWarm []string `yaml:"slot_warm,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -949,6 +952,7 @@ func (c *WetConfig) Validate() error {
 		"slot_stop":    c.Hooks.SlotStop,
 		"slot_rebuild": c.Hooks.SlotRebuild,
 		"slot_doctor":  c.Hooks.SlotDoctor,
+		"slot_warm":    c.Hooks.SlotWarm,
 	}
 	for name, hooks := range hookSets {
 		for i, cmd := range hooks {
@@ -1187,6 +1191,7 @@ func allHookBodies(h HooksConfig) []string {
 	out = append(out, h.SlotStop...)
 	out = append(out, h.SlotRebuild...)
 	out = append(out, h.SlotDoctor...)
+	out = append(out, h.SlotWarm...)
 	return out
 }
 

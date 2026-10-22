@@ -626,6 +626,16 @@ hooks:
   slot_doctor:
     - docker compose ps
 
+  slot_warm:
+    # Boot an UNCLAIMED slot's slot-stable services, so the next checkout to
+    # claim it finds its DB already up. `wet slot warm --spare N` runs this
+    # once per spare slot it warms, from the main checkout, with that slot's
+    # env exported and $WET_ENV_FILE naming a rendered copy of the slot's
+    # .env.worktree. Read that file instead of ./.env.worktree, which is
+    # slot 0's. Start nothing that bind-mounts the checkout: it would mount
+    # main. Needs slot_pool: true.
+    - docker compose --env-file "$WET_ENV_FILE" up -d --wait db
+
   pre_remove:
     # Release-time teardown. Keep this small: with pooled slots, prefer
     # `slot_stop` for runtime shutdown and `slot_reset` before the next use.
