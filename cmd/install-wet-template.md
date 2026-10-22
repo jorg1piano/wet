@@ -688,10 +688,46 @@ never run against main. When writing a `.wet.yaml`, assume every `post_create`
 hook will also run in the main checkout, and keep anything irreversible out of
 it.
 
+Setup also runs `slot_reset` the first time a checkout claims a slot, so the
+bootstrap is `wet setup --headless && wet slot start --headless`. A separate
+`wet slot reset` repeats the whole reset.
+
+### Choosing the devices — `--devices` and `--device`
+
+Pick from the task what setup claims from the devices pool:
+
+```
+wet setup --devices 0                  # web, backend or docs work: no claim, no emulator boot
+wet setup                              # app work: one device, the primary
+wet setup --devices 3                  # several users on one stack: primary + two extras
+wet setup --device emulator:<AVD>      # the user named an emulator (repeat for extras)
+```
+
+A web-only worktree renders the pool's values empty (`FLUTTER_DEVICE_ID=`),
+`wet mobile reverse-tcp` succeeds with nothing to reverse, and `wet slot list`
+shows `devices=none`. A re-run without the flags keeps the last choice. When a
+web-only worktree turns out to need the app, `wet mobile add --headless` claims
+its primary; do not create a second worktree for that.
+
+### Freeing slots
+
+```
+wet slot list                 # this project's claims, with WARM per slot
+wet slot release --all        # drop every claim but main's; worktrees and branches stay
+wet slot global list          # wet slot list for every project on this machine
+wet slot global down          # in every project: release all but main's, docker stop
+                              # the other slots' containers, stop their emulators
+```
+
+`global down` keeps volumes and stopped containers, so the next `wet setup` on
+a slot finds its database. It runs no hooks. Run it only when the user asks:
+it stops stacks other panes may be using.
+
 ## Several devices on one worktree
 
-`wet setup` claims ONE device per pool — the primary, the one
-`{{.Handles.devices}}` and `$POOL_HANDLE_DEVICES` render. When a task needs two
+`wet setup` claims ONE device per pool by default — the primary, the one
+`{{.Handles.devices}}` and `$POOL_HANDLE_DEVICES` render. `--devices N` claims
+more at setup. When a task needs two
 phones on one backend (a chat between two accounts, a share flow, any flow
 where the second user is the point), claim another device for the SAME
 worktree:
@@ -943,7 +979,8 @@ Only boot components that exist in this project. Skip sections that don't apply.
 - Android: `wet mobile reverse-tcp` first — it reverses every port this worktree was allocated onto every device it claimed. Never hand-roll `adb reverse`: without `-s` it dies with "more than one device/emulator" the moment a second worktree has a device up.
 - Launch with `flutter run -d $FLUTTER_DEVICE_ID` in background (`run_in_background: true`).
 - Confirm the app is running on the device before proceeding to Step 3.
-- If the task needs a fixed number of devices on one stack (chat, share flow, four actors), run `wet mobile ensure --count N` and launch one `flutter run -d <handle>` per row from `wet mobile list`. Do NOT create extra worktrees for extra actors — that would create separate backends and databases, so the users could not see each other.
+- If the worktree was set up with `--devices 0` and the task now needs the app, run `wet mobile add --headless` first; it claims the primary.
+- If the task needs a fixed number of devices on one stack (chat, share flow, four actors), set up with `--devices N` or run `wet mobile ensure --count N` and launch one `flutter run -d <handle>` per row from `wet mobile list`. Do NOT create extra worktrees for extra actors — that would create separate backends and databases, so the users could not see each other.
 
 ## Step 3 — Discover and spawn teammates
 
