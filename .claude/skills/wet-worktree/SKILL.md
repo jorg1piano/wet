@@ -12,7 +12,8 @@ When the user asks to start a new worktree, assume the default is: **create a gi
 - Do not edit the main checkout for the requested feature/fix unless explicitly asked.
 - Use `wet worktree create <slug> --no-multiplexer --json` from the repo root.
 - Run `wet setup` in the new worktree; that claims the slot, ports, env files, and pools.
-- If slot lifecycle hooks exist, run `wet slot reset --headless` before `wet slot start --headless`.
+- If slot lifecycle hooks exist, run `wet slot start --headless` after setup. Setup already runs `slot_reset` on a newly claimed slot, so do not run `wet slot reset` as well.
+- Pick the devices from the task: `wet setup --devices 0` for web, backend or docs work (no emulator boots), `--devices N` for several users on one stack, `--device emulator:<AVD>` when the user names an emulator, and nothing for ordinary app work. A web-only worktree takes a device later with `wet mobile add --headless`. `<devices>` below stands for that choice.
 - If Herdr is available, open the worktree with `herdr worktree open` and start the agent there; do not continue the feature work inline in the main pane.
 - Do not run `wet setup`, `wet worktree setup`, `just setup`, or slot hooks in the orchestrator/main pane. Open the Herdr worktree workspace first; then bootstrap inside its pane.
 - Do not inspect implementation files, edit files, run tests, or otherwise do the user's feature work from the orchestrator/main pane. The orchestrator creates the worktree, opens the workspace, runs lifecycle commands in that pane, starts the agent in that pane, submits the prompt, and watches/reports.
@@ -39,12 +40,12 @@ When the user asks to start a new worktree, assume the default is: **create a gi
    herdr pane list --workspace "<workspace_id>"
    ```
 
-5. Run setup/reset/start in that pane so progress is visible there. This is mandatory; running setup inline from the main/orchestrator pane creates a claimed worktree without a nested Herdr workspace and hides long-running boot output from the user.
+5. Run setup and start in that pane so progress is visible there. This is mandatory; running setup inline from the main/orchestrator pane creates a claimed worktree without a nested Herdr workspace and hides long-running boot output from the user.
 
    Do not continue to implementation after bootstrap. Start the agent in this pane first; all code changes, screenshots, tests, and commits belong to that worktree agent, not the orchestrator.
 
    ```bash
-   herdr pane run "<pane_id>" 'wet setup --headless && wet slot reset --headless && wet slot start --headless'
+   herdr pane run "<pane_id>" 'wet setup --headless <devices> && wet slot start --headless'
    herdr pane wait-output "<pane_id>" --regex '(?i)slot .* start complete|worktree configured|hook failed|slot hook failed' --timeout 900000
    ```
 
@@ -77,8 +78,7 @@ Default completion policy: if the orchestrator watches the agent through complet
 If `herdr` is not on PATH, create/configure the worktree and then work from that path:
 
 ```bash
-cd "$WT" && wet setup --headless
-cd "$WT" && wet slot reset --headless
+cd "$WT" && wet setup --headless <devices>
 cd "$WT" && wet slot start --headless
 ```
 
@@ -97,7 +97,7 @@ hooks:
   slot_doctor:
 ```
 
-If absent, skip `wet slot reset/start` and rely on the repo’s existing `post_create` behavior.
+If absent, skip `wet slot start` and rely on the repo’s existing `post_create` behavior.
 
 ## Useful commands
 
@@ -113,7 +113,7 @@ If a slot is dirty or reset fails:
 cd "$WT" && wet slot rebuild --headless
 ```
 
-For multi-actor/device tasks, keep one worktree/backend/database and add devices to it. Do not create one worktree per actor. Use the deterministic WET command:
+For multi-actor/device tasks, keep one worktree/backend/database and add devices to it. Do not create one worktree per actor. Claim them at setup with `wet setup --headless --devices 4`, or add them to a worktree that already exists:
 
 ```bash
 cd "$WT" && wet mobile ensure --count 4 --headless
