@@ -256,7 +256,9 @@ func runSlotHooks(ctx *slotContext, hookBase string, hooks []string) error {
 		}
 		sort.Strings(names)
 		for _, n := range names {
-			fmt.Printf("  Pool %s: %s\n", n, pools[n])
+			if pools[n] != "" {
+				fmt.Printf("  Pool %s: %s\n", n, pools[n])
+			}
 		}
 	}
 	return nil
