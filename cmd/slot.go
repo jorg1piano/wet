@@ -40,6 +40,7 @@ func init() {
 	slotCmd.AddCommand(slotWarmCmd())
 	slotCmd.AddCommand(slotListCmd())
 	slotCmd.AddCommand(slotReleaseCmd())
+	slotCmd.AddCommand(slotGlobalCmd())
 	rootCmd.AddCommand(slotCmd)
 }
 

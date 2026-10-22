@@ -31,6 +31,7 @@ wet slot list                   # every claimed slot with its branch, ports and 
 wet slot warm --all --headless   # run slot_start for every configured checkout
 wet slot release <path>         # free the claim of a checkout removed without pop
 wet slot release --all          # free every slot but main's, keep worktrees and branches
+wet slot global list            # wet slot list for every project on this machine
 wet port-cluster next           # claim a free port band for this clone
 wet machine list                # every wet project on this machine, its ports and slots
 wet pr create                   # push branch + open a GitHub PR (via gh)
@@ -1375,6 +1376,9 @@ succeeds, so a setup that fails partway resets on its re-run, and
 `wet slot list` shows it. A re-run of setup in a checkout that already reset
 keeps its data. `--no-reset` skips the reset and leaves it pending for
 `wet slot reset`.
+
+`wet slot global list` prints `wet slot list` for every project in
+`wet machine list`, one section each, from any directory.
 
 ## Pull requests
 
