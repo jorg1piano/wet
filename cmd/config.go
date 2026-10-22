@@ -1743,6 +1743,26 @@ func BuildTemplateData(cfg *WetConfig, branch string, slot int, ports []Resolved
 	if pools == nil {
 		pools = map[string]string{}
 	}
+	// A declared pool this checkout holds nothing from (a web-only worktree,
+	// set up with --devices 0) renders as empty rather than failing every
+	// `{{.Handles.devices}}` with a missing key. An undeclared pool still fails.
+	if cfg != nil {
+		for name := range cfg.Pools {
+			if _, ok := pools[name]; !ok {
+				filled := make(map[string]string, len(cfg.Pools))
+				for k, v := range pools {
+					filled[k] = v
+				}
+				for n := range cfg.Pools {
+					if _, ok := filled[n]; !ok {
+						filled[n] = ""
+					}
+				}
+				pools = filled
+				break
+			}
+		}
+	}
 	data["Pools"] = pools
 	// Default handles to the items, so a config that never touches emulators
 	// (and every code path that doesn't resolve them) still renders.
@@ -1758,6 +1778,11 @@ func BuildTemplateData(cfg *WetConfig, branch string, slot int, ports []Resolved
 	allPools := make(map[string][]string, len(pools))
 	allHandles := make(map[string][]string, len(pools))
 	for k, v := range pools {
+		if v == "" {
+			allPools[k] = []string{}
+			allHandles[k] = []string{}
+			continue
+		}
 		allPools[k] = []string{v}
 		allHandles[k] = []string{v}
 	}
@@ -1871,9 +1896,12 @@ func AllocatePools(cfg *WetConfig, existing []WorktreeState, repoRoot string) (m
 
 // poolTarget is who an allocation is for: the project's main checkout and the
 // slot. A machine-scoped pool uses it to hand a slot back the emulator it had.
+// Skip names pools the caller fills itself or leaves empty, as
+// `wet setup --devices 0` and `--device ITEM` do; nothing is picked from them.
 type poolTarget struct {
 	Project string
 	Slot    int
+	Skip    map[string]bool
 }
 
 // AllocatePoolsKeeping is AllocatePools for a worktree that already holds
@@ -1895,6 +1923,9 @@ func AllocatePoolsKeeping(cfg *WetConfig, existing []WorktreeState, keep map[str
 	}
 	sort.Strings(poolNames)
 	for _, name := range poolNames {
+		if target.Skip[name] {
+			continue
+		}
 		if kept := keep[name]; kept != "" && slices.Contains(cfg.Pools[name], kept) {
 			out[name] = kept
 			continue

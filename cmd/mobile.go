@@ -94,6 +94,12 @@ func runMobileReverseTCP(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	if len(targets) == 0 && len(mobileReverseDevices) == 0 && worktreeIsWebOnly(treePath) {
+		// Set up with --devices 0: having nothing to reverse onto is the
+		// plan, and a slot_reset hook that reverses must not fail on it.
+		fmt.Println("  this worktree has no device (set up with --devices 0); nothing to reverse")
+		return nil
+	}
 	if len(targets) == 0 {
 		if mobileReverseDryRun {
 			fmt.Println("  no device claimed by this worktree; a real run would need --device <serial>")
@@ -402,4 +408,18 @@ func describeClaims(pools map[string]string, extras map[string][]string) string 
 		parts = append(parts, fmt.Sprintf("%s=%s", c.Pool, c.Item))
 	}
 	return strings.Join(parts, ", ")
+}
+
+// worktreeIsWebOnly reports whether the checkout at treePath opted out of a
+// pool with `wet setup --devices 0` and holds no device from any pool.
+func worktreeIsWebOnly(treePath string) bool {
+	state, err := loadConfig()
+	if err != nil {
+		return false
+	}
+	own := worktreeStateForPath(state, treePath)
+	if own == nil || len(own.NoPools) == 0 {
+		return false
+	}
+	return len(own.poolClaimsAll()) == 0
 }

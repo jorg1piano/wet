@@ -32,6 +32,15 @@ type WorktreeState struct {
 	// data until then. Setup runs the reset and clears the mark; a setup that
 	// fails first leaves it, so the re-run resets too.
 	PendingReset bool `json:"pending_reset,omitempty"`
+	// NoPools names the pools this checkout opted out of with
+	// `wet setup --devices 0`: a web-only worktree holds no device. A plain
+	// re-run of setup keeps it that way, until --devices or `wet mobile add`
+	// asks for one.
+	NoPools []string `json:"no_pools,omitempty"`
+	// PinnedPools names the pools whose primary was chosen with
+	// `wet setup --device ITEM`. A re-run keeps that pick even when ITEM is
+	// not an item of the pool, which an allocated primary would lose.
+	PinnedPools []string `json:"pinned_pools,omitempty"`
 }
 
 // poolClaims lists every item this worktree holds from pool, primary first.

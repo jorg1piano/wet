@@ -9,6 +9,9 @@ Core commands:
 
 ```
 wet setup                       # configure this checkout — main repo OR worktree
+wet setup --devices 0           # same, web only: claim and boot no emulator
+wet setup --devices 3           # claim three devices, the primary and two extras
+wet setup --device emulator:wet-app-2   # pick the primary yourself (repeat for extras)
 wet worktree create [branch]    # minimal: `git worktree add` + open tmux window
 wet worktree mount <branch>     # same, for a branch that already exists (local or on origin)
 wet worktree setup              # worktree-only form of `wet setup`
@@ -1133,6 +1136,37 @@ opt-in because it costs whatever the emulator was holding.
 The device named has to be one this worktree claims. Opening any other AVD
 would put another worktree's device on screen, and print a serial this one must
 not run against.
+
+## Choosing a worktree's devices — `wet setup --devices`
+
+Setup claims one device from the devices pool by default and boots it. Not
+every task wants that, so setup takes the choice per worktree:
+
+```
+wet setup --devices 0                          # web only: no claim, no boot
+wet setup --devices 2                          # the primary and one extra
+wet setup --device emulator:wet-app-3          # this AVD as the primary
+wet setup --device emulator:a --device emulator:b   # these two, a first
+```
+
+`--devices 0` claims nothing from the devices pool and boots nothing. The
+pool's template values render empty (`{{.Handles.devices}}` is `""`), and
+`wet mobile reverse-tcp` reports there is nothing to reverse and succeeds, so a
+`slot_reset` hook that reverses does not fail. `wet slot list` shows the
+worktree as `devices=none`. Re-running setup on a checkout that holds devices
+with `--devices 0` releases them; the emulators stay up for the next claim.
+
+`--devices N` holds N devices, primary included, drawing extras the way
+`wet mobile ensure` does. Asking for fewer than the worktree holds releases
+nothing; `wet mobile remove` does that.
+
+`--device ITEM` names a device: a pool item, any `emulator:<AVD>` or an
+attached adb serial nobody else holds. The first is the primary and the rest
+are extras. The primary is pinned, so a re-run keeps it even when it is not an
+item of the pool.
+
+A re-run without these flags keeps the last choice: a web-only worktree stays
+web only and a pinned primary stays pinned.
 
 ## Several devices on one worktree
 

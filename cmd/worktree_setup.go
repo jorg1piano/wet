@@ -36,6 +36,7 @@ const noResetUsage = "Leave a newly claimed slot as the last checkout left it; r
 func init() {
 	worktreeSetupCmd.Flags().BoolVar(&setupNoReset, "no-reset", false, noResetUsage)
 	worktreeSetupCmd.Flags().Bool("headless", false, "Run emulators without a visible window (feeds into pool grow strategies)")
+	addDeviceFlags(worktreeSetupCmd)
 	worktreeCmd.AddCommand(worktreeSetupCmd)
 }
 
@@ -71,6 +72,7 @@ func runWorktreeSetup(cmd *cobra.Command, args []string) error {
 	}
 
 	headless, _ := cmd.Flags().GetBool("headless")
+	readDeviceFlags(cmd)
 	return runWorktreeSetupCore(repoRoot, worktreePath, branchName, headless)
 }
 
@@ -160,6 +162,19 @@ func runSetupCore(repoRoot, worktreePath, branchName string, headless, isMain bo
 	// agrees on.
 	localRoot := LocalConfigDir(worktreePath, repoRoot)
 
+	if err := setupDevices.validate(); err != nil {
+		return err
+	}
+	// A named device that is not an emulator must be one adb can see; ask
+	// once, before the lock.
+	var attached map[string]bool
+	if setupDevices.needsAttached() {
+		var err error
+		if attached, err = attachedSet(); err != nil {
+			return err
+		}
+	}
+
 	// Claim slot, ports and pool items under the state lock, and record the
 	// claim BEFORE the hooks run.
 	//
@@ -179,6 +194,7 @@ func runSetupCore(repoRoot, worktreePath, branchName string, headless, isMain bo
 	var copiedFiles []string
 	var copySkipped string
 	var pendingReset bool
+	var noPools, pinnedPools []string
 	if err := withStateLock(func() error {
 		state, err := loadConfig()
 		if err != nil {
@@ -277,11 +293,31 @@ func runSetupCore(repoRoot, worktreePath, branchName string, headless, isMain bo
 					WorktreeState{Branch: branchName, PoolExtras: extras})
 			}
 		}
-		allocated, err := AllocatePoolsKeeping(cfg, claimants, keep, localRoot, poolTarget{Project: repoRoot, Slot: slot})
+		// --devices and --device decide the device pool; a re-run without
+		// them keeps what the last one chose.
+		var prev *WorktreeState
+		if existingIdx >= 0 {
+			p := state.Worktrees[existingIdx]
+			prev = &p
+		}
+		choice, err := resolveDeviceChoice(cfg, prev, setupDevices)
+		if err != nil {
+			return err
+		}
+		allocated, err := AllocatePoolsKeeping(cfg, claimants, keep, localRoot,
+			poolTarget{Project: repoRoot, Slot: slot, Skip: choice.skip()})
 		if err != nil {
 			return err
 		}
 		pools = allocated
+		if extras == nil {
+			extras = map[string][]string{}
+		}
+		noPools, pinnedPools, err = applyDeviceChoice(cfg, choice, pools, extras, others, worktreePath,
+			setupDevices.Items, attached, localRoot, poolTarget{Project: repoRoot, Slot: slot})
+		if err != nil {
+			return err
+		}
 
 		// In the main repo there is nowhere to copy from — source and
 		// destination are the same tree. This is a fast path, not the guard:
@@ -319,6 +355,8 @@ func runSetupCore(repoRoot, worktreePath, branchName string, headless, isMain bo
 		if len(extras) > 0 {
 			entry.PoolExtras = extras
 		}
+		entry.NoPools = noPools
+		entry.PinnedPools = pinnedPools
 		if existingIdx >= 0 {
 			state.Worktrees[existingIdx] = entry
 		} else {
@@ -364,9 +402,12 @@ func runSetupCore(repoRoot, worktreePath, branchName string, headless, isMain bo
 		for _, n := range names {
 			fmt.Printf("  Allocated: pool %s = %s\n", n, pools[n])
 			if more := extras[n]; len(more) > 0 {
-				fmt.Printf("  Kept:      pool %s extras %s (from `wet mobile add`)\n", n, strings.Join(more, ", "))
+				fmt.Printf("  Extras:    pool %s += %s\n", n, strings.Join(more, ", "))
 			}
 		}
+	}
+	for _, n := range noPools {
+		fmt.Printf("  Skipped:   pool %s (web only; `wet setup --devices 1` or `wet mobile add` claims one)\n", n)
 	}
 
 	local, err := LoadEnvLocalForTree(worktreePath, repoRoot)
@@ -510,6 +551,7 @@ never run against the main checkout.`,
 func init() {
 	setupCmd.Flags().BoolVar(&setupNoReset, "no-reset", false, noResetUsage)
 	setupCmd.Flags().Bool("headless", false, "Run emulators without a visible window (feeds into pool grow strategies)")
+	addDeviceFlags(setupCmd)
 	rootCmd.AddCommand(setupCmd)
 }
 
@@ -536,6 +578,7 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	}
 
 	headless, _ := cmd.Flags().GetBool("headless")
+	readDeviceFlags(cmd)
 	return runSetupCore(repoRoot, treePath, branchName, headless, isMain)
 }
 

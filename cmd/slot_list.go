@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -187,6 +188,12 @@ func formatSlotPools(wt WorktreeState) string {
 			names = append(names, n)
 		}
 	}
+	for _, n := range wt.NoPools {
+		if !seen[n] {
+			seen[n] = true
+			names = append(names, n)
+		}
+	}
 	if len(names) == 0 {
 		return "-"
 	}
@@ -195,6 +202,8 @@ func formatSlotPools(wt WorktreeState) string {
 	for _, n := range names {
 		if claims := wt.poolClaims(n); len(claims) > 0 {
 			parts = append(parts, n+"="+strings.Join(claims, ","))
+		} else if slices.Contains(wt.NoPools, n) {
+			parts = append(parts, n+"=none")
 		}
 	}
 	if len(parts) == 0 {
