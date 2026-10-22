@@ -45,7 +45,9 @@ worktree holds, or a grown one when pool_grow: has a strategy. A named ITEM
 must be a declared pool item, an ` + "`emulator:<AVD>`" + `, or a device adb can see,
 and must not be claimed by any worktree.
 
-The device joins this worktree's claims: ` + "`wet mobile reverse-tcp`" + ` reverses
+On a worktree set up with ` + "`wet setup --devices 0`" + `, the first device becomes
+the primary, as if setup had claimed it. Otherwise it joins this worktree's
+claims as an extra: ` + "`wet mobile reverse-tcp`" + ` reverses
 onto it, ` + "`wet setup`" + ` boots it again on a re-run, and ` + "`wet worktree pop`" + ` releases
 it. Hooks and templates see every claim, primary first, as
 $POOL_DEVICES_ALL / $POOL_HANDLE_DEVICES_ALL and {{.AllPools.devices}} /
@@ -281,6 +283,7 @@ func runMobileAdd(cmd *cobra.Command, args []string) error {
 
 	var item string
 	var branch string
+	var primary bool
 	if err := withStateLock(func() error {
 		state, err := loadConfig()
 		if err != nil {
@@ -306,15 +309,16 @@ func runMobileAdd(cmd *cobra.Command, args []string) error {
 			}
 			item = picked
 		}
-		if own.PoolExtras == nil {
-			own.PoolExtras = map[string][]string{}
-		}
-		own.PoolExtras[pool] = append(own.PoolExtras[pool], item)
+		primary = own.claimDevice(pool, item)
 		return saveConfig(state)
 	}); err != nil {
 		return err
 	}
-	fmt.Printf("  Claimed: pool %s += %s (for %s)\n", pool, item, branch)
+	if primary {
+		fmt.Printf("  Claimed: pool %s = %s, the primary (for %s)\n", pool, item, branch)
+	} else {
+		fmt.Printf("  Claimed: pool %s += %s (for %s)\n", pool, item, branch)
+	}
 
 	// The claim is recorded before the boot, as setup records before hooks:
 	// a boot that fails leaves a claim `wet mobile remove` can release, not
@@ -389,15 +393,12 @@ func runMobileEnsure(cmd *cobra.Command, args []string) error {
 		}
 		branch = own.Branch
 		current := len(own.poolClaims(pool))
-		if own.PoolExtras == nil {
-			own.PoolExtras = map[string][]string{}
-		}
 		for current < mobileEnsureCount {
 			item, err := allocatePoolItem(cfg, pool, state.Worktrees, localRoot, poolTarget{Project: repoRoot, Slot: own.Index})
 			if err != nil {
 				return err
 			}
-			own.PoolExtras[pool] = append(own.PoolExtras[pool], item)
+			own.claimDevice(pool, item)
 			added = append(added, item)
 			current++
 		}
@@ -735,4 +736,26 @@ func outputCountSuffix(cfg *WetConfig) string {
 	default:
 		return fmt.Sprintf(" and %d outputs", n)
 	}
+}
+
+// claimDevice records item as one of this worktree's devices from pool: the
+// primary when it holds none (a web-only worktree taking its first device),
+// an extra otherwise. It reports whether item became the primary.
+func (ws *WorktreeState) claimDevice(pool, item string) bool {
+	ws.NoPools = slices.DeleteFunc(ws.NoPools, func(p string) bool { return p == pool })
+	if len(ws.NoPools) == 0 {
+		ws.NoPools = nil
+	}
+	if ws.Pools[pool] == "" {
+		if ws.Pools == nil {
+			ws.Pools = map[string]string{}
+		}
+		ws.Pools[pool] = item
+		return true
+	}
+	if ws.PoolExtras == nil {
+		ws.PoolExtras = map[string][]string{}
+	}
+	ws.PoolExtras[pool] = append(ws.PoolExtras[pool], item)
+	return false
 }

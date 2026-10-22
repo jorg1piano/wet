@@ -149,6 +149,22 @@ func TestDeviceRequestValidate(t *testing.T) {
 	}
 }
 
+func TestClaimDeviceMakesTheFirstDeviceThePrimary(t *testing.T) {
+	ws := &WorktreeState{NoPools: []string{"devices"}}
+	if !ws.claimDevice("devices", "emulator:a") {
+		t.Fatal("the first device of a web-only worktree must become its primary")
+	}
+	if ws.Pools["devices"] != "emulator:a" || ws.NoPools != nil {
+		t.Fatalf("after claim = %+v", ws)
+	}
+	if ws.claimDevice("devices", "emulator:b") {
+		t.Fatal("the second device is an extra")
+	}
+	if !reflect.DeepEqual(ws.PoolExtras["devices"], []string{"emulator:b"}) {
+		t.Fatalf("extras = %v", ws.PoolExtras)
+	}
+}
+
 func TestBuildTemplateDataRendersAnUnclaimedDeclaredPoolEmpty(t *testing.T) {
 	cfg := &WetConfig{ProjectName: "app", Pools: map[string][]string{"devices": {"phone-a"}}}
 	data := BuildTemplateData(cfg, "feature", 1, nil, nil)

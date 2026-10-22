@@ -1166,7 +1166,9 @@ are extras. The primary is pinned, so a re-run keeps it even when it is not an
 item of the pool.
 
 A re-run without these flags keeps the last choice: a web-only worktree stays
-web only and a pinned primary stays pinned.
+web only and a pinned primary stays pinned. `wet mobile add` on a web-only
+worktree claims its primary, so it can start on the web and pick up a phone
+later without being popped.
 
 ## Several devices on one worktree
 
